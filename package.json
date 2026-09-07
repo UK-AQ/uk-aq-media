@@ -1,0 +1,27 @@
+{
+  "name": "uk-aq-media",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "types": "node scripts/worker-tools.mjs types",
+    "build": "node scripts/worker-tools.mjs build",
+    "seed:check": "tsx scripts/source-seed.ts --check",
+    "seed:generate": "tsx scripts/source-seed.ts",
+    "check": "npm run seed:check && npm run typecheck && npm run build"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260907.1",
+    "@types/node": "^26.5.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.129.1"
+  }
+}

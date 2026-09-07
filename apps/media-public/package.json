@@ -1,0 +1,9 @@
+{
+  "name": "@uk-aq-media/media-public",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@uk-aq-media/core": "*"
+  }
+}

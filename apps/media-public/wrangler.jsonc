@@ -1,0 +1,24 @@
+// Configuration only: replace the all-zero D1 ID after manual resource creation.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "uk-aq-media-public",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "d1_databases": [
+    {
+      "binding": "MEDIA_DB",
+      "database_name": "uk-aq-media",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../migrations"
+    }
+  ]
+}

@@ -1,0 +1,174 @@
+[
+  {
+    "source_key": "air-quality-news",
+    "name": "Air Quality News",
+    "canonical_domain": "airqualitynews.com",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "auto_approve",
+    "review_level": "standard",
+    "priority": 100,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "url": "https://airqualitynews.com/feed/",
+      "max_items": 20,
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview"
+  },
+  {
+    "source_key": "bbc-news",
+    "name": "BBC News",
+    "canonical_domain": "bbc.co.uk",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "the-guardian",
+    "name": "The Guardian",
+    "canonical_domain": "theguardian.com",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "sky-news",
+    "name": "Sky News",
+    "canonical_domain": "news.sky.com",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "the-independent",
+    "name": "The Independent",
+    "canonical_domain": "independent.co.uk",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "defra-uk-air",
+    "name": "Defra / UK-AIR",
+    "canonical_domain": "uk-air.defra.gov.uk",
+    "source_type": "government",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "the-times",
+    "name": "The Times",
+    "canonical_domain": "thetimes.com",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "enhanced",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "the-telegraph",
+    "name": "The Telegraph",
+    "canonical_domain": "telegraph.co.uk",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "enhanced",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "daily-mail",
+    "name": "Daily Mail",
+    "canonical_domain": "dailymail.co.uk",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "enhanced",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  },
+  {
+    "source_key": "the-sun",
+    "name": "The Sun",
+    "canonical_domain": "thesun.co.uk",
+    "source_type": "publisher",
+    "enabled": false,
+    "publication_policy": "manual",
+    "review_level": "enhanced",
+    "priority": 50,
+    "discovery_method": "deferred",
+    "discovery_config": {
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "blocked"
+  }
+]

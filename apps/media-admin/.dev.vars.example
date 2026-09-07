@@ -1,0 +1,4 @@
+# Copy to .dev.vars and supply a local-only random credential. Never commit .dev.vars.
+MEDIA_ADMIN_TOKEN=
+# Reserved for future read-only /sync routes; cannot authenticate /admin routes.
+MEDIA_SYNC_TOKEN=
