@@ -103,10 +103,14 @@ scheduler job has not yet been configured or operationally proven. The existing
 `*/30 * * * *` Media Cron remains configured until the central path is proven; the
 normal standalone cadence remains two-hourly (`0 */2 * * *`) for a later change.
 
-`UK_AQ_MEDIA_WORKER_HTTP_SECRET` is a separately managed Worker secret. Install it
-on the deployed discovery Worker before deploying this receiver. Never put its
-value in source, Wrangler vars or GitHub Actions. Normal repository deployment
-preserves the installed runtime secret and must not overwrite or reset it.
+`UK_AQ_MEDIA_WORKER_HTTP_SECRET` remains a required Cloudflare Worker secret. Its
+value is stored as an encrypted GitHub Actions repository secret, never in source
+or Wrangler vars. The Media deployment workflow constructs an in-memory JSON
+payload and uses the standard UK AQ `wrangler secret bulk` pattern to apply only
+this secret to `uk-aq-media-discovery` immediately before deploying that Worker.
+Changing the GitHub Actions secret and running a normal Media deployment therefore
+restores or updates the discovery Worker secret. Other Worker secrets, especially
+`MEDIA_ADMIN_TOKEN`, retain their existing management path.
 
 ## Discovery and policy boundaries
 
