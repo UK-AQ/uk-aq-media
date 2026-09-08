@@ -17,13 +17,13 @@
     {
       "binding": "MEDIA_DB",
       "database_name": "uk-aq-media",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "75b39d56-a8e2-48dc-9208-7ac0d199219c",
       "migrations_dir": "../../migrations"
     }
   ],
   "triggers": {
     "crons": [
-      "0 */2 * * *"
+      "0 * * * *"
     ]
   },
   "queues": {

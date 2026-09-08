@@ -105,23 +105,23 @@ CREATE TRIGGER media_article_created AFTER INSERT ON media_articles BEGIN
   INSERT INTO media_article_events
     (article_id, event_key, event_type, actor_type, to_status, revision, created_at)
   VALUES (NEW.id, 'discovered:' || NEW.id,
-    CASE WHEN NEW.status = 'approved' THEN 'auto_approved' ELSE 'discovered' END,
+    (CASE WHEN NEW.status = 'approved' THEN 'auto_approved' ELSE 'discovered' END),
     'discovery', NEW.status, NEW.revision, NEW.created_at);
 END;
 CREATE TRIGGER media_article_transition_guard BEFORE UPDATE OF status ON media_articles
 WHEN OLD.status != NEW.status BEGIN
-  SELECT CASE WHEN NEW.mutation_key IS NULL OR NEW.revision != OLD.revision + 1
-    THEN RAISE(ABORT, 'transition_requires_key_and_revision') END;
+  SELECT (CASE WHEN NEW.mutation_key IS NULL OR NEW.revision != OLD.revision + 1
+    THEN RAISE(ABORT, 'transition_requires_key_and_revision') END);
 END;
 CREATE TRIGGER media_article_transition AFTER UPDATE OF status ON media_articles
 WHEN OLD.status != NEW.status BEGIN
   INSERT INTO media_article_events
     (article_id, event_key, event_type, actor_type, from_status, to_status, revision, created_at)
   VALUES (NEW.id, NEW.mutation_key,
-    CASE WHEN NEW.status = 'approved' AND OLD.status = 'hidden' THEN 'unhidden'
+    (CASE WHEN NEW.status = 'approved' AND OLD.status = 'hidden' THEN 'unhidden'
       WHEN NEW.status = 'approved' THEN 'approved'
       WHEN NEW.status = 'rejected' THEN 'rejected'
-      WHEN NEW.status = 'hidden' THEN 'hidden' ELSE 'edited' END,
+      WHEN NEW.status = 'hidden' THEN 'hidden' ELSE 'edited' END),
     'admin', OLD.status, NEW.status, NEW.revision, NEW.updated_at);
 END;
 CREATE TRIGGER media_events_no_update BEFORE UPDATE ON media_article_events BEGIN
