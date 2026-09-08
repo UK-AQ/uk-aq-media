@@ -19,36 +19,63 @@ export class ScanError extends Error {
   constructor(public readonly code: string) { super(code); }
 }
 
+type FeedFetchPhase = 'fetch_request' | 'feed_stream_read';
+
+function logUnexpectedFeedError(phase: FeedFetchPhase, error: unknown): void {
+  const errorName = error instanceof Error && error.name ? error.name : 'NonErrorThrown';
+  const errorMessage = error instanceof Error
+    ? error.message
+    : `Unexpected thrown value of type ${typeof error}`;
+  console.error(JSON.stringify({
+    event: 'aqn_feed_fetch_error',
+    phase,
+    error_name: errorName.slice(0, 100),
+    error_message: errorMessage.slice(0, 500),
+  }));
+}
+
 async function readFeed(): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    const response = await fetch(AQN_FEED, {
-      redirect: 'error', signal: controller.signal,
-      headers: { Accept: 'application/rss+xml, application/xml, text/xml',
-        'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)' },
-    });
-    if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      throw new ScanError(`feed_http_${response.status}`);
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
-    let bytes = 0;
-    let xml = '';
+    let response: Response;
     try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        bytes += value.byteLength;
-        if (bytes > MAX_FEED_BYTES) throw new ScanError('feed_too_large');
-        xml += decoder.decode(value, { stream: true });
+      response = await fetch(AQN_FEED, {
+        redirect: 'error', signal: controller.signal,
+        headers: { Accept: 'application/rss+xml, application/xml, text/xml',
+          'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)' },
+      });
+    } catch (error) {
+      if (controller.signal.aborted) throw new ScanError('feed_timeout');
+      logUnexpectedFeedError('fetch_request', error);
+      throw new ScanError('feed_fetch_failed');
+    }
+
+    try {
+      if (!response.ok || !response.body) {
+        await response.body?.cancel();
+        throw new ScanError(`feed_http_${response.status}`);
       }
-      return xml + decoder.decode();
-    } finally { await reader.cancel(); }
-  } catch (error) {
-    if (error instanceof ScanError) throw error;
-    throw new ScanError(controller.signal.aborted ? 'feed_timeout' : 'feed_fetch_failed');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+      let bytes = 0;
+      let xml = '';
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > MAX_FEED_BYTES) throw new ScanError('feed_too_large');
+          xml += decoder.decode(value, { stream: true });
+        }
+        return xml + decoder.decode();
+      } finally { await reader.cancel(); }
+    } catch (error) {
+      if (error instanceof ScanError) throw error;
+      if (controller.signal.aborted) throw new ScanError('feed_timeout');
+      logUnexpectedFeedError('feed_stream_read', error);
+      throw new ScanError('feed_fetch_failed');
+    }
   } finally { clearTimeout(timeout); }
 }
 
