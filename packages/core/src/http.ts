@@ -17,14 +17,18 @@ export function httpFailure(error: unknown): Response {
   console.error(JSON.stringify({ event: 'media_request_failed' }));
   return json({ error: 'temporarily_unavailable' }, 503);
 }
+export async function secretMatches(actual: string | null | undefined,
+  expected: string | null | undefined): Promise<boolean> {
+  if (!actual || !expected || actual.length > 4096) return false;
+  const encoder = new TextEncoder();
+  const [actualDigest, expectedDigest] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(actual)),
+    crypto.subtle.digest('SHA-256', encoder.encode(expected)),
+  ]);
+  return crypto.subtle.timingSafeEqual(actualDigest, expectedDigest);
+}
 export async function bearerMatches(request: Request, secret: string | undefined): Promise<boolean> {
-  if (!secret) return false;
   const header = request.headers.get('Authorization');
   if (!header || header.length > 4096 || !header.startsWith('Bearer ')) return false;
-  const encoder = new TextEncoder();
-  const [actual, expected] = await Promise.all([
-    crypto.subtle.digest('SHA-256', encoder.encode(header.slice(7))),
-    crypto.subtle.digest('SHA-256', encoder.encode(secret)),
-  ]);
-  return crypto.subtle.timingSafeEqual(actual, expected);
+  return secretMatches(header.slice(7), secret);
 }

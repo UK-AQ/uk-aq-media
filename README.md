@@ -1,8 +1,8 @@
 # UK AQ Media
 
-First standalone implementation: three Cloudflare Workers sharing authoritative D1
-state, with Queue-driven Air Quality News RSS discovery. Nothing is deployed or
-connected to the UK AQ website by this scaffold.
+Standalone implementation: three deployed Cloudflare Workers sharing authoritative
+D1 state, with Queue-driven Air Quality News RSS discovery. It is not connected to
+the public UK AQ website.
 
 The behavioural authority is the sibling
 [Media contract](../TEST-uk-aq-system-docs/system_docs/media/media_contract.md).
@@ -14,7 +14,7 @@ This README describes this implementation, not a replacement contract.
 | --- | --- |
 | `apps/media-public` | Approved public feed only; `MEDIA_DB` binding |
 | `apps/media-admin` | Bearer-authenticated editorial reads/transitions; `MEDIA_DB`, `MEDIA_ADMIN_TOKEN` |
-| `apps/media-discovery` | Two-hour cron producer and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, dormant `AI` binding |
+| `apps/media-discovery` | Authenticated scheduler receiver, temporary native Cron producer and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, dormant `AI` binding |
 | `packages/core` | Shared source/article/policy types, D1 source loading, canonical URL identity, HTTP helpers |
 | `packages/discovery` | Bounded AQN RSS adapter, source-run/article persistence, typed work messages |
 | `packages/enrichment` | Provider-neutral structured result, policy gate, local budget and disabled Workers AI skeleton |
@@ -84,11 +84,36 @@ A state change and append-only event commit atomically through SQL triggers.
 accepted by `/admin`; no sync endpoint or MySQL mirror is implemented in this phase.
 Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred.
 
+The discovery Worker exposes one authenticated backend scheduling route:
+
+- `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 1 }`
+  when one AQN scan is queued, or `queued: 0` when AQN is disabled or absent.
+- Authentication failure returns `401` before any D1 or Queue access. Other methods
+  on that path return `405` with `Allow: POST`; unknown paths return `404`.
+- Request data cannot select a source, choose a message type or inject arbitrary
+  Queue work. The body is ignored and the route only initiates the existing bounded
+  Queue-based scheduled-discovery path.
+- D1 or Queue failure records/logs `discovery_schedule_failed` and returns `503`
+  without exposing exception or secret details.
+
+`workers.dev` is enabled for `media-discovery` solely so the central scheduler in
+another Cloudflare account can reach this authenticated endpoint. The central
+scheduler job has not yet been configured or operationally proven. The existing
+`*/30 * * * *` Media Cron remains configured until the central path is proven; the
+normal standalone cadence remains two-hourly (`0 */2 * * *`) for a later change.
+
+`UK_AQ_MEDIA_WORKER_HTTP_SECRET` is a separately managed Worker secret. Install it
+on the deployed discovery Worker before deploying this receiver. Never put its
+value in source, Wrangler vars or GitHub Actions. Normal repository deployment
+preserves the installed runtime secret and must not overwrite or reset it.
+
 ## Discovery and policy boundaries
 
-The cron enqueues AQN `source_scan` work only when its D1 source is enabled. The
-consumer reloads and validates D1 policy; the adapter allowlist prevents unfinished
-publishers from running even if enabled. Work messages carry identities, never bodies.
+The native Cron and authenticated scheduling route share one helper that enqueues
+AQN `source_scan` work only when its D1 source is enabled. The consumer reloads and
+validates D1 policy; the adapter allowlist prevents unfinished publishers from
+running even if enabled. Work messages carry identities, never bodies.
 
 Each AQN scan fetches only `https://airqualitynews.com/feed/`, with no redirect
 following, a 20-second timeout, a 1 MiB limit and at most 20 recent entries. It

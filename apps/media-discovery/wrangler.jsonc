@@ -7,7 +7,7 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
   "observability": {
     "enabled": true,
@@ -46,6 +46,11 @@
   },
   "ai": {
     "binding": "AI"
+  },
+  "secrets": {
+    "required": [
+      "UK_AQ_MEDIA_WORKER_HTTP_SECRET"
+    ]
   },
   "vars": {
     "MEDIA_AI_MAX_CALLS_PER_RUN": 0,
