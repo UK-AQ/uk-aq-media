@@ -41,7 +41,7 @@ async function readFeed(): Promise<string> {
     let response: Response;
     try {
       response = await fetch(AQN_FEED, {
-        redirect: 'error', signal: controller.signal,
+        redirect: 'manual', signal: controller.signal,
         headers: { Accept: 'application/rss+xml, application/xml, text/xml',
           'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)' },
       });
