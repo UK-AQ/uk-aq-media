@@ -14,7 +14,7 @@
       "max_items": 20,
       "retain_excerpt": false
     },
-    "content_fetch_policy": "discovery_metadata_only",
+    "content_fetch_policy": "article_head_allowed",
     "ai_content_policy": "disabled",
     "image_policy": "remote_preview"
   },

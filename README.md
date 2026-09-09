@@ -39,10 +39,11 @@ Wrangler-generated output, dependencies, local databases and local credentials a
 ignored by Git. No functional test suite has been added.
 
 Seed SQL is `0002_launch_sources.sql`, generated with `npm run seed:generate`.
-It inserts missing source identities only; it never overwrites existing D1 policy
-settings. After first deployment, change operational policy through a later admin
-configuration route or a reviewed migration, rather than rerunning a seed expecting
-updates. Only AQN is initially enabled; the other nine adapters are deferred.
+It is an applied immutable baseline and inserts missing source identities only.
+Current source configuration may advance through reviewed later migrations; `0003`
+moves only AQN's original `discovery_metadata_only` state to
+`article_head_allowed`. Only AQN is initially enabled; the other nine adapters are
+deferred.
 
 ## HTTP surface
 
@@ -50,12 +51,15 @@ Public:
 
 - `GET /articles?limit=20` — default 20, maximum 50; newest first by publication
   time (discovery time when absent), then descending ID.
+- `GET /article-images/:id` — transiently cached publisher preview bytes for a
+  permitted approved article; 24-hour edge TTL and a 5 MiB upstream limit.
 - `next_before` is an opaque cursor. URL-encode it as the `before` parameter for
   the next page. No offset pagination or generic query language.
 
-The response includes original headline/link/publisher, available date/author,
-structured tags, optional UK AQ editorial fields with their human/AI origin, and a
-permitted remote preview URL. Descriptions/bodies and internal fields are absent.
+The response includes original headline/link/publisher, an optional publisher
+compact display title, available date/author, structured tags, optional UK AQ
+editorial fields with their human/AI origin, and a permitted UK AQ cached-preview
+URL. Descriptions/bodies and internal fields are absent.
 Only approved articles are selected. Successful responses allow five minutes of
 caching; errors use `no-store`. No cross-origin integration is configured yet.
 
@@ -125,12 +129,14 @@ consumer reloads and validates D1 policy; the adapter allowlist prevents unfinis
 publishers from running even if enabled. Work messages carry identities, never
 bodies.
 
-Each AQN scan fetches only `https://airqualitynews.com/feed/`, with no redirect
+Each AQN scan fetches `https://airqualitynews.com/feed/`, with no redirect
 following, a 20-second timeout, a 1 MiB limit and at most 20 recent entries. It
 rejects XML entity declarations, ignores feed descriptions and `content:encoded`,
-and stores metadata only. Feed-supplied image metadata is accepted only as HTTPS
-URLs on the AQN domain/subdomains; article pages and image bytes are never fetched.
-Images supplied only inside article content are deliberately unavailable.
+and stores metadata only. When a permitted preview remains missing, it may also
+fetch the canonical AQN article with redirects disabled, a 10-second timeout and a
+256 KiB limit, stopping and cancelling as soon as `</head>` is obtained. Only
+publisher social image/title metadata is extracted; article bodies and descriptions
+remain unavailable and image bytes are not fetched by discovery.
 
 Canonical identity removes fragments and known tracking parameters, normalises
 source/www aliases and AQN trailing slashes, preserves meaningful query parameters,

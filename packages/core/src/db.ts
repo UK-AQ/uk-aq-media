@@ -14,12 +14,17 @@ export interface DiscoveredArticle {
   published_at: string | null;
   categories: string[];
   preview_url: string | null;
+  display_title: string | null;
+  display_title_origin: 'publisher' | null;
+  preview_metadata_checked_at: string | null;
 }
 export interface PublicArticle {
   id: number;
   source_key: string;
   canonical_url: string;
   title: string;
+  display_title: string | null;
+  display_title_origin: 'publisher' | 'human' | 'ai' | null;
   publisher: string;
   author: string | null;
   published_at: string | null;
@@ -28,6 +33,7 @@ export interface PublicArticle {
   why_it_matters: string | null;
   featured: number;
   og_image_url: string | null;
+  preview_image_url: string | null;
   editorial_content_origin: string | null;
 }
 

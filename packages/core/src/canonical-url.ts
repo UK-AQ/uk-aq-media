@@ -1,5 +1,11 @@
 const trackingKeys = new Set(['fbclid', 'gclid', 'dclid', 'msclkid', 'mc_cid', 'mc_eid']);
 
+function isPublisherHostname(hostname: string, sourceDomain: string): boolean {
+  const domain = sourceDomain.toLowerCase().replace(/^www\./, '');
+  const candidate = hostname.toLowerCase().replace(/^www\./, '');
+  return candidate === domain || candidate.endsWith(`.${domain}`);
+}
+
 export function canonicalizeUrl(raw: string, sourceDomain: string): string {
   const url = new URL(raw);
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port) {
@@ -28,12 +34,15 @@ export async function canonicalUrlHash(url: string): Promise<string> {
   return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-export function remotePreviewUrl(raw: unknown, sourceDomain: string): string | null {
+export function publisherHttpsUrl(raw: unknown, sourceDomain: string): string | null {
   if (typeof raw !== 'string' || raw.length > 2048) return null;
   try {
     const url = new URL(raw);
-    const domain = sourceDomain.replace(/^www\./, '');
     return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
-      (url.hostname === domain || url.hostname.endsWith(`.${domain}`)) ? url.href : null;
+      isPublisherHostname(url.hostname, sourceDomain) ? url.href : null;
   } catch { return null; }
+}
+
+export function remotePreviewUrl(raw: unknown, sourceDomain: string): string | null {
+  return publisherHttpsUrl(raw, sourceDomain);
 }
