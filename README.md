@@ -14,7 +14,7 @@ This README describes this implementation, not a replacement contract.
 | --- | --- |
 | `apps/media-public` | Approved public feed only; `MEDIA_DB` binding |
 | `apps/media-admin` | Bearer-authenticated editorial reads/transitions; `MEDIA_DB`, `MEDIA_ADMIN_TOKEN` |
-| `apps/media-discovery` | Authenticated scheduler receiver, temporary native Cron producer and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, dormant `AI` binding |
+| `apps/media-discovery` | Authenticated scheduler receiver and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, dormant `AI` binding and dormant `scheduled()` fallback handler |
 | `packages/core` | Shared source/article/policy types, D1 source loading, canonical URL identity, HTTP helpers |
 | `packages/discovery` | Bounded AQN RSS adapter, source-run/article persistence, typed work messages |
 | `packages/enrichment` | Provider-neutral structured result, policy gate, local budget and disabled Workers AI skeleton |
@@ -98,10 +98,15 @@ The discovery Worker exposes one authenticated backend scheduling route:
   without exposing exception or secret details.
 
 `workers.dev` is enabled for `media-discovery` solely so the central scheduler in
-another Cloudflare account can reach this authenticated endpoint. The central
-scheduler job has not yet been configured or operationally proven. The existing
-`*/30 * * * *` Media Cron remains configured until the central path is proven; the
-normal standalone cadence remains two-hourly (`0 */2 * * *`) for a later change.
+another Cloudflare account can reach this authenticated endpoint. The TEST central
+scheduler path has been operationally proven through repeated real five-minute
+validation dispatches and now runs the Media job at the normal two-hour cadence
+`0 */2 * * *`.
+
+The previous native Media `*/30 * * * *` Cron trigger was removed from Cloudflare
+and from `apps/media-discovery/wrangler.jsonc`, so normal Media deployment will not
+recreate it. The `scheduled()` handler remains in code as a dormant fallback and
+shares the same bounded enqueue helper, but there is no active native Media Cron.
 
 `UK_AQ_MEDIA_WORKER_HTTP_SECRET` remains a required Cloudflare Worker secret. Its
 value is stored as an encrypted GitHub Actions repository secret, never in source
@@ -114,10 +119,11 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 
 ## Discovery and policy boundaries
 
-The native Cron and authenticated scheduling route share one helper that enqueues
-AQN `source_scan` work only when its D1 source is enabled. The consumer reloads and
-validates D1 policy; the adapter allowlist prevents unfinished publishers from
-running even if enabled. Work messages carry identities, never bodies.
+The authenticated scheduling route and dormant `scheduled()` fallback share one
+helper that enqueues AQN `source_scan` work only when its D1 source is enabled. The
+consumer reloads and validates D1 policy; the adapter allowlist prevents unfinished
+publishers from running even if enabled. Work messages carry identities, never
+bodies.
 
 Each AQN scan fetches only `https://airqualitynews.com/feed/`, with no redirect
 following, a 20-second timeout, a 1 MiB limit and at most 20 recent entries. It
