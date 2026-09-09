@@ -21,11 +21,6 @@
       "migrations_dir": "../../migrations"
     }
   ],
-  "triggers": {
-    "crons": [
-      "*/30 * * * *"
-    ]
-  },
   "queues": {
     "producers": [
       {
