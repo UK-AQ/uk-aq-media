@@ -1,6 +1,6 @@
 import {
   canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl,
-  type DiscoveredArticle, type Source,
+  type AuthorRule, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { parseRssItems, readRssFeed, ScanError } from './rss';
 
@@ -27,6 +27,18 @@ export const GUARDIAN_ROUTES = [
 ] as const;
 
 export type GuardianRouteKey = typeof GUARDIAN_ROUTES[number]['route_key'];
+export type GuardianRouteKind = typeof GUARDIAN_ROUTES[number]['kind'];
+
+export function guardianRouteKind(routeKey: GuardianRouteKey): GuardianRouteKind | null {
+  return GUARDIAN_ROUTES.find(route => route.route_key === routeKey)?.kind ?? null;
+}
+
+export function guardianProfileRule(rules: AuthorRule[], routeKey: GuardianRouteKey): AuthorRule | null {
+  if (guardianRouteKind(routeKey) !== 'author_profile') return null;
+  const expectedRoute = GUARDIAN_ROUTES.find(route => route.route_key === routeKey);
+  return rules.find(rule => rule.enabled && rule.source_key === 'the-guardian' &&
+    rule.profile_rss_route_key === routeKey && rule.profile_rss_url === expectedRoute?.url) ?? null;
+}
 
 export function guardianRouteRequiresRelevance(routeKey: GuardianRouteKey): boolean {
   // Profile routes bypass this requirement only while their configured rule is always_include.
@@ -58,6 +70,11 @@ export function configuredGuardianRouteKeys(source: Source): GuardianRouteKey[] 
   try {
     return GUARDIAN_ROUTES.map(route => configuredRoute(source, route.route_key).route_key);
   } catch { return []; }
+}
+
+export function scheduledGuardianRouteKeys(source: Source, rules: AuthorRule[]): GuardianRouteKey[] {
+  return configuredGuardianRouteKeys(source).filter(routeKey =>
+    guardianRouteKind(routeKey) !== 'author_profile' || guardianProfileRule(rules, routeKey) !== null);
 }
 
 export async function discoverGuardian(source: Source, routeKey: string): Promise<{

@@ -4,7 +4,8 @@ import {
 } from '@uk-aq-media/core';
 import { discoverAqn, discoverAqnPreviewMetadata } from './aqn';
 import {
-  configuredGuardianRouteKeys, discoverGuardian, guardianRouteRequiresRelevance, GUARDIAN_ROUTES,
+  configuredGuardianRouteKeys, discoverGuardian, guardianProfileRule, guardianRouteKind,
+  guardianRouteRequiresRelevance,
   type GuardianRouteKey,
 } from './guardian';
 import { mediaDeterministicRelevanceFilter } from './relevance';
@@ -20,7 +21,9 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
-export { configuredGuardianRouteKeys, GUARDIAN_ROUTES, parseGuardianFeed } from './guardian';
+export {
+  configuredGuardianRouteKeys, GUARDIAN_ROUTES, parseGuardianFeed, scheduledGuardianRouteKeys,
+} from './guardian';
 
 function exactAliasInByline(byline: string, alias: string): boolean {
   const normalise = (value: string): string => value.normalize('NFKC')
@@ -32,10 +35,8 @@ function exactAliasInByline(byline: string, alias: string): boolean {
 
 function guardianAuthorRules(rules: AuthorRule[], routeKey: GuardianRouteKey,
   byline: string | null): AuthorRule[] {
-  const expectedRoute = GUARDIAN_ROUTES.find(route => route.route_key === routeKey);
-  const profileRule = rules.find(rule => rule.profile_rss_route_key === routeKey &&
-    rule.profile_rss_url === expectedRoute?.url);
-  if (routeKey !== 'guardian-air-pollution' && !profileRule) {
+  const profileRule = guardianProfileRule(rules, routeKey);
+  if (guardianRouteKind(routeKey) === 'author_profile' && !profileRule) {
     throw new ScanError('guardian_profile_author_rule_missing');
   }
   const matches = new Map<string, AuthorRule>();
@@ -50,13 +51,27 @@ function guardianAuthorRules(rules: AuthorRule[], routeKey: GuardianRouteKey,
   return [...matches.values()].sort((left, right) => left.author_key.localeCompare(right.author_key));
 }
 
+export function evaluateGuardianArticle(rules: AuthorRule[], routeKey: GuardianRouteKey,
+  article: Pick<DiscoveredArticle, 'author' | 'title' | 'canonical_url' | 'categories'>): {
+    matchedRules: AuthorRule[];
+    accepted: boolean;
+  } {
+  const matchedRules = guardianAuthorRules(rules, routeKey, article.author);
+  const alwaysIncluded = matchedRules.some(rule => rule.inclusion_policy === 'always_include');
+  const accepted = !guardianRouteRequiresRelevance(routeKey) || alwaysIncluded ||
+    mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
+      canonical_url: article.canonical_url, categories: article.categories }).relevant;
+  return { matchedRules, accepted };
+}
+
 function publicationAuthorRule(rules: AuthorRule[]): AuthorRule | null {
   return rules.find(rule => rule.publication_policy === 'auto_approve') ??
     rules.find(rule => rule.publication_policy === 'pending') ?? null;
 }
 
 function persistArticle(db: D1Database, source: Source, article: DiscoveredArticle,
-  matchedRules: AuthorRule[], now: string): D1PreparedStatement {
+  matchedRules: AuthorRule[], approvalObservationKey: string | null,
+  now: string): D1PreparedStatement {
   const editorial = initialEditorialState(source, publicationAuthorRule(matchedRules));
   // Conflict updates preserve editorial decisions. Only Pending can be promoted by a later,
   // positively identified trusted-author observation; Rejected/Hidden always win.
@@ -64,8 +79,8 @@ function persistArticle(db: D1Database, source: Source, article: DiscoveredArtic
     original_url, title, publisher, author, published_at, discovered_at, last_seen_at,
     topics_json, status, review_level, approval_method, approval_author_rule_key,
     og_image_url, image_policy, display_title, display_title_origin, preview_metadata_checked_at,
-    approved_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    approved_at, mutation_key, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(canonical_url_hash) DO UPDATE SET
       last_seen_at = max(media_articles.last_seen_at, excluded.last_seen_at),
       updated_at = max(media_articles.updated_at, excluded.updated_at),
@@ -96,18 +111,20 @@ function persistArticle(db: D1Database, source: Source, article: DiscoveredArtic
         ELSE media_articles.revision END,
       mutation_key = CASE WHEN media_articles.status = 'pending'
         AND excluded.approval_method = 'trusted_author_auto'
-        THEN 'author-auto:' || media_articles.id || ':' || excluded.approval_author_rule_key
+        THEN excluded.mutation_key
         ELSE media_articles.mutation_key END
     RETURNING id, revision`).bind(source.source_key, article.canonical_url,
       article.canonical_url_hash, article.original_url, article.title, source.name, article.author,
       article.published_at, now, now, JSON.stringify(article.categories), editorial.status,
       source.review_level, editorial.approval_method, editorial.approval_author_rule_key,
       article.preview_url, source.image_policy, article.display_title, article.display_title_origin,
-      article.preview_metadata_checked_at, editorial.status === 'approved' ? now : null, now, now);
+      article.preview_metadata_checked_at, editorial.status === 'approved' ? now : null,
+      approvalObservationKey, now, now);
 }
 
 function persistDiscoveryEvidence(db: D1Database, source: Source, routeKey: string,
-  article: DiscoveredArticle, matchedRules: AuthorRule[], now: string): D1PreparedStatement {
+  article: DiscoveredArticle, matchedRules: AuthorRule[], approvalObservationKey: string | null,
+  now: string): D1PreparedStatement {
   const ruleKeys = matchedRules.map(rule => rule.author_key);
   const selectedAutoRule = matchedRules.find(rule => rule.publication_policy === 'auto_approve') ?? null;
   return db.prepare(`INSERT INTO media_article_discovery_evidence
@@ -116,10 +133,10 @@ function persistDiscoveryEvidence(db: D1Database, source: Source, routeKey: stri
       observation_count)
     VALUES ((SELECT id FROM media_articles WHERE canonical_url_hash = ?), ?, 'publisher_rss', ?, ?, ?,
       CASE WHEN ? IS NOT NULL AND EXISTS (
-        SELECT 1 FROM media_article_events
-        WHERE article_id = (SELECT id FROM media_articles WHERE canonical_url_hash = ?)
-          AND event_type = 'auto_approved'
-          AND json_extract(metadata_json, '$.author_rule_key') = ?
+        SELECT 1 FROM media_articles
+        WHERE canonical_url_hash = ? AND mutation_key = ?
+          AND approval_method = 'trusted_author_auto'
+          AND approval_author_rule_key = ?
       ) THEN 1 ELSE 0 END, ?, ?, 1)
     ON CONFLICT(article_id, provider_key, route_key) DO UPDATE SET
       matched_author_keys_json = (
@@ -139,7 +156,7 @@ function persistDiscoveryEvidence(db: D1Database, source: Source, routeKey: stri
       observation_count = media_article_discovery_evidence.observation_count + 1`)
     .bind(article.canonical_url_hash, source.source_key, routeKey, JSON.stringify(ruleKeys),
       Number(matchedRules.some(rule => rule.inclusion_policy === 'always_include')),
-      selectedAutoRule?.author_key ?? null, article.canonical_url_hash,
+      approvalObservationKey, article.canonical_url_hash, approvalObservationKey,
       selectedAutoRule?.author_key ?? null, now, now);
 }
 
@@ -204,6 +221,12 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     } else if (sourceKey === 'the-guardian' && routeKey &&
         configuredGuardianRouteKeys(source).includes(routeKey as GuardianRouteKey)) {
       rules = await loadAuthorRules(db, sourceKey);
+      if (guardianRouteKind(routeKey as GuardianRouteKey) === 'author_profile' &&
+          !guardianProfileRule(rules, routeKey as GuardianRouteKey)) {
+        await finishRun(db, runId, 'skipped', 0, 0, 0,
+          'guardian_profile_author_rule_disabled_or_missing');
+        return;
+      }
       result = await discoverGuardian(source, routeKey);
     } else {
       await finishRun(db, runId, 'skipped', 0, 0, 0, 'unsupported_adapter_or_route');
@@ -220,25 +243,28 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     // AQN remains at <=20 items. Guardian is <=10 items per route, so its extra route-evidence
     // statement still keeps every Queue invocation comfortably bounded.
     for (const article of unique.values()) {
-      const matchedRules = sourceKey === 'the-guardian' && routeKey
-        ? guardianAuthorRules(rules, routeKey as GuardianRouteKey, article.author) : [];
-      const alwaysIncluded = matchedRules.some(rule => rule.inclusion_policy === 'always_include');
-      if (sourceKey === 'the-guardian' && routeKey &&
-          guardianRouteRequiresRelevance(routeKey as GuardianRouteKey) && !alwaysIncluded &&
-          !mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
-            canonical_url: article.canonical_url, categories: article.categories }).relevant) {
+      const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
+        ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
+      const matchedRules = guardianEvaluation?.matchedRules ?? [];
+      if (guardianEvaluation && !guardianEvaluation.accepted) {
         filtered++;
         continue;
       }
+      const publicationRule = publicationAuthorRule(matchedRules);
+      const selectedAutoRule = publicationRule?.publication_policy === 'auto_approve'
+        ? publicationRule : null;
+      const approvalObservationKey = selectedAutoRule
+        ? `author-auto:${runId}:${article.canonical_url_hash}` : null;
       statements.push(db.prepare(`UPDATE media_discovery_runs SET
         items_inserted = items_inserted + CASE WHEN EXISTS
           (SELECT 1 FROM media_articles WHERE canonical_url_hash = ?) THEN 0 ELSE 1 END,
         items_updated = items_updated + CASE WHEN EXISTS
           (SELECT 1 FROM media_articles WHERE canonical_url_hash = ?) THEN 1 ELSE 0 END
         WHERE id = ?`).bind(article.canonical_url_hash, article.canonical_url_hash, runId));
-      statements.push(persistArticle(db, source, article, matchedRules, now));
+      statements.push(persistArticle(db, source, article, matchedRules, approvalObservationKey, now));
       if (sourceKey === 'the-guardian' && routeKey) {
-        statements.push(persistDiscoveryEvidence(db, source, routeKey, article, matchedRules, now));
+        statements.push(persistDiscoveryEvidence(db, source, routeKey, article, matchedRules,
+          approvalObservationKey, now));
       }
     }
     statements.push(db.prepare(`UPDATE media_discovery_runs SET status = 'succeeded',

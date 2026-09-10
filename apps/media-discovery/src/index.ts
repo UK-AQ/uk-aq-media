@@ -1,8 +1,8 @@
 import {
-  configuredGuardianRouteKeys, DiscoveryMessageSchema, recordQueueFailure, runSourceScan,
+  DiscoveryMessageSchema, recordQueueFailure, runSourceScan, scheduledGuardianRouteKeys,
   type DiscoveryMessage,
 } from '@uk-aq-media/discovery';
-import { json, loadSource, secretMatches } from '@uk-aq-media/core';
+import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
 
 async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number> {
   try {
@@ -15,7 +15,8 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
     const messages: DiscoveryMessage[] = [];
     if (aqn?.enabled) messages.push({ type: 'source_scan', source_key: 'air-quality-news' });
     if (guardian?.enabled) {
-      for (const routeKey of configuredGuardianRouteKeys(guardian)) {
+      const rules = await loadAuthorRules(env.MEDIA_DB, 'the-guardian');
+      for (const routeKey of scheduledGuardianRouteKeys(guardian, rules)) {
         messages.push({ type: 'source_scan', source_key: 'the-guardian', route_key: routeKey });
       }
     }

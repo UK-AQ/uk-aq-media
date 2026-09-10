@@ -93,7 +93,9 @@ The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
   `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 12 }`
-  in the current target state: one AQN scan plus eleven Guardian route scans. The
+  when all three Guardian author rules are enabled: one AQN scan plus eleven Guardian
+  route scans. Disabled or structurally mismatched author rules omit only their profile
+  route, so `queued` reports the actual bounded message count. The
   count reflects only enabled, internally configured supported work and may be zero.
 - Authentication failure returns `401` before any D1 or Queue access. Other methods
   on that path return `405` with `Allow: POST`; unknown paths return `404`.
@@ -128,9 +130,10 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 The authenticated scheduling route and dormant `scheduled()` fallback share one
 helper that selects only allowlisted AQN and Guardian work when each D1 source is
 enabled. The caller cannot supply source or route selection. AQN retains its
-route-less `source_scan`; Guardian receives one `source_scan` per configured route.
-The consumer reloads and validates D1 policy and exact adapter routes. Work messages
-carry identities, never bodies.
+route-less `source_scan`; Guardian receives one `source_scan` per configured general
+route and per enabled, structurally matching profile route. The consumer reloads and
+validates D1 policy and exact adapter routes. Work messages carry identities, never
+bodies.
 
 Each AQN scan fetches `https://airqualitynews.com/feed/`, with no redirect
 following, a 20-second timeout, a 1 MiB limit and at most 20 recent entries. It
@@ -166,14 +169,18 @@ redirects and redirect chains fail closed.
 Profile feeds bypass relevance because route identity is strong author evidence,
 and Air Pollution is directly in scope. The seven broader routes retain only items
 that match the deterministic metadata-only AQ filter or an `always_include` author
-rule; run rows record `items_filtered`. Broader-feed bylines match only configured
-exact full-name aliases. Gary Fuller matches use
+rule; they do not require a profile rule for their route, and run rows record
+`items_filtered`. Stale profile work whose rule was disabled or removed is recorded
+as skipped and acknowledged without fetching the feed. Broader-feed bylines match
+only configured exact full-name aliases. Gary Fuller matches use
 `trusted_author_auto` plus `approval_author_rule_key='guardian:gary-fuller'`;
 Damian Carrington, Fiona Harvey and other Guardian Air Pollution items remain
 Pending. A Pending overlap can be promoted once, while Approved, Rejected and Hidden
 state is preserved. Per-route evidence records publisher-RSS provenance, matched
-author keys and first/last observation counts. Guardian article-body, AI and image
-access all remain disabled/blocked.
+author keys and first/last observation counts. Its author-auto flag is set only on the
+route whose observation inserted an Approved article or promoted Pending to Approved;
+later overlapping routes do not inherit an earlier auto-approval event. Guardian
+article-body, AI and image access all remain disabled/blocked.
 
 Successful scans atomically persist articles, exactly one creation/auto-approval
 event per new identity, and run counters. Runs record bounded codes rather than
