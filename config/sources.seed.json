@@ -107,7 +107,7 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   },
   {
     "source_key": "sky-news",

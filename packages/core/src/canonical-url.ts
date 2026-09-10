@@ -46,3 +46,14 @@ export function publisherHttpsUrl(raw: unknown, sourceDomain: string): string | 
 export function remotePreviewUrl(raw: unknown, sourceDomain: string): string | null {
   return publisherHttpsUrl(raw, sourceDomain);
 }
+
+const guardianImageHostnames = new Set(['i.guim.co.uk']);
+
+export function guardianRemotePreviewUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > 2048) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
+      guardianImageHostnames.has(url.hostname.toLowerCase()) ? url.href : null;
+  } catch { return null; }
+}

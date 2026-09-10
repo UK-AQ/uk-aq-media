@@ -106,7 +106,19 @@ export interface ParsedRssItem {
   preview_candidates: unknown[];
 }
 
-export function parseRssItems(xml: string, maxItems: number): {
+function isImageMediaContent(value: unknown, allowUntypedImageUrl: boolean): boolean {
+  const metadata = record(value);
+  if (metadata['@_medium'] === 'image' || String(metadata['@_type']).startsWith('image/')) {
+    return true;
+  }
+  if (!allowUntypedImageUrl || typeof metadata['@_url'] !== 'string') return false;
+  try {
+    return /\.(?:avif|gif|jpe?g|png|webp)$/i.test(new URL(metadata['@_url']).pathname);
+  } catch { return false; }
+}
+
+export function parseRssItems(xml: string, maxItems: number,
+  options: { allow_untyped_image_media_content?: boolean } = {}): {
   items: ParsedRssItem[];
   items_seen: number;
   items_invalid: number;
@@ -149,10 +161,8 @@ export function parseRssItems(xml: string, maxItems: number): {
         .filter((category): category is string => category !== null).slice(0, 20),
       preview_candidates: [
         ...list(item['media:thumbnail']),
-        ...list(item['media:content']).filter(value => {
-          const metadata = record(value);
-          return metadata['@_medium'] === 'image' || String(metadata['@_type']).startsWith('image/');
-        }),
+        ...list(item['media:content']).filter(value =>
+          isImageMediaContent(value, options.allow_untyped_image_media_content === true)),
         ...list(item.enclosure).filter(value =>
           String(record(value)['@_type']).startsWith('image/')),
       ],

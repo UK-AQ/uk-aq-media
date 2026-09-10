@@ -18,7 +18,7 @@ const initialSources = sources.map(source => {
   }
   if (source.source_key === 'the-guardian') {
     return { ...source, enabled: false, discovery_method: 'deferred' as const,
-      discovery_config: { retain_excerpt: false as const } };
+      discovery_config: { retain_excerpt: false as const }, image_policy: 'blocked' as const };
   }
   return source;
 });

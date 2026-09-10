@@ -1,8 +1,8 @@
 import {
-  canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl,
+  canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, publisherHttpsUrl,
   type AuthorRule, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
-import { parseRssItems, readRssFeed, ScanError } from './rss';
+import { parseRssItems, readRssFeed, rssAttribute, ScanError } from './rss';
 
 export const GUARDIAN_ROUTES = [
   { route_key: 'gary-fuller', url: 'https://www.theguardian.com/profile/gary-fuller/rss',
@@ -14,7 +14,7 @@ export const GUARDIAN_ROUTES = [
   { route_key: 'guardian-air-pollution',
     url: 'https://www.theguardian.com/environment/air-pollution/rss', kind: 'direct_aq' },
   { route_key: 'guardian-environment', url: 'https://www.theguardian.com/environment/rss',
-    manual_redirect_url: 'https://www.theguardian.com/uk/environment/rss', kind: 'filtered' },
+    fetch_url: 'https://www.theguardian.com/uk/environment/rss', kind: 'filtered' },
   { route_key: 'guardian-pollution', url: 'https://www.theguardian.com/environment/pollution/rss',
     kind: 'filtered' },
   { route_key: 'guardian-uk', url: 'https://www.theguardian.com/uk/rss', kind: 'filtered' },
@@ -23,7 +23,7 @@ export const GUARDIAN_ROUTES = [
     url: 'https://www.theguardian.com/environment/climate-crisis/rss', kind: 'filtered' },
   { route_key: 'guardian-science', url: 'https://www.theguardian.com/science/rss', kind: 'filtered' },
   { route_key: 'guardian-technology', url: 'https://www.theguardian.com/technology/rss',
-    manual_redirect_url: 'https://www.theguardian.com/uk/technology/rss', kind: 'filtered' },
+    fetch_url: 'https://www.theguardian.com/uk/technology/rss', kind: 'filtered' },
 ] as const;
 
 export type GuardianRouteKey = typeof GUARDIAN_ROUTES[number]['route_key'];
@@ -54,7 +54,7 @@ function configuredRoute(source: Source, routeKey: string): {
       source.discovery_method !== 'rss' || source.publication_policy !== 'manual' ||
       source.review_level !== 'standard' ||
       source.content_fetch_policy !== 'discovery_metadata_only' ||
-      source.ai_content_policy !== 'disabled' || source.image_policy !== 'blocked') {
+      source.ai_content_policy !== 'disabled' || source.image_policy !== 'remote_preview') {
     throw new ScanError('guardian_policy_mismatch');
   }
   const expected = GUARDIAN_ROUTES.find(route => route.route_key === routeKey);
@@ -84,9 +84,11 @@ export async function discoverGuardian(source: Source, routeKey: string): Promis
 }> {
   const route = configuredRoute(source, routeKey);
   const expected = GUARDIAN_ROUTES.find(candidate => candidate.route_key === route.route_key);
-  const manualRedirectUrl = expected && 'manual_redirect_url' in expected
-    ? expected.manual_redirect_url : undefined;
-  return parseGuardianFeed(await readRssFeed(route.url, 'guardian', manualRedirectUrl),
+  const fetchUrl = expected && 'fetch_url' in expected ? expected.fetch_url : route.url;
+  if (!publisherHttpsUrl(fetchUrl, source.canonical_domain)) {
+    throw new ScanError('guardian_fetch_url_mismatch');
+  }
+  return parseGuardianFeed(await readRssFeed(fetchUrl, 'guardian'),
     source, route.max_items);
 }
 
@@ -95,7 +97,7 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
   items_seen: number;
   items_invalid: number;
 }> {
-  const parsed = parseRssItems(xml, maxItems);
+  const parsed = parseRssItems(xml, maxItems, { allow_untyped_image_media_content: true });
   const articles: DiscoveredArticle[] = [];
   let invalid = parsed.items_invalid;
   for (const item of parsed.items) {
@@ -104,6 +106,9 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
     if (!publisherUrl) { invalid++; continue; }
     try { canonical = canonicalizeUrl(publisherUrl, source.canonical_domain); }
     catch { invalid++; continue; }
+    const preview = source.image_policy === 'remote_preview' ? item.preview_candidates
+      .map(value => guardianRemotePreviewUrl(rssAttribute(value, 'url')))
+      .find((value): value is string => value !== null) ?? null : null;
     articles.push({
       canonical_url: canonical,
       canonical_url_hash: await canonicalUrlHash(canonical),
@@ -112,8 +117,7 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
       author: item.author,
       published_at: item.published_at,
       categories: item.categories,
-      // Guardian image use remains blocked even though its RSS contains media elements.
-      preview_url: null,
+      preview_url: preview,
       display_title: null,
       display_title_origin: null,
       preview_metadata_checked_at: null,

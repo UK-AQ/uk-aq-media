@@ -1,9 +1,10 @@
-import { boundedLimit, HttpError, httpFailure, json, remotePreviewUrl,
+import { boundedLimit, guardianRemotePreviewUrl, HttpError, httpFailure, json, remotePreviewUrl,
   type PublicArticle } from '@uk-aq-media/core';
 
 type FeedRow = PublicArticle & { feed_sort_at: string; topics_json: string;
   pollutants_json: string; locations_json: string };
 type ImageRow = {
+  source_key: string;
   og_image_url: string | null;
   canonical_domain: string;
   article_image_policy: string;
@@ -67,14 +68,16 @@ function imageResponse(bytes: Uint8Array, contentType: string): Response {
 
 async function articleImage(request: Request, env: MediaPublicEnv,
   context: ExecutionContext, id: number): Promise<Response> {
-  const row = await env.MEDIA_DB.prepare(`SELECT a.og_image_url,
+  const row = await env.MEDIA_DB.prepare(`SELECT a.source_key, a.og_image_url,
     a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
     s.canonical_domain FROM media_articles a
     JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.id = ? AND a.status = 'approved'`).bind(id).first<ImageRow>();
   if (!row || row.article_image_policy !== 'remote_preview' ||
       row.source_image_policy !== 'remote_preview') throw new HttpError(404, 'image_not_found');
-  const publisherUrl = remotePreviewUrl(row.og_image_url, row.canonical_domain);
+  const publisherUrl = row.source_key === 'the-guardian'
+    ? guardianRemotePreviewUrl(row.og_image_url)
+    : remotePreviewUrl(row.og_image_url, row.canonical_domain);
   if (!publisherUrl) throw new HttpError(404, 'image_not_found');
 
   const requestUrl = new URL(request.url);
