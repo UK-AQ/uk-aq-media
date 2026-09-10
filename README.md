@@ -1,8 +1,8 @@
 # UK AQ Media
 
-Standalone implementation: three deployed Cloudflare Workers sharing authoritative
-D1 state, with Queue-driven Air Quality News RSS discovery. It is not connected to
-the public UK AQ website.
+Standalone repository implementation: three Cloudflare Workers sharing authoritative
+D1 state, with Queue-driven Air Quality News and Guardian RSS discovery. It is not
+connected to the public UK AQ website.
 
 The behavioural authority is the sibling
 [Media contract](../TEST-uk-aq-system-docs/system_docs/media/media_contract.md).
@@ -16,10 +16,10 @@ This README describes this implementation, not a replacement contract.
 | `apps/media-admin` | Bearer-authenticated editorial reads/transitions; `MEDIA_DB`, `MEDIA_ADMIN_TOKEN` |
 | `apps/media-discovery` | Authenticated scheduler receiver and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, dormant `AI` binding and dormant `scheduled()` fallback handler |
 | `packages/core` | Shared source/article/policy types, D1 source loading, canonical URL identity, HTTP helpers |
-| `packages/discovery` | Bounded AQN RSS adapter, source-run/article persistence, typed work messages |
+| `packages/discovery` | Shared bounded RSS handling, AQN/Guardian adapters, source-run/article/evidence persistence, typed work messages |
 | `packages/enrichment` | Provider-neutral structured result, policy gate, local budget and disabled Workers AI skeleton |
-| `migrations` | Core tables/indexes/triggers and generated initial ten-source seed |
-| `config/sources.seed.json` | Initial operational source permission posture |
+| `migrations` | Core tables/indexes/triggers, immutable initial source seed and forward policy/schema changes |
+| `config/sources.seed.json` | Current target source permission/discovery posture |
 | `scripts` | Seed validation/generation and local Wrangler tools |
 | `docs/phase-1-handover.md` | Manual setup/deployment commands, validation evidence, real-operation checks and rollback |
 
@@ -40,10 +40,11 @@ ignored by Git. No functional test suite has been added.
 
 Seed SQL is `0002_launch_sources.sql`, generated with `npm run seed:generate`.
 It is an applied immutable baseline and inserts missing source identities only.
-Current source configuration may advance through reviewed later migrations; `0003`
+Current source configuration advances through reviewed later migrations; `0003`
 moves only AQN's original `discovery_metadata_only` state to
-`article_head_allowed`. Only AQN is initially enabled; the other nine adapters are
-deferred.
+`article_head_allowed`, while `0004` enables the bounded Guardian routes and adds
+author-rule/route provenance. AQN and The Guardian are enabled; the other eight
+adapters remain deferred.
 
 ## HTTP surface
 
@@ -91,8 +92,9 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 1 }`
-  when one AQN scan is queued, or `queued: 0` when AQN is disabled or absent.
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 12 }`
+  in the current target state: one AQN scan plus eleven Guardian route scans. The
+  count reflects only enabled, internally configured supported work and may be zero.
 - Authentication failure returns `401` before any D1 or Queue access. Other methods
   on that path return `405` with `Allow: POST`; unknown paths return `404`.
 - Request data cannot select a source, choose a message type or inject arbitrary
@@ -124,10 +126,11 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 ## Discovery and policy boundaries
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
-helper that enqueues AQN `source_scan` work only when its D1 source is enabled. The
-consumer reloads and validates D1 policy; the adapter allowlist prevents unfinished
-publishers from running even if enabled. Work messages carry identities, never
-bodies.
+helper that selects only allowlisted AQN and Guardian work when each D1 source is
+enabled. The caller cannot supply source or route selection. AQN retains its
+route-less `source_scan`; Guardian receives one `source_scan` per configured route.
+The consumer reloads and validates D1 policy and exact adapter routes. Work messages
+carry identities, never bodies.
 
 Each AQN scan fetches `https://airqualitynews.com/feed/`, with no redirect
 following, a 20-second timeout, a 1 MiB limit and at most 20 recent entries. It
@@ -151,6 +154,27 @@ keeps review levels to standard/enhanced; its exception is represented by public
 policy and approval method. If an operator changes AQN to manual, the shared policy
 gate fails conservatively to pending until the contract/config discrepancy is resolved.
 
+Guardian uses the Gary Fuller, Damian Carrington and Fiona Harvey profile RSS feeds,
+the direct Guardian Air Pollution feed, and seven broader Environment, Pollution,
+UK, World, Climate Crisis, Science and Technology feeds. Each of the eleven routes
+is limited to 10 entries and runs as separate Queue work. The shared RSS boundary
+uses a 1 MiB limit, 20-second timeout and `redirect: 'manual'`. The Environment and
+Technology endpoints currently redirect; only their exact configured same-publisher
+canonical targets are accepted for one explicit bounded second request. All other
+redirects and redirect chains fail closed.
+
+Profile feeds bypass relevance because route identity is strong author evidence,
+and Air Pollution is directly in scope. The seven broader routes retain only items
+that match the deterministic metadata-only AQ filter or an `always_include` author
+rule; run rows record `items_filtered`. Broader-feed bylines match only configured
+exact full-name aliases. Gary Fuller matches use
+`trusted_author_auto` plus `approval_author_rule_key='guardian:gary-fuller'`;
+Damian Carrington, Fiona Harvey and other Guardian Air Pollution items remain
+Pending. A Pending overlap can be promoted once, while Approved, Rejected and Hidden
+state is preserved. Per-route evidence records publisher-RSS provenance, matched
+author keys and first/last observation counts. Guardian article-body, AI and image
+access all remain disabled/blocked.
+
 Successful scans atomically persist articles, exactly one creation/auto-approval
 event per new identity, and run counters. Runs record bounded codes rather than
 feed content/error dumps. Queue acknowledgement follows completion of those writes.
@@ -158,8 +182,9 @@ Failures retry after five minutes, at most three times; without a dead-letter qu
 exhausted messages are discarded and the next scheduled scan retries discovery.
 A long outage can exceed the feed's recent window; historical recovery is deferred.
 
-All ten source configurations disable AI and allow discovery metadata only. Nine
-unimplemented sources also block images. No seed asserts a permanent legal
+All ten source configurations disable AI. Guardian remains discovery-metadata-only
+and image-blocked; the eight unimplemented sources retain the same conservative
+posture. No seed asserts a permanent legal
 permission; Defra richer/OGL processing remains disabled pending its adapter work.
 Source-level and article-level image blocks are both checked on public reads.
 

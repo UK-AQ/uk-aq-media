@@ -20,13 +20,15 @@ async function mutate(request: Request, db: D1Database, id: number, action: Acti
   const changed = await db.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
     revision = revision + 1, updated_at = ?,
     approval_method = CASE WHEN ? = 'approve' THEN 'manual' ELSE approval_method END,
+    approval_author_rule_key = CASE WHEN ? = 'approve' THEN NULL ELSE approval_author_rule_key END,
     approved_at = CASE WHEN ? = 'approve' THEN ? ELSE approved_at END,
     rejected_at = CASE WHEN ? = 'reject' THEN ? ELSE rejected_at END,
     hidden_at = CASE WHEN ? = 'hide' THEN ? WHEN ? = 'unhide' THEN NULL ELSE hidden_at END
     WHERE id = ? AND status IN (${placeholders})
       AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)
     RETURNING id, status, revision`).bind(transition.to, eventKey, now,
-      action, action, now, action, now, action, now, action, id, ...transition.from, eventKey)
+      action, action, action, now, action, now, action, now, action, id,
+      ...transition.from, eventKey)
     .first<{ id: number; status: Status; revision: number }>();
   if (changed) return json({ article: changed, replayed: false });
   const event = await db.prepare(`SELECT article_id, event_type, to_status, revision

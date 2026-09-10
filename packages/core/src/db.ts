@@ -1,4 +1,4 @@
-import { SourceSchema, type Source, type Status } from './policy';
+import { AuthorRuleSchema, SourceSchema, type AuthorRule, type Source, type Status } from './policy';
 
 export interface ArticleIdentity {
   id: number;
@@ -17,6 +17,12 @@ export interface DiscoveredArticle {
   display_title: string | null;
   display_title_origin: 'publisher' | null;
   preview_metadata_checked_at: string | null;
+}
+
+export interface DiscoveryRoute {
+  route_key: string;
+  url: string;
+  max_items: number;
 }
 export interface PublicArticle {
   id: number;
@@ -48,4 +54,20 @@ export async function loadSource(db: D1Database, key: string): Promise<Source | 
   const { discovery_config_json, enabled, ...fields } = row;
   return SourceSchema.parse({ ...fields, enabled: enabled === 1,
     discovery_config: JSON.parse(discovery_config_json) });
+}
+
+export async function loadAuthorRules(db: D1Database, sourceKey: string): Promise<AuthorRule[]> {
+  const { results } = await db.prepare(`SELECT author_key, source_key, display_name, profile_url,
+    profile_rss_url, profile_rss_route_key, inclusion_policy, publication_policy, enabled,
+    byline_aliases_json FROM media_author_rules WHERE source_key = ? AND enabled = 1
+    ORDER BY author_key`).bind(sourceKey).all<{
+      enabled: number;
+      byline_aliases_json: string;
+      [key: string]: unknown;
+    }>();
+  return results.map(({ enabled, byline_aliases_json, ...fields }) => AuthorRuleSchema.parse({
+    ...fields,
+    enabled: enabled === 1,
+    byline_aliases: JSON.parse(byline_aliases_json),
+  }));
 }

@@ -1,15 +1,27 @@
-import { DiscoveryMessageSchema, recordQueueFailure, runSourceScan, type DiscoveryMessage } from '@uk-aq-media/discovery';
-import { json, secretMatches } from '@uk-aq-media/core';
+import {
+  configuredGuardianRouteKeys, DiscoveryMessageSchema, recordQueueFailure, runSourceScan,
+  type DiscoveryMessage,
+} from '@uk-aq-media/discovery';
+import { json, loadSource, secretMatches } from '@uk-aq-media/core';
 
-async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<0 | 1> {
+async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number> {
   try {
-    // An adapter allowlist prevents enabling an unfinished publisher through D1 alone.
-    const source = await env.MEDIA_DB.prepare(`SELECT source_key FROM media_sources
-      WHERE source_key = 'air-quality-news' AND enabled = 1`).first<{ source_key: string }>();
-    if (!source) return 0;
-    const message: DiscoveryMessage = { type: 'source_scan', source_key: source.source_key };
-    await env.MEDIA_DISCOVERY_QUEUE.send(message);
-    return 1;
+    // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
+    // Request data never participates in this internally selected, bounded work list.
+    const [aqn, guardian] = await Promise.all([
+      loadSource(env.MEDIA_DB, 'air-quality-news'),
+      loadSource(env.MEDIA_DB, 'the-guardian'),
+    ]);
+    const messages: DiscoveryMessage[] = [];
+    if (aqn?.enabled) messages.push({ type: 'source_scan', source_key: 'air-quality-news' });
+    if (guardian?.enabled) {
+      for (const routeKey of configuredGuardianRouteKeys(guardian)) {
+        messages.push({ type: 'source_scan', source_key: 'the-guardian', route_key: routeKey });
+      }
+    }
+    if (messages.length === 0) return 0;
+    await env.MEDIA_DISCOVERY_QUEUE.sendBatch(messages.map(body => ({ body })));
+    return messages.length;
   } catch {
     await recordQueueFailure(env.MEDIA_DB, 'discovery_schedule_failed');
     console.error(JSON.stringify({ event: 'discovery_schedule_failed' }));
@@ -51,7 +63,8 @@ export default {
         continue;
       }
       try {
-        await runSourceScan(env.MEDIA_DB, parsed.data.source_key, message.id, message.attempts);
+        await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
+          message.id, message.attempts);
         message.ack();
       } catch {
         console.error(JSON.stringify({ event: 'discovery_message_failed', message_id: message.id }));
