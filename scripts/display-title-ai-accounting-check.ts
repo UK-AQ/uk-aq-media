@@ -32,6 +32,16 @@ assert.deepEqual(parseDisplayTitleUsage({
   completion_tokens: 20,
   total_tokens: 120,
 }), { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 });
+assert.deepEqual(parseDisplayTitleUsage({
+  prompt_tokens: 100,
+  completion_tokens: 0,
+  total_tokens: 100,
+}), { prompt_tokens: 100, completion_tokens: 0, total_tokens: 100 });
+assert.equal(parseDisplayTitleUsage({
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+}), null);
 assert.equal(parseDisplayTitleUsage({
   prompt_tokens: 100,
   completion_tokens: 20,

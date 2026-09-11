@@ -427,9 +427,9 @@ function parseDisplayTitle(value: unknown): string {
 }
 
 const DisplayTitleUsageSchema = z.object({
-  prompt_tokens: z.number().int().nonnegative().max(1_000_000),
+  prompt_tokens: z.number().int().positive().max(1_000_000),
   completion_tokens: z.number().int().nonnegative().max(1_000_000),
-  total_tokens: z.number().int().nonnegative().max(2_000_000),
+  total_tokens: z.number().int().positive().max(2_000_000),
 }).passthrough().refine(usage => usage.total_tokens ===
   usage.prompt_tokens + usage.completion_tokens);
 
