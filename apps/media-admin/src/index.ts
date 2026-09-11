@@ -8,6 +8,7 @@ import {
   applyGuardianImageRepairPlan, buildGuardianImageRepairPlan,
   requireCurrentGuardianImageRepairPlan,
 } from './guardian-image-bulk';
+import { handleEditorialDashboard } from './editorial-dashboard';
 
 type Action = 'approve' | 'reject' | 'hide' | 'unhide';
 const transitions: Record<Action, { from: Status[]; to: Status; event: string }> = {
@@ -446,6 +447,8 @@ export default {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       const url = new URL(request.url);
+      const editorialResponse = await handleEditorialDashboard(request, env, url);
+      if (editorialResponse) return editorialResponse;
       const bulkImageRefresh = /^\/admin\/guardian-image-refresh\/(preview|apply)$/.exec(url.pathname);
       if (bulkImageRefresh) {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
