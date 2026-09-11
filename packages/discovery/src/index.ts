@@ -27,8 +27,11 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
 export {
-  configuredGuardianRouteKeys, GUARDIAN_ROUTES, parseGuardianFeed, scheduledGuardianRouteKeys,
+  configuredGuardianRouteKeys, discoverGuardianPreviewForArticle, GUARDIAN_ROUTES,
+  guardianPreviewForArticleFromFeed, parseGuardianFeed, scheduledGuardianRouteKeys,
+  selectGuardianPreviewCandidate,
 } from './guardian';
+export type { GuardianPreviewCandidate, GuardianPreviewLookup } from './guardian';
 export { displayTitleNeuronRates };
 
 function exactAliasInByline(byline: string, alias: string): boolean {

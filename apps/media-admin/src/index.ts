@@ -1,5 +1,9 @@
 import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, z,
-  type Status } from '@uk-aq-media/core';
+  loadSource, type Status } from '@uk-aq-media/core';
+import {
+  discoverGuardianPreviewForArticle, GUARDIAN_ROUTES,
+  type GuardianPreviewCandidate, type GuardianPreviewLookup,
+} from '@uk-aq-media/discovery';
 
 type Action = 'approve' | 'reject' | 'hide' | 'unhide';
 const transitions: Record<Action, { from: Status[]; to: Status; event: string }> = {
@@ -10,6 +14,15 @@ const transitions: Record<Action, { from: Status[]; to: Status; event: string }>
 };
 
 const ManualDisplayTitleBody = z.object({ display_title: z.string().nullable() }).strict();
+const GuardianImagePreviewBody = z.object({
+  route_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(100),
+}).strict();
+const GuardianImageApplyBody = z.object({
+  route_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(100),
+  expected_current_image_url: z.string().min(1).max(2048).nullable(),
+  proposed_image_url: z.string().min(1).max(2048),
+  confirm_replace_existing: z.literal(true),
+}).strict();
 const MAX_ADMIN_BODY_BYTES = 4096;
 const MAX_HUMAN_DISPLAY_TITLE_CHARACTERS = 500;
 const NEURON_MICRO_UNITS = 1_000_000;
@@ -23,6 +36,17 @@ type TitleMutationRow = {
   ai_title_suggestion: string | null;
   ai_title_suggestion_state: 'pending' | 'accepted' | 'rejected' | null;
   ai_title_decided_at: string | null;
+};
+
+type GuardianImageRow = {
+  id: number;
+  source_key: string;
+  canonical_url: string;
+  title: string;
+  status: Status;
+  og_image_url: string | null;
+  image_policy: string;
+  preview_metadata_checked_at: string | null;
 };
 
 export type AiUsageRow = {
@@ -238,6 +262,116 @@ async function setHumanDisplayTitle(request: Request, db: D1Database,
   return json({ article: changed });
 }
 
+function presentGuardianImageCandidate(candidate: GuardianPreviewCandidate | null) {
+  return candidate ? {
+    url: candidate.url,
+    kind: candidate.kind,
+    width: candidate.width,
+    height: candidate.height,
+  } : null;
+}
+
+async function guardianImageRefreshProposal(db: D1Database, id: number,
+  routeKey: string): Promise<{ row: GuardianImageRow; lookup: GuardianPreviewLookup }> {
+  if (!GUARDIAN_ROUTES.some(route => route.route_key === routeKey)) {
+    throw new HttpError(400, 'invalid_guardian_route_key');
+  }
+  const row = await db.prepare(`SELECT id, source_key, canonical_url, title, status,
+      og_image_url, image_policy, preview_metadata_checked_at
+    FROM media_articles WHERE id = ?`).bind(id).first<GuardianImageRow>();
+  if (!row) throw new HttpError(404, 'article_not_found');
+  if (row.source_key !== 'the-guardian') {
+    throw new HttpError(409, 'guardian_image_refresh_requires_guardian_article');
+  }
+  if (row.image_policy !== 'remote_preview') {
+    throw new HttpError(409, 'guardian_image_refresh_blocked');
+  }
+  const source = await loadSource(db, 'the-guardian');
+  if (!source || !source.enabled || source.image_policy !== 'remote_preview') {
+    throw new HttpError(409, 'guardian_image_refresh_blocked');
+  }
+  let lookup: GuardianPreviewLookup;
+  try {
+    lookup = await discoverGuardianPreviewForArticle(source, routeKey,
+      row.canonical_url, row.og_image_url);
+  } catch {
+    throw new HttpError(502, 'guardian_rss_preview_unavailable');
+  }
+  if (!lookup.article_found) {
+    throw new HttpError(409, 'guardian_article_not_in_current_route');
+  }
+  if (!lookup.proposed) {
+    throw new HttpError(409, 'guardian_rss_preview_unavailable');
+  }
+  return { row, lookup };
+}
+
+function guardianImageRefreshView(row: GuardianImageRow, lookup: GuardianPreviewLookup,
+  routeKey: string) {
+  const proposed = lookup.proposed;
+  const replacementRequired = proposed !== null && row.og_image_url !== proposed.url;
+  return {
+    article: {
+      id: row.id,
+      title: row.title,
+      canonical_url: row.canonical_url,
+      status: row.status,
+    },
+    route_key: routeKey,
+    current_image: row.og_image_url === null ? null : {
+      url: row.og_image_url,
+      kind: lookup.current?.kind ?? null,
+      width: lookup.current?.width ?? null,
+      height: lookup.current?.height ?? null,
+      present_in_current_rss: lookup.current !== null,
+      origin: 'unknown',
+    },
+    proposed_image: presentGuardianImageCandidate(proposed),
+    replacement_required: replacementRequired,
+    individual_confirmation_required: row.og_image_url !== null && replacementRequired,
+  };
+}
+
+async function previewGuardianImageRefresh(request: Request, db: D1Database,
+  id: number): Promise<Response> {
+  const parsed = GuardianImagePreviewBody.safeParse(await boundedJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_guardian_image_preview_body');
+  const { row, lookup } = await guardianImageRefreshProposal(db, id, parsed.data.route_key);
+  return json({ refresh: guardianImageRefreshView(row, lookup, parsed.data.route_key) });
+}
+
+async function applyGuardianImageRefresh(request: Request, db: D1Database,
+  id: number): Promise<Response> {
+  const parsed = GuardianImageApplyBody.safeParse(await boundedJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_guardian_image_apply_body');
+  const input = parsed.data;
+  const { row, lookup } = await guardianImageRefreshProposal(db, id, input.route_key);
+  if (row.og_image_url !== input.expected_current_image_url) {
+    throw new HttpError(409, 'guardian_image_refresh_stale_current_image');
+  }
+  if (lookup.proposed?.url !== input.proposed_image_url) {
+    throw new HttpError(409, 'guardian_image_refresh_stale_proposal');
+  }
+  if (row.og_image_url === lookup.proposed.url) {
+    return json({ changed: false,
+      refresh: guardianImageRefreshView(row, lookup, input.route_key) });
+  }
+  const now = new Date().toISOString();
+  const changed = await db.prepare(`UPDATE media_articles SET
+      og_image_url = ?, preview_metadata_checked_at = ?, updated_at = ?
+    WHERE id = ? AND source_key = 'the-guardian' AND image_policy = 'remote_preview'
+      AND og_image_url IS ?
+    RETURNING id, source_key, canonical_url, title, status, og_image_url, image_policy,
+      preview_metadata_checked_at`).bind(lookup.proposed.url, now, now, id,
+        input.expected_current_image_url).first<GuardianImageRow>();
+  if (!changed) throw new HttpError(409, 'guardian_image_refresh_stale_current_image');
+  return json({ changed: true,
+    refresh: guardianImageRefreshView(changed, {
+      ...lookup,
+      current: lookup.proposed,
+    }, input.route_key) });
+}
+
 async function mutate(request: Request, db: D1Database, id: number, action: Action): Promise<Response> {
   const key = request.headers.get('Idempotency-Key');
   if (!key || !/^[A-Za-z0-9_-]{16,100}$/.test(key)) throw new HttpError(400, 'idempotency_key_required');
@@ -278,6 +412,15 @@ export default {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       const url = new URL(request.url);
+      const imageRefresh = /^\/admin\/articles\/([1-9]\d*)\/guardian-image-refresh\/(preview|apply)$/.exec(url.pathname);
+      if (imageRefresh) {
+        if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+        const id = Number(imageRefresh[1]);
+        if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
+        return imageRefresh[2] === 'preview'
+          ? await previewGuardianImageRefresh(request, env.MEDIA_DB, id)
+          : await applyGuardianImageRefresh(request, env.MEDIA_DB, id);
+      }
       const titleDecision = /^\/admin\/articles\/([1-9]\d*)\/display-title\/(accept-ai|reject-ai)$/.exec(url.pathname);
       if (titleDecision) {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);

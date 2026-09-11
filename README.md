@@ -32,9 +32,10 @@ npm run check
 npx wrangler d1 migrations apply MEDIA_DB --local --config apps/media-discovery/wrangler.jsonc
 ```
 
-`npm run check` validates the seed and focused AI accounting arithmetic, typechecks
-all apps and packages, and bundles each Worker with `wrangler deploy --dry-run`. It does not
-deploy. `npm run types` regenerates each Worker's binding interface from its config.
+`npm run check` validates the seed, focused AI accounting arithmetic and Guardian
+image-candidate ranking, typechecks all apps and packages, and bundles each Worker with
+`wrangler deploy --dry-run`. It does not deploy. `npm run types` regenerates each Worker's
+binding interface from its config.
 Wrangler-generated output, dependencies, local databases and local credentials are
 ignored by Git. No broad functional test suite has been added.
 
@@ -89,6 +90,14 @@ Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
 - `PUT /admin/articles/:id/display-title` with
   `{ "display_title": "Human wording" }` — set/change a human-origin title for any
   article; use `{ "display_title": null }` to clear it and restore publisher-title fallback.
+- `POST /admin/articles/:id/guardian-image-refresh/preview` with
+  `{ "route_key": "guardian-environment" }` — refetch one bounded current Guardian RSS
+  route and return the stored and best permitted publisher-supplied image metadata without
+  mutation.
+- `POST /admin/articles/:id/guardian-image-refresh/apply` with the previewed `route_key`,
+  `expected_current_image_url`, `proposed_image_url`, and
+  `"confirm_replace_existing": true` — refetch and revalidate the current RSS proposal,
+  then replace that single Guardian article image using a compare-and-swap update.
 
 Every article-status transition POST requires a unique `Idempotency-Key` of 16–100 ASCII letters, digits,
 hyphens or underscores (a UUID is suitable). Reuse the same key when retrying the
@@ -100,6 +109,10 @@ failure is 503. Status-transition POST bodies are unused. Display-title operatio
 do not change article status/revision or create article-status audit events; human
 titles are single-line and bounded to 500 Unicode characters, not the 64-character
 automatic-AI limit.
+Guardian image refresh is single-article and never scheduled or bulk-applied. Existing image
+origin cannot currently be distinguished durably, so every non-null replacement requires the
+individual preview/apply decision and exact expected-current URL; stale or changed proposals
+fail with 409. The image-only update does not change article status/revision or create an event.
 
 A state change and append-only event commit atomically through SQL triggers.
 `MEDIA_SYNC_TOKEN` is reserved for later read-only `/sync` endpoints and is never
@@ -202,6 +215,12 @@ later overlapping routes do not inherit an earlier auto-approval event. Guardian
 article-head/body access remains disabled. For title AI only, the parser extracts the
 first HTML paragraph of RSS `description` as transient standfirst context and discards
 later paragraphs; `content:encoded` is never exposed.
+
+Guardian RSS image selection validates every candidate against the exact `i.guim.co.uk`
+boundary, prefers the largest trustworthy positive declared width, then height, then
+`media:content`, image enclosure, `media:thumbnail`, and stable RSS order. Malformed or missing
+dimensions provide no size advantage. AQN retains the shared parser's existing candidate order,
+and normal rediscovery still fills only null images rather than replacing non-null selections.
 
 Successful scans atomically persist articles, exactly one creation/auto-approval
 event per new identity, and run counters. Runs record bounded codes rather than

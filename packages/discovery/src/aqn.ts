@@ -2,7 +2,7 @@ import {
   canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl, remotePreviewUrl,
   type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
-import { parseRssItems, readRssFeed, rssAttribute, ScanError } from './rss';
+import { parseRssItems, readRssFeed, ScanError } from './rss';
 
 export { ScanError } from './rss';
 
@@ -179,7 +179,7 @@ export async function parseAqnFeed(xml: string, source: Source): Promise<{
     try { canonical = canonicalizeUrl(item.raw_url, source.canonical_domain); }
     catch { invalid++; continue; }
     const preview = source.image_policy === 'remote_preview' ? item.preview_candidates
-      .map(value => remotePreviewUrl(rssAttribute(value, 'url'), source.canonical_domain))
+      .map(candidate => remotePreviewUrl(candidate.url, source.canonical_domain))
       .find(Boolean) ?? null : null;
     articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
       original_url: item.raw_url, title: item.title, author: item.author,

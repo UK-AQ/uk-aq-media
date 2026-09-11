@@ -104,7 +104,17 @@ export interface ParsedRssItem {
   published_at: string | null;
   categories: string[];
   title_context: string | null;
-  preview_candidates: unknown[];
+  preview_candidates: RssPreviewCandidate[];
+}
+
+export type RssPreviewCandidateKind = 'media:thumbnail' | 'media:content' | 'enclosure';
+
+export interface RssPreviewCandidate {
+  kind: RssPreviewCandidateKind;
+  url: unknown;
+  width: unknown;
+  height: unknown;
+  rss_order: number;
 }
 
 type TitleContextMode = 'aqn_leading_600' | 'guardian_first_paragraph';
@@ -174,6 +184,18 @@ function isImageMediaContent(value: unknown, allowUntypedImageUrl: boolean): boo
   } catch { return false; }
 }
 
+function previewCandidate(kind: RssPreviewCandidateKind, value: unknown,
+  rssOrder: number): RssPreviewCandidate {
+  const metadata = record(value);
+  return {
+    kind,
+    url: metadata['@_url'],
+    width: metadata['@_width'],
+    height: metadata['@_height'],
+    rss_order: rssOrder,
+  };
+}
+
 export function parseRssItems(xml: string, maxItems: number,
   options: {
     allow_untyped_image_media_content?: boolean;
@@ -213,6 +235,17 @@ export function parseRssItems(xml: string, maxItems: number,
     const dateMs = date ? Date.parse(date) : NaN;
     const creators = list(item['dc:creator'])
       .map(value => text(value, 300)).filter((value): value is string => value !== null);
+    const rawPreviewCandidates: Array<readonly [RssPreviewCandidateKind, unknown]> = [
+      ...list(item['media:thumbnail'])
+        .map(value => ['media:thumbnail', value] as const),
+      ...list(item['media:content'])
+        .filter(value => isImageMediaContent(value,
+          options.allow_untyped_image_media_content === true))
+        .map(value => ['media:content', value] as const),
+      ...list(item.enclosure)
+        .filter(value => String(record(value)['@_type']).startsWith('image/'))
+        .map(value => ['enclosure', value] as const),
+    ];
     items.push({
       title,
       raw_url: rawUrl,
@@ -221,13 +254,8 @@ export function parseRssItems(xml: string, maxItems: number,
       categories: list(item.category).map(value => text(value, 100))
         .filter((category): category is string => category !== null).slice(0, 20),
       title_context: titleContext(item.description, options.title_context),
-      preview_candidates: [
-        ...list(item['media:thumbnail']),
-        ...list(item['media:content']).filter(value =>
-          isImageMediaContent(value, options.allow_untyped_image_media_content === true)),
-        ...list(item.enclosure).filter(value =>
-          String(record(value)['@_type']).startsWith('image/')),
-      ],
+      preview_candidates: rawPreviewCandidates.map(([kind, candidate], rssOrder) =>
+        previewCandidate(kind, candidate, rssOrder)),
     });
   }
   return { items, items_seen: rawItems.length, items_invalid: invalid };

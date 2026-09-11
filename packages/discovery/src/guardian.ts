@@ -2,7 +2,78 @@ import {
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, publisherHttpsUrl,
   type AuthorRule, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
-import { parseRssItems, readRssFeed, rssAttribute, ScanError } from './rss';
+import {
+  parseRssItems, readRssFeed, ScanError,
+  type RssPreviewCandidate, type RssPreviewCandidateKind,
+} from './rss';
+
+export type GuardianPreviewCandidate = {
+  url: string;
+  kind: RssPreviewCandidateKind;
+  width: number | null;
+  height: number | null;
+  rss_order: number;
+};
+
+export type GuardianPreviewLookup = {
+  article_found: boolean;
+  proposed: GuardianPreviewCandidate | null;
+  current: GuardianPreviewCandidate | null;
+};
+
+const guardianCandidateKindPriority: Record<RssPreviewCandidateKind, number> = {
+  'media:content': 3,
+  enclosure: 2,
+  'media:thumbnail': 1,
+};
+
+function positiveDimension(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function permittedGuardianPreviewCandidates(
+  candidates: RssPreviewCandidate[],
+): GuardianPreviewCandidate[] {
+  const permitted: GuardianPreviewCandidate[] = [];
+  for (const candidate of candidates) {
+    const url = guardianRemotePreviewUrl(candidate.url);
+    if (!url) continue;
+    permitted.push({
+      url,
+      kind: candidate.kind,
+      width: positiveDimension(candidate.width),
+      height: positiveDimension(candidate.height),
+      rss_order: candidate.rss_order,
+    });
+  }
+  return permitted;
+}
+
+function compareDimension(left: number | null, right: number | null): number {
+  if (left === right) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return left > right ? -1 : 1;
+}
+
+export function selectGuardianPreviewCandidate(
+  candidates: RssPreviewCandidate[],
+): GuardianPreviewCandidate | null {
+  return permittedGuardianPreviewCandidates(candidates).sort((left, right) => {
+    const width = compareDimension(left.width, right.width);
+    if (width !== 0) return width;
+    const height = compareDimension(left.height, right.height);
+    if (height !== 0) return height;
+    const kind = guardianCandidateKindPriority[right.kind] -
+      guardianCandidateKindPriority[left.kind];
+    return kind !== 0 ? kind : left.rss_order - right.rss_order;
+  })[0] ?? null;
+}
 
 export const GUARDIAN_ROUTES = [
   { route_key: 'gary-fuller', url: 'https://www.theguardian.com/profile/gary-fuller/rss',
@@ -77,10 +148,9 @@ export function scheduledGuardianRouteKeys(source: Source, rules: AuthorRule[]):
     guardianRouteKind(routeKey) !== 'author_profile' || guardianProfileRule(rules, routeKey) !== null);
 }
 
-export async function discoverGuardian(source: Source, routeKey: string): Promise<{
-  articles: DiscoveredArticle[];
-  items_seen: number;
-  items_invalid: number;
+async function configuredGuardianFeed(source: Source, routeKey: string): Promise<{
+  xml: string;
+  max_items: number;
 }> {
   const route = configuredRoute(source, routeKey);
   const expected = GUARDIAN_ROUTES.find(candidate => candidate.route_key === route.route_key);
@@ -88,8 +158,47 @@ export async function discoverGuardian(source: Source, routeKey: string): Promis
   if (!publisherHttpsUrl(fetchUrl, source.canonical_domain)) {
     throw new ScanError('guardian_fetch_url_mismatch');
   }
-  return parseGuardianFeed(await readRssFeed(fetchUrl, 'guardian'),
-    source, route.max_items);
+  return {
+    xml: await readRssFeed(fetchUrl, 'guardian'),
+    max_items: route.max_items,
+  };
+}
+
+export async function guardianPreviewForArticleFromFeed(xml: string, source: Source,
+  maxItems: number, canonicalUrl: string, currentImageUrl: string | null): Promise<GuardianPreviewLookup> {
+  const parsed = parseRssItems(xml, maxItems, {
+    allow_untyped_image_media_content: true,
+  });
+  for (const item of parsed.items) {
+    const publisherUrl = publisherHttpsUrl(item.raw_url, source.canonical_domain);
+    if (!publisherUrl) continue;
+    let canonical: string;
+    try { canonical = canonicalizeUrl(publisherUrl, source.canonical_domain); }
+    catch { continue; }
+    if (canonical !== canonicalUrl) continue;
+    const permitted = permittedGuardianPreviewCandidates(item.preview_candidates);
+    const proposed = selectGuardianPreviewCandidate(item.preview_candidates);
+    const current = currentImageUrl === null ? null :
+      permitted.find(candidate => candidate.url === currentImageUrl) ?? null;
+    return { article_found: true, proposed, current };
+  }
+  return { article_found: false, proposed: null, current: null };
+}
+
+export async function discoverGuardianPreviewForArticle(source: Source, routeKey: string,
+  canonicalUrl: string, currentImageUrl: string | null): Promise<GuardianPreviewLookup> {
+  const feed = await configuredGuardianFeed(source, routeKey);
+  return guardianPreviewForArticleFromFeed(feed.xml, source, feed.max_items,
+    canonicalUrl, currentImageUrl);
+}
+
+export async function discoverGuardian(source: Source, routeKey: string): Promise<{
+  articles: DiscoveredArticle[];
+  items_seen: number;
+  items_invalid: number;
+}> {
+  const feed = await configuredGuardianFeed(source, routeKey);
+  return parseGuardianFeed(feed.xml, source, feed.max_items);
 }
 
 export async function parseGuardianFeed(xml: string, source: Source, maxItems: number): Promise<{
@@ -109,9 +218,8 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
     if (!publisherUrl) { invalid++; continue; }
     try { canonical = canonicalizeUrl(publisherUrl, source.canonical_domain); }
     catch { invalid++; continue; }
-    const preview = source.image_policy === 'remote_preview' ? item.preview_candidates
-      .map(value => guardianRemotePreviewUrl(rssAttribute(value, 'url')))
-      .find((value): value is string => value !== null) ?? null : null;
+    const preview = source.image_policy === 'remote_preview'
+      ? selectGuardianPreviewCandidate(item.preview_candidates)?.url ?? null : null;
     articles.push({
       canonical_url: canonical,
       canonical_url_hash: await canonicalUrlHash(canonical),

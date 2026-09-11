@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@uk-aq-media/core": "*"
+    "@uk-aq-media/core": "*",
+    "@uk-aq-media/discovery": "*"
   }
 }
