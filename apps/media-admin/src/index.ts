@@ -12,6 +12,7 @@ const transitions: Record<Action, { from: Status[]; to: Status; event: string }>
 const ManualDisplayTitleBody = z.object({ display_title: z.string().nullable() }).strict();
 const MAX_ADMIN_BODY_BYTES = 4096;
 const MAX_HUMAN_DISPLAY_TITLE_CHARACTERS = 500;
+const NEURON_MICRO_UNITS = 1_000_000;
 
 type TitleMutationRow = {
   id: number;
@@ -23,6 +24,126 @@ type TitleMutationRow = {
   ai_title_suggestion_state: 'pending' | 'accepted' | 'rejected' | null;
   ai_title_decided_at: string | null;
 };
+
+export type AiUsageRow = {
+  usage_date: string;
+  ai_requests: number;
+  ai_titles_attempted: number;
+  legacy_usage_unknown_requests: number;
+  titles_generated_successfully: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  calculated_neuron_microunits: number;
+  outstanding_reserved_neuron_microunits: number;
+  accounted_neuron_microunits: number;
+  media_daily_budget_neuron_microunits: number;
+  account_free_neuron_microunits: number;
+};
+
+function configuredAiUsageLimits(env: MediaAdminEnv): {
+  dailyBudgetNeurons: number;
+  accountFreeNeurons: number;
+} {
+  const dailyBudgetNeurons = Number(env.MEDIA_AI_DAILY_NEURON_BUDGET);
+  const accountFreeNeurons = Number(env.MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY);
+  if (!Number.isSafeInteger(dailyBudgetNeurons) || dailyBudgetNeurons < 1 ||
+      !Number.isSafeInteger(accountFreeNeurons) || accountFreeNeurons < 1 ||
+      dailyBudgetNeurons > accountFreeNeurons ||
+      !Number.isSafeInteger(dailyBudgetNeurons * NEURON_MICRO_UNITS) ||
+      !Number.isSafeInteger(accountFreeNeurons * NEURON_MICRO_UNITS)) {
+    throw new HttpError(503, 'ai_usage_configuration_invalid');
+  }
+  return { dailyBudgetNeurons, accountFreeNeurons };
+}
+
+function neurons(microunits: number): number {
+  return microunits / NEURON_MICRO_UNITS;
+}
+
+export function presentAiUsage(row: AiUsageRow) {
+  const mediaRemaining = Math.max(0,
+    row.media_daily_budget_neuron_microunits - row.accounted_neuron_microunits);
+  const estimatedCloudflareRemaining = Math.max(0,
+    row.account_free_neuron_microunits - row.accounted_neuron_microunits);
+  return {
+    utc_date: row.usage_date,
+    ai_requests: row.ai_requests,
+    ai_titles_attempted: row.ai_titles_attempted,
+    legacy_usage_unknown_requests: row.legacy_usage_unknown_requests,
+    titles_generated_successfully: row.titles_generated_successfully,
+    prompt_tokens: row.prompt_tokens,
+    completion_tokens: row.completion_tokens,
+    total_tokens: row.total_tokens,
+    calculated_neurons_used: neurons(row.calculated_neuron_microunits),
+    outstanding_reserved_neurons: neurons(row.outstanding_reserved_neuron_microunits),
+    media_neurons_accounted_or_reserved: neurons(row.accounted_neuron_microunits),
+    media_daily_neuron_budget: neurons(row.media_daily_budget_neuron_microunits),
+    media_budget_remaining: neurons(mediaRemaining),
+    configured_cloudflare_free_allocation_neurons:
+      neurons(row.account_free_neuron_microunits),
+    estimated_cloudflare_free_neurons_remaining: neurons(estimatedCloudflareRemaining),
+    exact_neuron_microunits: {
+      calculated_used: row.calculated_neuron_microunits,
+      outstanding_reserved: row.outstanding_reserved_neuron_microunits,
+      accounted_or_reserved: row.accounted_neuron_microunits,
+      media_budget_remaining: mediaRemaining,
+      estimated_cloudflare_free_remaining: estimatedCloudflareRemaining,
+    },
+  };
+}
+
+async function aiUsage(env: MediaAdminEnv, limit: number): Promise<Response> {
+  const configured = configuredAiUsageLimits(env);
+  const { results } = await env.MEDIA_DB.prepare(`SELECT usage_date,
+      coalesce(sum(CASE WHEN request_started_at IS NOT NULL THEN request_count ELSE 0 END), 0)
+        AS ai_requests,
+      coalesce(sum(CASE WHEN request_started_at IS NOT NULL THEN titles_attempted ELSE 0 END), 0)
+        AS ai_titles_attempted,
+      coalesce(sum(CASE WHEN record_kind = 'legacy_daily_call_counter'
+        THEN request_count ELSE 0 END), 0) AS legacy_usage_unknown_requests,
+      coalesce(sum(titles_generated), 0) AS titles_generated_successfully,
+      coalesce(sum(prompt_tokens), 0) AS prompt_tokens,
+      coalesce(sum(completion_tokens), 0) AS completion_tokens,
+      coalesce(sum(total_tokens), 0) AS total_tokens,
+      coalesce(sum(CASE WHEN accounting_state = 'reconciled'
+        THEN actual_neuron_microunits ELSE 0 END), 0) AS calculated_neuron_microunits,
+      coalesce(sum(CASE WHEN accounting_state = 'reserved'
+        THEN reserved_neuron_microunits ELSE 0 END), 0)
+        AS outstanding_reserved_neuron_microunits,
+      coalesce(sum(CASE WHEN accounting_state = 'reconciled'
+        THEN actual_neuron_microunits ELSE reserved_neuron_microunits END), 0)
+        AS accounted_neuron_microunits,
+      min(media_daily_budget_neuron_microunits) AS media_daily_budget_neuron_microunits,
+      min(account_free_neuron_microunits) AS account_free_neuron_microunits
+    FROM media_ai_neuron_requests GROUP BY usage_date
+    ORDER BY usage_date DESC LIMIT ?`).bind(limit).all<AiUsageRow>();
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = [...results];
+  if (!rows.some(row => row.usage_date === today)) {
+    rows.unshift({ usage_date: today, ai_requests: 0, ai_titles_attempted: 0,
+      legacy_usage_unknown_requests: 0,
+      titles_generated_successfully: 0, prompt_tokens: 0, completion_tokens: 0,
+      total_tokens: 0, calculated_neuron_microunits: 0,
+      outstanding_reserved_neuron_microunits: 0, accounted_neuron_microunits: 0,
+      media_daily_budget_neuron_microunits: configured.dailyBudgetNeurons * NEURON_MICRO_UNITS,
+      account_free_neuron_microunits: configured.accountFreeNeurons * NEURON_MICRO_UNITS });
+    if (rows.length > limit) rows.pop();
+  }
+  return json({
+    usage_days: rows.map(presentAiUsage),
+    configured_limits: {
+      media_daily_neuron_budget: configured.dailyBudgetNeurons,
+      configured_cloudflare_free_allocation_neurons: configured.accountFreeNeurons,
+    },
+    accounting: {
+      fixed_point_unit: 'one-millionth of a neuron',
+      microunits_per_neuron: NEURON_MICRO_UNITS,
+      cloudflare_remaining_is_estimate: true,
+      cloudflare_estimate_scope: 'Media D1-recorded requests only; unrelated or manual account calls are not visible',
+    },
+  });
+}
 
 async function boundedJson(request: Request): Promise<unknown> {
   const contentType = request.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
@@ -171,6 +292,10 @@ export default {
         const id = Number(titleEdit[1]);
         if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
         return await setHumanDisplayTitle(request, env.MEDIA_DB, id);
+      }
+      if (url.pathname === '/admin/ai-usage') {
+        if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+        return await aiUsage(env, boundedLimit(url));
       }
       const match = /^\/admin\/articles\/([1-9]\d*)\/(approve|reject|hide|unhide)$/.exec(url.pathname);
       if (match) {

@@ -3,7 +3,8 @@ import {
   type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
-  D1DailyDisplayTitleBudget, LocalCallBudget, WorkersAiDisplayTitleProvider,
+  D1DisplayTitleNeuronLedger, LocalRequestBudget, WorkersAiDisplayTitleProvider,
+  displayTitleNeuronRates,
   suggestDisplayTitlePermitted,
 } from '@uk-aq-media/enrichment';
 import { discoverAqn, discoverAqnPreviewMetadata } from './aqn';
@@ -28,6 +29,7 @@ export { parseAqnFeed } from './aqn';
 export {
   configuredGuardianRouteKeys, GUARDIAN_ROUTES, parseGuardianFeed, scheduledGuardianRouteKeys,
 } from './guardian';
+export { displayTitleNeuronRates };
 
 function exactAliasInByline(byline: string, alias: string): boolean {
   const normalise = (value: string): string => value.normalize('NFKC')
@@ -174,8 +176,10 @@ type ExistingPreviewState = {
 export type DisplayTitleAiRuntime = {
   binding: Ai;
   model: string;
-  maximum_calls_per_run: number;
-  maximum_calls_per_day: number;
+  maximum_requests_per_run: number;
+  daily_neuron_budget: number;
+  account_free_neurons_per_day: number;
+  maximum_titles_per_request: number;
 };
 
 type ClaimedTitleArticle = {
@@ -209,8 +213,8 @@ async function releaseUnusedTitleClaim(db: D1Database, id: number,
 async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
   articles: DiscoveredArticle[], runtime: DisplayTitleAiRuntime): Promise<void> {
   if (!permitsAi(source, 'metadata')) return;
-  const localBudget = new LocalCallBudget(runtime.maximum_calls_per_run);
-  const dailyBudget = new D1DailyDisplayTitleBudget(db, runtime.maximum_calls_per_day);
+  const localBudget = new LocalRequestBudget(runtime.maximum_requests_per_run);
+  const ledger = new D1DisplayTitleNeuronLedger(db, runtime.maximum_titles_per_request);
   const provider = new WorkersAiDisplayTitleProvider(runtime.binding, runtime.model);
 
   for (const article of articles) {
@@ -231,16 +235,22 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
       title_context: article.title_context,
       author: claimed.author ?? article.author,
       categories: article.categories,
-    }, provider, localBudget, dailyBudget);
+    }, provider, localBudget, ledger, `display-title:${claimed.id}`,
+    runtime.daily_neuron_budget, runtime.account_free_neurons_per_day,
+    runtime.maximum_titles_per_request);
     if (outcome.status === 'skipped') {
-      try { await releaseUnusedTitleClaim(db, claimed.id, claimedAt); }
-      catch {
-        console.warn(JSON.stringify({ event: 'display_title_ai_claim_release_failed',
-          article_id: claimed.id }));
+      // A duplicate durable request means an earlier inference was already admitted; retaining
+      // the claim prevents a replay from sending it again. Other pre-inference skips may retry.
+      if (outcome.reason !== 'duplicate_request') {
+        try { await releaseUnusedTitleClaim(db, claimed.id, claimedAt); }
+        catch {
+          console.warn(JSON.stringify({ event: 'display_title_ai_claim_release_failed',
+            article_id: claimed.id }));
+        }
       }
       console.info(JSON.stringify({ event: 'display_title_ai_skipped', article_id: claimed.id,
         reason: outcome.reason }));
-      if (outcome.reason === 'local_budget' || outcome.reason === 'daily_budget') return;
+      if (outcome.reason === 'local_budget' || outcome.reason === 'storage_failure') return;
       continue;
     }
     if (outcome.status === 'failed') {

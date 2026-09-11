@@ -1,21 +1,35 @@
 import {
-  DiscoveryMessageSchema, recordQueueFailure, runSourceScan, scheduledGuardianRouteKeys,
+  DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
+  scheduledGuardianRouteKeys,
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
 import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
 
+const NEURON_MICRO_UNITS = 1_000_000;
+
 function configuredDisplayTitleAi(env: MediaDiscoveryEnv): DisplayTitleAiRuntime | undefined {
   const model = String(env.MEDIA_AI_MODEL).trim();
-  const perRun = Number(env.MEDIA_AI_MAX_CALLS_PER_RUN);
-  const perDay = Number(env.MEDIA_AI_MAX_CALLS_PER_DAY);
+  const perRun = Number(env.MEDIA_AI_MAX_REQUESTS_PER_RUN);
+  const dailyNeuronBudget = Number(env.MEDIA_AI_DAILY_NEURON_BUDGET);
+  const accountFreeNeurons = Number(env.MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY);
+  const maximumTitlesPerRequest = Number(env.MEDIA_AI_MAX_TITLES_PER_REQUEST);
   if (!/^@cf\/[a-z0-9._/-]+$/i.test(model) || model.length > 200 ||
       !Number.isSafeInteger(perRun) || perRun < 1 || perRun > 10 ||
-      !Number.isSafeInteger(perDay) || perDay < 1 || perDay > 50) {
+      !Number.isSafeInteger(dailyNeuronBudget) || dailyNeuronBudget < 1 ||
+      !Number.isSafeInteger(accountFreeNeurons) || accountFreeNeurons < 1 ||
+      dailyNeuronBudget > accountFreeNeurons ||
+      !Number.isSafeInteger(dailyNeuronBudget * NEURON_MICRO_UNITS) ||
+      !Number.isSafeInteger(accountFreeNeurons * NEURON_MICRO_UNITS) ||
+      !Number.isSafeInteger(maximumTitlesPerRequest) ||
+      maximumTitlesPerRequest < 1 || maximumTitlesPerRequest > 5 ||
+      displayTitleNeuronRates(model) === null) {
     console.warn(JSON.stringify({ event: 'display_title_ai_configuration_disabled' }));
     return undefined;
   }
-  return { binding: env.AI, model, maximum_calls_per_run: perRun,
-    maximum_calls_per_day: perDay };
+  return { binding: env.AI, model, maximum_requests_per_run: perRun,
+    daily_neuron_budget: dailyNeuronBudget,
+    account_free_neurons_per_day: accountFreeNeurons,
+    maximum_titles_per_request: maximumTitlesPerRequest };
 }
 
 async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number> {

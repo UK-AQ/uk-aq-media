@@ -1,0 +1,90 @@
+import {
+  DiscoveryMessageSchema, recordQueueFailure, runSourceScan, scheduledGuardianRouteKeys,
+  type DiscoveryMessage, type DisplayTitleAiRuntime,
+} from '@uk-aq-media/discovery';
+import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
+
+function configuredDisplayTitleAi(env: MediaDiscoveryEnv): DisplayTitleAiRuntime | undefined {
+  const model = String(env.MEDIA_AI_MODEL).trim();
+  const perRun = Number(env.MEDIA_AI_MAX_CALLS_PER_RUN);
+  const perDay = Number(env.MEDIA_AI_MAX_CALLS_PER_DAY);
+  if (!/^@cf\/[a-z0-9._/-]+$/i.test(model) || model.length > 200 ||
+      !Number.isSafeInteger(perRun) || perRun < 1 || perRun > 10 ||
+      !Number.isSafeInteger(perDay) || perDay < 1 || perDay > 50) {
+    console.warn(JSON.stringify({ event: 'display_title_ai_configuration_disabled' }));
+    return undefined;
+  }
+  return { binding: env.AI, model, maximum_calls_per_run: perRun,
+    maximum_calls_per_day: perDay };
+}
+
+async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number> {
+  try {
+    // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
+    // Request data never participates in this internally selected, bounded work list.
+    const [aqn, guardian] = await Promise.all([
+      loadSource(env.MEDIA_DB, 'air-quality-news'),
+      loadSource(env.MEDIA_DB, 'the-guardian'),
+    ]);
+    const messages: DiscoveryMessage[] = [];
+    if (aqn?.enabled) messages.push({ type: 'source_scan', source_key: 'air-quality-news' });
+    if (guardian?.enabled) {
+      const rules = await loadAuthorRules(env.MEDIA_DB, 'the-guardian');
+      for (const routeKey of scheduledGuardianRouteKeys(guardian, rules)) {
+        messages.push({ type: 'source_scan', source_key: 'the-guardian', route_key: routeKey });
+      }
+    }
+    if (messages.length === 0) return 0;
+    await env.MEDIA_DISCOVERY_QUEUE.sendBatch(messages.map(body => ({ body })));
+    return messages.length;
+  } catch {
+    await recordQueueFailure(env.MEDIA_DB, 'discovery_schedule_failed');
+    console.error(JSON.stringify({ event: 'discovery_schedule_failed' }));
+    throw new Error('discovery_schedule_failed');
+  }
+}
+
+export default {
+  async fetch(request, env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname !== '/scheduler/run') return json({ error: 'not_found' }, 404);
+    if (request.method !== 'POST') {
+      const response = json({ error: 'method_not_allowed' }, 405);
+      response.headers.set('Allow', 'POST');
+      return response;
+    }
+    const suppliedSecret = request.headers.get('x-uk-aq-worker-http-secret');
+    if (!await secretMatches(suppliedSecret, env.UK_AQ_MEDIA_WORKER_HTTP_SECRET)) {
+      return json({ error: 'unauthorized' }, 401);
+    }
+    try {
+      const queued = await enqueueScheduledDiscovery(env);
+      return json({ ok: true, queued }, 202);
+    } catch {
+      return json({ error: 'discovery_schedule_failed' }, 503);
+    }
+  },
+  async scheduled(_controller, env): Promise<void> {
+    await enqueueScheduledDiscovery(env);
+  },
+  async queue(batch, env): Promise<void> {
+    for (const message of batch.messages) {
+      const parsed = DiscoveryMessageSchema.safeParse(message.body);
+      if (!parsed.success || parsed.data.type === 'article_enrich') {
+        // Not operational in this phase: never acknowledge unimplemented work as completed.
+        await recordQueueFailure(env.MEDIA_DB, 'unsupported_discovery_message', message.id, message.attempts);
+        console.error(JSON.stringify({ event: 'unsupported_discovery_message', message_id: message.id }));
+        message.retry({ delaySeconds: 300 });
+        continue;
+      }
+      try {
+        await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
+          message.id, message.attempts, configuredDisplayTitleAi(env));
+        message.ack();
+      } catch {
+        console.error(JSON.stringify({ event: 'discovery_message_failed', message_id: message.id }));
+        message.retry({ delaySeconds: 300 });
+      }
+    }
+  },
+} satisfies ExportedHandler<MediaDiscoveryEnv, unknown>;

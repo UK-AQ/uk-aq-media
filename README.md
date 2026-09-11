@@ -32,11 +32,11 @@ npm run check
 npx wrangler d1 migrations apply MEDIA_DB --local --config apps/media-discovery/wrangler.jsonc
 ```
 
-`npm run check` validates the seed against the shared schema, typechecks all apps
-and packages, and bundles each Worker with `wrangler deploy --dry-run`. It does not
+`npm run check` validates the seed and focused AI accounting arithmetic, typechecks
+all apps and packages, and bundles each Worker with `wrangler deploy --dry-run`. It does not
 deploy. `npm run types` regenerates each Worker's binding interface from its config.
 Wrangler-generated output, dependencies, local databases and local credentials are
-ignored by Git. No functional test suite has been added.
+ignored by Git. No broad functional test suite has been added.
 
 Seed SQL is `0002_launch_sources.sql`, generated with `npm run seed:generate`.
 It is an applied immutable baseline and inserts missing source identities only.
@@ -45,8 +45,11 @@ moves only AQN's original `discovery_metadata_only` state to
 `article_head_allowed`, while `0004` enables the bounded Guardian routes and adds
 author-rule/route provenance; `0005` permits Guardian RSS preview images; and `0006`
 adds current AI-title suggestion fields/daily reservations and narrowly advances AQN
-and Guardian to metadata-only AI. AQN and The Guardian are enabled; the other eight
-adapters remain deferred.
+and Guardian to metadata-only AI. Because `0006` had already reached `main`, `0007`
+adds the replacement request-level neuron ledger without rewriting possibly applied
+migration history. Any non-zero legacy daily counter is retained as unknown usage and
+conservatively charges that UTC day's full local neuron budget. AQN and The Guardian
+are enabled; the other eight adapters remain deferred.
 
 ## HTTP surface
 
@@ -73,6 +76,8 @@ Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
   status-filtered reads use feed chronology, unfiltered reads use update chronology.
 - `GET /admin/sources?limit=20` — maximum 50.
 - `GET /admin/runs?limit=20` — most recent runs, maximum 50.
+- `GET /admin/ai-usage?limit=20` — current/recent UTC-day Workers AI request,
+  title, token and neuron accounting; Cloudflare remaining capacity is explicitly estimated.
 - `POST /admin/articles/:id/approve` — pending/rejected to approved.
 - `POST /admin/articles/:id/reject` — pending/approved to rejected.
 - `POST /admin/articles/:id/hide` — approved to hidden.
@@ -219,15 +224,23 @@ AI never participates in relevance, approval or article-state decisions.
 
 Workers AI uses configured model `MEDIA_AI_MODEL` (initially
 `@cf/meta/llama-3.3-70b-instruct-fp8-fast`), prompt version
-`media-display-title-v1`, temperature 0, JSON-schema output and a 64-token response
+`media-display-title-v2`, temperature 0, JSON-schema output and a 64-token response
 bound, with each inference aborted after 20 seconds. Local validation rejects empty, malformed, multiline, control-character or
 over-64-character output. Suggestions remain Pending/internal until accepted, while
 public responses continue exposing only `display_title` plus the original `title`.
-`MEDIA_AI_MAX_CALLS_PER_RUN=10` is enforced per source scan and
-`MEDIA_AI_MAX_CALLS_PER_DAY=50` is atomically reserved by UTC day in D1. Budget,
-capacity, output or storage failure cannot fail discovery, and there is no paid-provider
-fallback. The pre-existing generic summary/`why_it_matters` enrichment path remains
-unsupported and disabled.
+`MEDIA_AI_MAX_REQUESTS_PER_RUN=10` is only a per-scan runaway safeguard. Before each
+single-title inference, one atomic D1 statement reserves a conservative estimate against
+`MEDIA_AI_DAILY_NEURON_BUDGET=8000`; the request shape, 64-token output allowance and
+configured model rates drive that estimate. The initial Llama model uses 26,668 input
+and 204,805 output neurons per million tokens. Accounting stores integer millionths of
+a neuron and reconciles the reservation to Workers AI's usable prompt/completion/total
+token usage. Missing or malformed usage and failed reconciliation retain the reservation.
+`MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY=10000` is reported separately as an estimated
+Cloudflare allowance, not an authoritative account balance. Unknown model rates disable
+automatic title AI. `MEDIA_AI_MAX_TITLES_PER_REQUEST=5` preserves a future batch boundary,
+but this phase deliberately sends one title per request. Budget, capacity, output or
+storage failure cannot fail discovery, and there is no paid-provider fallback. The
+pre-existing generic summary/`why_it_matters` path remains unsupported and disabled.
 
 See the [phase handover](docs/phase-1-handover.md) for manual resource wiring,
 real-operation validation, known limits and rollback.

@@ -14,8 +14,9 @@
     "types": "node scripts/worker-tools.mjs types",
     "build": "node scripts/worker-tools.mjs build",
     "seed:check": "tsx scripts/source-seed.ts --check",
+    "ai:check": "tsx scripts/display-title-ai-accounting-check.ts",
     "seed:generate": "tsx scripts/source-seed.ts",
-    "check": "npm run seed:check && npm run typecheck && npm run build"
+    "check": "npm run seed:check && npm run ai:check && npm run typecheck && npm run build"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260907.1",

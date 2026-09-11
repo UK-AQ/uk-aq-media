@@ -5,6 +5,30 @@ All implementation is in `TEST-uk-aq-media`, remote identity
 No remote resource creation, migration, deployment, website integration or other
 repository mutation was performed.
 
+## Display-title AI accounting addendum — 11 September 2026
+
+The current local implementation adds advisory display-title suggestions and a
+request-level neuron ledger. Migration `0007_media_ai_neuron_ledger.sql` is forward-only:
+`0006` had already reached `main` and the normal deployment workflow can apply migrations
+before Workers, so its possibly-applied call-counter history was not rewritten without a
+remote D1 query. A non-zero legacy day is carried forward with its request/title counts
+but unknown token usage and a full 8,000-neuron conservative charge for that UTC day.
+No remote migration, deployment or Workers AI request was made here.
+
+Discovery uses `MEDIA_AI_MAX_REQUESTS_PER_RUN=10`,
+`MEDIA_AI_DAILY_NEURON_BUDGET=8000`,
+`MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY=10000`,
+`MEDIA_AI_MAX_TITLES_PER_REQUEST=5`, and the configured `MEDIA_AI_MODEL`. The current
+path remains single-title. It atomically reserves a conservative integer-microneuron
+amount before inference, then replaces it once with calculated usage when Cloudflare
+returns valid prompt/completion/total token counts. Missing/malformed usage or a failed
+reconciliation leaves the reservation charged. Unknown model rates disable automatic AI.
+
+Authenticated `GET /admin/ai-usage` reports current/recent UTC-day request, title,
+token, actual-neuron, outstanding-reservation and remaining-budget values. Its
+Cloudflare-free remaining value is explicitly an estimate limited to Media D1 records;
+the Cloudflare dashboard remains authoritative for account-wide usage.
+
 ## Delivered files and storage
 
 Created files (all new; no pre-existing runtime files required archiving):
@@ -108,7 +132,7 @@ first deployment. Do not enable paid inference or an automatic paid fallback.
 | Worker `uk-aq-media-public` | Public GET API, D1 only; workers.dev endpoint initially |
 | Worker `uk-aq-media-admin` | Authenticated editorial API; `MEDIA_ADMIN_TOKEN` secret |
 | Worker `uk-aq-media-discovery` | Cron `0 */2 * * *`, Queue producer/consumer, no public workers.dev endpoint |
-| Workers AI | `AI` binding on discovery, dormant; `MEDIA_AI_MAX_CALLS_PER_RUN=0`, `MEDIA_AI_MODEL=""` |
+| Workers AI | `AI` binding on discovery; neuron-budgeted display-title suggestions only, with no paid fallback |
 | Future sync credential | Reserve a distinct `MEDIA_SYNC_TOKEN`; not needed/configured until sync endpoints exist |
 
 No account ID, real database ID or credential is committed. The all-zero database
@@ -142,7 +166,7 @@ npx wrangler deploy --config apps/media-admin/wrangler.jsonc
 npx wrangler deploy --config apps/media-discovery/wrangler.jsonc
 ```
 
-Expected: both migrations applied, ten sources with only AQN enabled, secret stored
+Expected: all pending migrations applied, configured sources present, secret stored
 without displaying its value, public/admin endpoint URLs and successful discovery
 Queue/cron bindings. `secret put` may create the initially absent Worker; this is
 an explicitly manual remote step. The discovery deployment starts scheduled work.
@@ -161,6 +185,7 @@ curl --fail-with-body "$MEDIA_PUBLIC_URL/articles?limit=20"
 curl --fail-with-body -H "Authorization: Bearer $MEDIA_ADMIN_TOKEN" "$MEDIA_ADMIN_URL/admin/sources"
 curl --fail-with-body -H "Authorization: Bearer $MEDIA_ADMIN_TOKEN" "$MEDIA_ADMIN_URL/admin/runs"
 curl --fail-with-body -H "Authorization: Bearer $MEDIA_ADMIN_TOKEN" "$MEDIA_ADMIN_URL/admin/articles?status=approved"
+curl --fail-with-body -H "Authorization: Bearer $MEDIA_ADMIN_TOKEN" "$MEDIA_ADMIN_URL/admin/ai-usage"
 ```
 
 1. After the first scheduled scan, verify a succeeded run, new approved AQN rows,
@@ -183,8 +208,10 @@ curl --fail-with-body -H "Authorization: Bearer $MEDIA_ADMIN_TOKEN" "$MEDIA_ADMI
    authorised operational exercise is arranged: approved data must remain intact,
    run error codes must be bounded, and acknowledged work must not be lost. D1
    unavailability can prevent diagnostic persistence; structured logs then remain.
-7. Confirm discovery requests target only the RSS route and AI usage remains zero.
-   Missing preview metadata must leave text-only cards possible. If a permitted
+7. Confirm title AI uses only the bounded RSS context, records returned token usage,
+   remains within the local neuron budget, and leaves conservative reservations charged
+   when usage cannot be reconciled. Missing preview metadata must leave text-only cards
+   possible. If a permitted
    preview exists, confirm source/article blocks suppress it without image fetching.
 8. Keep the UK AQ website/dashboard disconnected. Observe the standalone service
    without the Pro/MySQL mirror, which is not present or required. Manual-source
@@ -217,8 +244,8 @@ changes together; do not treat repeated HTTP 200 receipts as repeated mutations.
 - A worker interruption may leave a run marked `running`; inspect its age and the
   queue message/attempt evidence. A retry creates a new run. Do not infer success
   from `running`. Counters and article/events commit together on a successful scan.
-- No automatic run retention/cleanup, immediate public cache purge, daily AI budget,
-  or historical recovery job is included. Review retention before sustained growth.
+- No automatic run/AI-ledger retention, immediate public cache purge or historical
+  recovery job is included. Review retention before sustained growth.
 - Source disablement stops discovery; it does not remove approved articles. Hiding
   an article or blocking its image is an explicit separate editorial decision.
 - Source configuration/editing routes and mirror pagination are deferred. Public
@@ -248,9 +275,9 @@ runtime status, resource identities, successful real-operation evidence and any
 approved website cut-over. Potential clarifications to record as implementation
 notes: AQN uses standard review snapshots plus trusted-source-auto provenance;
 publication cache TTL is five minutes; admin replay receipts describe the original
-mutation; only the AQN adapter is enabled and all AI remains disabled. D1 schema
+mutation; and Cloudflare allowance remaining is only a Media-ledger estimate. D1 schema
 and API details are available in this repository for that handover.
 
 Deferred: nine publisher adapters, source/text/tag editing, dashboard, Pro/MySQL
-pull mirror and sync API, body access/licensing decisions, live enrichment/durable
-AI budgets, image crawling/caching, story grouping and public website integration.
+pull mirror and sync API, body access/licensing decisions, broader enrichment, title
+batching, image crawling/caching, story grouping and public website integration.
