@@ -84,11 +84,15 @@ async function articleImage(request: Request, env: MediaPublicEnv,
   const requestUrl = new URL(request.url);
   const expectedVersion = await imageCacheVersion(row.og_image_url);
   const suppliedVersion = requestUrl.searchParams.get('v');
+  const canonicalImageUrl = await versionedArticleImageUrl(requestUrl.origin, id,
+    row.og_image_url);
   if (suppliedVersion !== null && suppliedVersion !== expectedVersion) {
-    throw new HttpError(404, 'image_version_not_current');
+    return new Response(null, { status: 302, headers: {
+      'Cache-Control': 'no-store',
+      Location: canonicalImageUrl,
+    } });
   }
-  const cacheKey = new Request(await versionedArticleImageUrl(requestUrl.origin, id,
-    row.og_image_url), { method: 'GET' });
+  const cacheKey = new Request(canonicalImageUrl, { method: 'GET' });
   try {
     const cached = await caches.default.match(cacheKey);
     if (cached) return cached;
