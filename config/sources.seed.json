@@ -33,7 +33,7 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   },
   {
     "source_key": "the-guardian",
@@ -124,7 +124,7 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   },
   {
     "source_key": "the-independent",
@@ -141,7 +141,7 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   },
   {
     "source_key": "defra-uk-air",
@@ -175,7 +175,7 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   },
   {
     "source_key": "the-telegraph",
@@ -192,7 +192,7 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   },
   {
     "source_key": "daily-mail",
@@ -209,7 +209,7 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   },
   {
     "source_key": "the-sun",
@@ -226,6 +226,6 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "blocked"
+    "image_policy": "remote_preview"
   }
 ]

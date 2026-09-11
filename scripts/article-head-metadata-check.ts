@@ -15,6 +15,10 @@ assert.deepEqual(metadata, {
   twitterImage: 'https://publisher.example/twitter.jpg',
   ogTitle: 'Short & useful — title',
   twitterTitle: 'Fallback title',
+  htmlTitle: null,
+  publisher: null,
+  author: null,
+  publishedAt: null,
 });
 
 const source: Source = {
@@ -33,7 +37,17 @@ const article: DiscoveredArticle = {
   preview_url: null, display_title: null, display_title_origin: null,
   preview_metadata_checked_at: null,
 };
-await assert.rejects(discoverArticleHeadPreviewMetadata(article, source),
-  (error: unknown) => error instanceof Error && error.message === 'article_head_not_permitted');
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async () => new Response(`<head>
+  <meta property="og:image" content="https://cdn.example/rejected.jpg">
+  <meta name="twitter:image" content="https://images.publisher.example/accepted.jpg">
+  <meta property="og:title" content="Compact publisher title">
+</head><body>must not be read</body>`, { headers: { 'Content-Type': 'text/html' } });
+try {
+  const discovered = await discoverArticleHeadPreviewMetadata(article, source);
+  assert.equal(discovered.preview_url, 'https://images.publisher.example/accepted.jpg');
+  assert.equal(discovered.display_title, 'Compact publisher title');
+  assert.ok(discovered.preview_metadata_checked_at);
+} finally { globalThis.fetch = originalFetch; }
 
 console.log('Article head metadata checks passed');

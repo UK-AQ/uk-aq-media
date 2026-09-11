@@ -28,7 +28,7 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
 export {
-  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata,
+  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
 } from './article-head-metadata';
 export {
   configuredGuardianRouteKeys, discoverGuardianCurrentRssImageView,
@@ -294,8 +294,7 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
 
 async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
   articles: DiscoveredArticle[]): Promise<void> {
-  if (source.content_fetch_policy !== 'article_head_allowed' ||
-      source.image_policy !== 'remote_preview' || articles.length === 0) return;
+  if (source.image_policy !== 'remote_preview' || articles.length === 0) return;
   const placeholders = articles.map(() => '?').join(', ');
   const { results } = await db.prepare(`SELECT canonical_url_hash, og_image_url, image_policy,
     preview_metadata_checked_at FROM media_articles WHERE canonical_url_hash IN (${placeholders})`)
@@ -363,10 +362,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     invalid = result.items_invalid;
     if (seen > 0 && result.articles.length === 0) throw new ScanError('no_valid_feed_entries');
     const unique = new Map(result.articles.map(article => [article.canonical_url_hash, article]));
-    await fillArticleHeadPreviewMetadata(db, source, [...unique.values()]);
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
     const acceptedArticles: DiscoveredArticle[] = [];
+    const acceptedRules = new Map<string, AuthorRule[]>();
     // AQN remains at <=20 items. Guardian is <=10 items per route, so its extra route-evidence
     // statement still keeps every Queue invocation comfortably bounded.
     for (const article of unique.values()) {
@@ -378,6 +377,11 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         continue;
       }
       acceptedArticles.push(article);
+      acceptedRules.set(article.canonical_url_hash, matchedRules);
+    }
+    await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
+    for (const article of acceptedArticles) {
+      const matchedRules = acceptedRules.get(article.canonical_url_hash) ?? [];
       const publicationRule = publicationAuthorRule(matchedRules);
       const selectedAutoRule = publicationRule?.publication_policy === 'auto_approve'
         ? publicationRule : null;

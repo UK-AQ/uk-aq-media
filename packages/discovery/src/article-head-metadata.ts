@@ -1,5 +1,6 @@
 import {
-  publisherHttpsUrl, remotePreviewUrl, type DiscoveredArticle, type Source,
+  guardianRemotePreviewUrl, publisherHttpsUrl, remotePreviewUrl,
+  type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { ScanError } from './rss';
 
@@ -35,12 +36,18 @@ function metaAttributes(tag: string): Map<string, string> {
   return attributes;
 }
 
-export function extractArticleHeadMetadata(htmlHead: string): {
+export type ArticleHeadMetadata = {
   ogImage: string | null;
   twitterImage: string | null;
   ogTitle: string | null;
   twitterTitle: string | null;
-} {
+  htmlTitle: string | null;
+  publisher: string | null;
+  author: string | null;
+  publishedAt: string | null;
+};
+
+export function extractArticleHeadMetadata(htmlHead: string): ArticleHeadMetadata {
   const metadata = new Map<string, string>();
   for (const tag of htmlHead.match(/<meta\b[^>]*>/gi) ?? []) {
     const attributes = metaAttributes(tag);
@@ -57,6 +64,11 @@ export function extractArticleHeadMetadata(htmlHead: string): {
     twitterImage: metadata.get('twitter:image') ?? null,
     ogTitle: title('og:title'),
     twitterTitle: title('twitter:title'),
+    htmlTitle: normaliseMetadataText(
+      /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(htmlHead)?.[1] ?? '') || null,
+    publisher: title('og:site_name'),
+    author: title('author') ?? title('article:author'),
+    publishedAt: title('article:published_time'),
   };
 }
 
@@ -99,14 +111,14 @@ async function readHtmlHead(response: Response, signal: AbortSignal): Promise<st
   }
 }
 
-export async function discoverArticleHeadPreviewMetadata(article: DiscoveredArticle,
-  source: Source): Promise<Pick<DiscoveredArticle, 'preview_url' | 'display_title' |
-    'display_title_origin' | 'preview_metadata_checked_at'>> {
-  if (source.content_fetch_policy !== 'article_head_allowed' ||
-      source.image_policy !== 'remote_preview') {
+export async function fetchArticleHeadMetadata(canonicalUrl: string,
+  source: Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>):
+  Promise<ArticleHeadMetadata & { previewUrl: string | null; previewError: string | null;
+    checkedAt: string }> {
+  if (source.image_policy !== 'remote_preview') {
     throw new ScanError('article_head_not_permitted');
   }
-  const articleUrl = publisherHttpsUrl(article.canonical_url, source.canonical_domain);
+  const articleUrl = publisherHttpsUrl(canonicalUrl, source.canonical_domain);
   if (!articleUrl) throw new ScanError('invalid_article_head_url');
 
   const controller = new AbortController();
@@ -138,16 +150,32 @@ export async function discoverArticleHeadPreviewMetadata(article: DiscoveredArti
       throw new ScanError('article_head_not_html');
     }
     const metadata = extractArticleHeadMetadata(await readHtmlHead(response, controller.signal));
-    const preview = [metadata.ogImage, metadata.twitterImage]
-      .map(value => remotePreviewUrl(value, source.canonical_domain)).find(Boolean) ?? null;
-    const displayTitle = compactPublisherTitle(article.title,
-      [metadata.ogTitle, metadata.twitterTitle]);
-    return {
-      preview_url: preview,
-      display_title: displayTitle,
-      display_title_origin: displayTitle ? 'publisher' : null,
-      preview_metadata_checked_at: new Date().toISOString(),
-    };
+    const candidates = [metadata.ogImage, metadata.twitterImage].filter(
+      (value): value is string => Boolean(value));
+    const preview = candidates
+      .map(value => source.source_key === 'the-guardian'
+        ? guardianRemotePreviewUrl(value)
+        : remotePreviewUrl(value, source.canonical_domain)).find(Boolean) ?? null;
+    let previewError: string | null = null;
+    if (!preview && candidates.length > 0) {
+      try { previewError = `invalid_preview_image_host:${new URL(candidates[0]!).hostname}`; }
+      catch { previewError = 'invalid_preview_image_url'; }
+    } else if (!preview) previewError = 'preview_image_metadata_missing';
+    return { ...metadata, previewUrl: preview, previewError,
+      checkedAt: new Date().toISOString() };
   } finally { clearTimeout(timeout); }
 }
 
+export async function discoverArticleHeadPreviewMetadata(article: DiscoveredArticle,
+  source: Source): Promise<Pick<DiscoveredArticle, 'preview_url' | 'display_title' |
+    'display_title_origin' | 'preview_metadata_checked_at'>> {
+  const metadata = await fetchArticleHeadMetadata(article.canonical_url, source);
+    const displayTitle = compactPublisherTitle(article.title,
+      [metadata.ogTitle, metadata.twitterTitle]);
+    return {
+      preview_url: metadata.previewUrl,
+      display_title: displayTitle,
+      display_title_origin: displayTitle ? 'publisher' : null,
+      preview_metadata_checked_at: metadata.checkedAt,
+    };
+}
