@@ -195,12 +195,15 @@ and hashes the canonical URL with SHA-256. Unique URL/hash constraints prevent
 exact duplicates. Rediscovery updates only last-seen/updated timestamps. It cannot
 restore rejected/hidden articles or overwrite manual content/image choices.
 
-All new AQN articles are relevant without UK/topic filtering. The seeded
+All new AQN articles are relevant without UK/topic filtering. Its currently seeded
 `auto_approve` policy creates them approved with `trusted_source_auto` provenance;
 AI does not participate. AQN snapshots `standard` review level because the contract
-keeps review levels to standard/enhanced; its exception is represented by publication
-policy and approval method. If an operator changes AQN to manual, the shared policy
-gate fails conservatively to pending until the contract/config discrepancy is resolved.
+keeps review levels to standard/enhanced; its configured behaviour is represented by
+publication policy and approval method. Source publication policy is authoritative and
+prospective: any supported source deliberately set to `auto_approve` applies that rule
+to future otherwise-eligible discoveries, while changing a source to `manual` makes
+future discoveries Pending. Rediscovery does not apply a source-policy change to an
+existing article.
 
 Guardian uses the Gary Fuller, Damian Carrington and Fiona Harvey profile RSS feeds,
 the direct Guardian Air Pollution feed, and seven broader Environment, Pollution,
@@ -217,13 +220,18 @@ that match the deterministic metadata-only AQ filter or an `always_include` auth
 rule; they do not require a profile rule for their route, and run rows record
 `items_filtered`. Stale profile work whose rule was disabled or removed is recorded
 as skipped and acknowledged without fetching the feed. Broader-feed bylines match
-only configured exact full-name aliases. Gary Fuller matches use
+only configured exact full-name aliases. An enabled matching author rule takes
+precedence over source policy: `auto_approve` uses `trusted_author_auto`, `pending`
+remains Pending, and `inherit_source` follows the source rule. Gary Fuller matches use
 `trusted_author_auto` plus `approval_author_rule_key='guardian:gary-fuller'`;
-Damian Carrington, Fiona Harvey and other Guardian Air Pollution items remain
-Pending. A Pending overlap can be promoted once, while Approved, Rejected and Hidden
-state is preserved. Per-route evidence records publisher-RSS provenance, matched
-author keys and first/last observation counts. Its author-auto flag is set only on the
-route whose observation inserted an Approved article or promoted Pending to Approved;
+Damian Carrington and Fiona Harvey remain Pending under their explicit author rules.
+Other Guardian Air Pollution items currently remain Pending because Guardian's source
+policy is `manual`; if an operator changes it to `auto_approve`, they instead use
+`trusted_source_auto`. A Pending overlap can be promoted once, while Approved,
+Rejected and Hidden state is preserved. Per-route evidence records publisher-RSS
+provenance, matched author keys and first/last observation counts. Its author-auto flag
+is set only on the route whose observation inserted an Approved article or promoted
+Pending to Approved;
 later overlapping routes do not inherit an earlier auto-approval event. Guardian
 article-head/body access remains disabled. For title AI only, the parser extracts the
 first HTML paragraph of RSS `description` as transient standfirst context and discards

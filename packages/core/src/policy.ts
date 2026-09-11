@@ -90,8 +90,7 @@ export function initialEditorialState(source: Source, authorRule: AuthorRule | n
   if (authorRule?.enabled && authorRule.publication_policy === 'pending') {
     return { status: 'pending', approval_method: null, approval_author_rule_key: null };
   }
-  // Only AQN has an operational trusted-source exception in this slice.
-  if (source.source_key === 'air-quality-news' && source.publication_policy === 'auto_approve') {
+  if (source.publication_policy === 'auto_approve') {
     return { status: 'approved', approval_method: 'trusted_source_auto',
       approval_author_rule_key: null };
   }
