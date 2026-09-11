@@ -1,5 +1,6 @@
 import { boundedLimit, guardianRemotePreviewUrl, HttpError, httpFailure, json, remotePreviewUrl,
   type PublicArticle } from '@uk-aq-media/core';
+import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 
 type FeedRow = PublicArticle & { feed_sort_at: string; topics_json: string;
   pollutants_json: string; locations_json: string };
@@ -78,11 +79,16 @@ async function articleImage(request: Request, env: MediaPublicEnv,
   const publisherUrl = row.source_key === 'the-guardian'
     ? guardianRemotePreviewUrl(row.og_image_url)
     : remotePreviewUrl(row.og_image_url, row.canonical_domain);
-  if (!publisherUrl) throw new HttpError(404, 'image_not_found');
+  if (!publisherUrl || !row.og_image_url) throw new HttpError(404, 'image_not_found');
 
   const requestUrl = new URL(request.url);
-  requestUrl.search = '';
-  const cacheKey = new Request(requestUrl.href, { method: 'GET' });
+  const expectedVersion = await imageCacheVersion(row.og_image_url);
+  const suppliedVersion = requestUrl.searchParams.get('v');
+  if (suppliedVersion !== null && suppliedVersion !== expectedVersion) {
+    throw new HttpError(404, 'image_version_not_current');
+  }
+  const cacheKey = new Request(await versionedArticleImageUrl(requestUrl.origin, id,
+    row.og_image_url), { method: 'GET' });
   try {
     const cached = await caches.default.match(cacheKey);
     if (cached) return cached;
@@ -167,13 +173,13 @@ export default {
         statement.bind(limit + 1)).all<FeedRow>();
       const page = results.slice(0, limit);
       const last = page.at(-1);
-      const articles = page.map(({ feed_sort_at: _sort, topics_json, pollutants_json,
-        locations_json, featured, ...article }) => ({ ...article,
+      const articles = await Promise.all(page.map(async ({ feed_sort_at: _sort, topics_json,
+        pollutants_json, locations_json, featured, ...article }) => ({ ...article,
         preview_image_url: article.og_image_url
-          ? new URL(`/article-images/${article.id}`, url.origin).href : null,
+          ? await versionedArticleImageUrl(url.origin, article.id, article.og_image_url) : null,
         featured: featured === 1,
         topics: JSON.parse(topics_json), pollutants: JSON.parse(pollutants_json),
-        locations: JSON.parse(locations_json) }));
+        locations: JSON.parse(locations_json) })));
       return json({ articles, next_before: results.length > limit && last ?
         btoa(JSON.stringify([last.feed_sort_at, last.id])) : null }, 200,
       'public, max-age=300, s-maxage=300, must-revalidate');

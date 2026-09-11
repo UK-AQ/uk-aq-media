@@ -4,6 +4,10 @@ import {
   discoverGuardianPreviewForArticle, GUARDIAN_ROUTES,
   type GuardianPreviewCandidate, type GuardianPreviewLookup,
 } from '@uk-aq-media/discovery';
+import {
+  applyGuardianImageRepairPlan, buildGuardianImageRepairPlan,
+  requireCurrentGuardianImageRepairPlan,
+} from './guardian-image-bulk';
 
 type Action = 'approve' | 'reject' | 'hide' | 'unhide';
 const transitions: Record<Action, { from: Status[]; to: Status; event: string }> = {
@@ -22,6 +26,10 @@ const GuardianImageApplyBody = z.object({
   expected_current_image_url: z.string().min(1).max(2048).nullable(),
   proposed_image_url: z.string().min(1).max(2048),
   confirm_replace_existing: z.literal(true),
+}).strict();
+const GuardianBulkImageApplyBody = z.object({
+  confirm_bulk_replace: z.literal(true),
+  repair_token: z.string().regex(/^guardian-image-repair-v1:[a-f0-9]{64}$/),
 }).strict();
 const MAX_ADMIN_BODY_BYTES = 4096;
 const MAX_HUMAN_DISPLAY_TITLE_CHARACTERS = 500;
@@ -372,6 +380,32 @@ async function applyGuardianImageRefresh(request: Request, db: D1Database,
     }, input.route_key) });
 }
 
+async function previewBulkGuardianImageRefresh(db: D1Database): Promise<Response> {
+  return json({ repair: await buildGuardianImageRepairPlan(db) });
+}
+
+async function applyBulkGuardianImageRefresh(request: Request,
+  db: D1Database): Promise<Response> {
+  const parsed = GuardianBulkImageApplyBody.safeParse(await boundedJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_guardian_bulk_image_apply_body');
+  const plan = await buildGuardianImageRepairPlan(db);
+  requireCurrentGuardianImageRepairPlan(plan, parsed.data.repair_token);
+  const changedArticleIds = await applyGuardianImageRepairPlan(db, plan);
+  return json({ repair: {
+    ...plan,
+    apply: {
+      changed_rows: changedArticleIds.length,
+      changed_article_ids: changedArticleIds,
+      unchanged_rows: plan.counts.already_best_rows,
+      skipped_rows: plan.counts.ambiguous_existing_image_rows +
+        plan.counts.rows_outside_current_rss + plan.counts.conflicting_proposal_rows +
+        plan.counts.no_permitted_candidate_rows +
+        (plan.changes.length - changedArticleIds.length),
+      compare_and_swap_skipped_rows: plan.changes.length - changedArticleIds.length,
+    },
+  } });
+}
+
 async function mutate(request: Request, db: D1Database, id: number, action: Action): Promise<Response> {
   const key = request.headers.get('Idempotency-Key');
   if (!key || !/^[A-Za-z0-9_-]{16,100}$/.test(key)) throw new HttpError(400, 'idempotency_key_required');
@@ -412,6 +446,13 @@ export default {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       const url = new URL(request.url);
+      const bulkImageRefresh = /^\/admin\/guardian-image-refresh\/(preview|apply)$/.exec(url.pathname);
+      if (bulkImageRefresh) {
+        if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+        return bulkImageRefresh[1] === 'preview'
+          ? await previewBulkGuardianImageRefresh(env.MEDIA_DB)
+          : await applyBulkGuardianImageRefresh(request, env.MEDIA_DB);
+      }
       const imageRefresh = /^\/admin\/articles\/([1-9]\d*)\/guardian-image-refresh\/(preview|apply)$/.exec(url.pathname);
       if (imageRefresh) {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);

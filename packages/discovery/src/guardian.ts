@@ -21,6 +21,30 @@ export type GuardianPreviewLookup = {
   current: GuardianPreviewCandidate | null;
 };
 
+export type GuardianRssCandidateEvidence = GuardianPreviewCandidate & {
+  route_keys: GuardianRouteKey[];
+};
+
+export type GuardianRssArticleImageEvidence = {
+  canonical_url: string;
+  route_keys: GuardianRouteKey[];
+  candidates: GuardianRssCandidateEvidence[];
+  proposed: GuardianPreviewCandidate | null;
+  ambiguous_proposal: boolean;
+};
+
+export type GuardianRssImageView = {
+  routes_fetched: GuardianRouteKey[];
+  article_observations: number;
+  articles: Map<string, GuardianRssArticleImageEvidence>;
+};
+
+export type GuardianRouteFeed = {
+  route_key: GuardianRouteKey;
+  xml: string;
+  max_items: number;
+};
+
 const guardianCandidateKindPriority: Record<RssPreviewCandidateKind, number> = {
   'media:content': 3,
   enclosure: 2,
@@ -61,18 +85,25 @@ function compareDimension(left: number | null, right: number | null): number {
   return left > right ? -1 : 1;
 }
 
+function compareGuardianPreviewQuality(left: GuardianPreviewCandidate,
+  right: GuardianPreviewCandidate): number {
+  const width = compareDimension(left.width, right.width);
+  if (width !== 0) return width;
+  const height = compareDimension(left.height, right.height);
+  if (height !== 0) return height;
+  return guardianCandidateKindPriority[right.kind] - guardianCandidateKindPriority[left.kind];
+}
+
+function compareGuardianPreviewCandidates(left: GuardianPreviewCandidate,
+  right: GuardianPreviewCandidate): number {
+  return compareGuardianPreviewQuality(left, right) || left.rss_order - right.rss_order;
+}
+
 export function selectGuardianPreviewCandidate(
   candidates: RssPreviewCandidate[],
 ): GuardianPreviewCandidate | null {
-  return permittedGuardianPreviewCandidates(candidates).sort((left, right) => {
-    const width = compareDimension(left.width, right.width);
-    if (width !== 0) return width;
-    const height = compareDimension(left.height, right.height);
-    if (height !== 0) return height;
-    const kind = guardianCandidateKindPriority[right.kind] -
-      guardianCandidateKindPriority[left.kind];
-    return kind !== 0 ? kind : left.rss_order - right.rss_order;
-  })[0] ?? null;
+  return permittedGuardianPreviewCandidates(candidates)
+    .sort(compareGuardianPreviewCandidates)[0] ?? null;
 }
 
 export const GUARDIAN_ROUTES = [
@@ -162,6 +193,117 @@ async function configuredGuardianFeed(source: Source, routeKey: string): Promise
     xml: await readRssFeed(fetchUrl, 'guardian'),
     max_items: route.max_items,
   };
+}
+
+type MutableGuardianRssArticleEvidence = {
+  route_keys: Set<GuardianRouteKey>;
+  candidates: Map<string, {
+    candidate: GuardianPreviewCandidate;
+    route_keys: Set<GuardianRouteKey>;
+  }>;
+  route_proposals: Map<GuardianRouteKey, GuardianPreviewCandidate>;
+};
+
+const guardianRouteOrder = new Map(GUARDIAN_ROUTES.map((route, index) =>
+  [route.route_key, index]));
+
+function orderedRouteKeys(keys: Iterable<GuardianRouteKey>): GuardianRouteKey[] {
+  return [...keys].sort((left, right) =>
+    (guardianRouteOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
+    (guardianRouteOrder.get(right) ?? Number.MAX_SAFE_INTEGER));
+}
+
+export function guardianRssImageViewFromFeeds(source: Source,
+  feeds: GuardianRouteFeed[]): GuardianRssImageView {
+  const feedKeys = new Set(feeds.map(feed => feed.route_key));
+  if (feedKeys.size !== feeds.length) throw new ScanError('duplicate_guardian_route_feed');
+  const builders = new Map<string, MutableGuardianRssArticleEvidence>();
+  let articleObservations = 0;
+  const orderedFeeds = [...feeds].sort((left, right) =>
+    (guardianRouteOrder.get(left.route_key) ?? Number.MAX_SAFE_INTEGER) -
+    (guardianRouteOrder.get(right.route_key) ?? Number.MAX_SAFE_INTEGER));
+  for (const feed of orderedFeeds) {
+    const parsed = parseRssItems(feed.xml, feed.max_items, {
+      allow_untyped_image_media_content: true,
+    });
+    articleObservations += parsed.items.length;
+    for (const item of parsed.items) {
+      const publisherUrl = publisherHttpsUrl(item.raw_url, source.canonical_domain);
+      if (!publisherUrl) continue;
+      let canonicalUrl: string;
+      try { canonicalUrl = canonicalizeUrl(publisherUrl, source.canonical_domain); }
+      catch { continue; }
+      let builder = builders.get(canonicalUrl);
+      if (!builder) {
+        builder = { route_keys: new Set(), candidates: new Map(), route_proposals: new Map() };
+        builders.set(canonicalUrl, builder);
+      }
+      builder.route_keys.add(feed.route_key);
+      const permitted = permittedGuardianPreviewCandidates(item.preview_candidates);
+      const routeProposal = selectGuardianPreviewCandidate(item.preview_candidates);
+      if (routeProposal) {
+        const previous = builder.route_proposals.get(feed.route_key);
+        if (!previous || compareGuardianPreviewCandidates(routeProposal, previous) < 0) {
+          builder.route_proposals.set(feed.route_key, routeProposal);
+        }
+      }
+      for (const candidate of permitted) {
+        const existing = builder.candidates.get(candidate.url);
+        if (!existing) {
+          builder.candidates.set(candidate.url, {
+            candidate,
+            route_keys: new Set([feed.route_key]),
+          });
+          continue;
+        }
+        existing.route_keys.add(feed.route_key);
+        if (compareGuardianPreviewCandidates(candidate, existing.candidate) < 0) {
+          existing.candidate = candidate;
+        }
+      }
+    }
+  }
+
+  const articles = new Map<string, GuardianRssArticleImageEvidence>();
+  for (const [canonicalUrl, builder] of [...builders.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))) {
+    const proposals = [...builder.route_proposals.values()].sort((left, right) =>
+      compareGuardianPreviewQuality(left, right) || left.url.localeCompare(right.url));
+    const leading = proposals[0] ?? null;
+    const ambiguousProposal = leading !== null && proposals.some(candidate =>
+      candidate.url !== leading.url && compareGuardianPreviewQuality(candidate, leading) === 0);
+    const candidates = [...builder.candidates.values()].map(evidence => ({
+      ...evidence.candidate,
+      route_keys: orderedRouteKeys(evidence.route_keys),
+    })).sort((left, right) =>
+      compareGuardianPreviewQuality(left, right) || left.url.localeCompare(right.url));
+    articles.set(canonicalUrl, {
+      canonical_url: canonicalUrl,
+      route_keys: orderedRouteKeys(builder.route_keys),
+      candidates,
+      proposed: ambiguousProposal ? null : leading,
+      ambiguous_proposal: ambiguousProposal,
+    });
+  }
+  return {
+    routes_fetched: orderedFeeds.map(feed => feed.route_key),
+    article_observations: articleObservations,
+    articles,
+  };
+}
+
+export async function discoverGuardianCurrentRssImageView(
+  source: Source,
+): Promise<GuardianRssImageView> {
+  const routeKeys = configuredGuardianRouteKeys(source);
+  if (routeKeys.length !== GUARDIAN_ROUTES.length) {
+    throw new ScanError('guardian_route_config_mismatch');
+  }
+  const feeds = await Promise.all(routeKeys.map(async routeKey => {
+    const feed = await configuredGuardianFeed(source, routeKey);
+    return { route_key: routeKey, ...feed };
+  }));
+  return guardianRssImageViewFromFeeds(source, feeds);
 }
 
 export async function guardianPreviewForArticleFromFeed(xml: string, source: Source,

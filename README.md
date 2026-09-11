@@ -58,15 +58,18 @@ Public:
 
 - `GET /articles?limit=20` — default 20, maximum 50; newest first by publication
   time (discovery time when absent), then descending ID.
-- `GET /article-images/:id` — transiently cached publisher preview bytes for a
-  permitted approved article; 24-hour edge TTL and a 5 MiB upstream limit.
+- `GET /article-images/:id?v=<image-version>` — transiently cached publisher preview bytes
+  for a permitted approved article; the SHA-256-derived version changes with the stored
+  publisher URL, while the edge TTL remains 24 hours and the upstream limit remains 5 MiB.
 - `next_before` is an opaque cursor. URL-encode it as the `before` parameter for
   the next page. No offset pagination or generic query language.
 
 The response includes original headline/link/publisher, an optional publisher
 compact display title, available date/author, structured tags, optional UK AQ
 editorial fields with their human/AI origin, and a permitted UK AQ cached-preview
-URL. Descriptions/bodies and internal fields are absent.
+URL. Each `preview_image_url` contains the current stored-image version; the proxy derives
+and validates that version from D1 rather than trusting arbitrary request query parameters.
+Descriptions/bodies and internal fields are absent.
 Only approved articles are selected. Successful responses allow five minutes of
 caching; errors use `no-store`. No cross-origin integration is configured yet.
 
@@ -98,6 +101,13 @@ Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
   `expected_current_image_url`, `proposed_image_url`, and
   `"confirm_replace_existing": true` — refetch and revalidate the current RSS proposal,
   then replace that single Guardian article image using a compare-and-swap update.
+- `POST /admin/guardian-image-refresh/preview` — fetch each of the eleven configured,
+  at-most-ten-item Guardian RSS routes once and return the bounded safe bulk-repair plan plus
+  its deterministic `repair_token`, without mutation.
+- `POST /admin/guardian-image-refresh/apply` with
+  `{ "confirm_bulk_replace": true, "repair_token": "..." }` — rebuild the plan from fresh
+  RSS and D1 state, reject a changed token with 409, then apply the still-current plan through
+  one bounded compare-and-swap D1 statement.
 
 Every article-status transition POST requires a unique `Idempotency-Key` of 16–100 ASCII letters, digits,
 hyphens or underscores (a UUID is suitable). Reuse the same key when retrying the
@@ -109,10 +119,13 @@ failure is 503. Status-transition POST bodies are unused. Display-title operatio
 do not change article status/revision or create article-status audit events; human
 titles are single-line and bounded to 500 Unicode characters, not the 64-character
 automatic-AI limit.
-Guardian image refresh is single-article and never scheduled or bulk-applied. Existing image
-origin cannot currently be distinguished durably, so every non-null replacement requires the
-individual preview/apply decision and exact expected-current URL; stale or changed proposals
-fail with 409. The image-only update does not change article status/revision or create an event.
+Guardian image refresh is never scheduled. The bulk path may fill a null image, or replace a
+non-null image only when that exact stored URL is still present among the permitted candidates
+for the same article in current configured RSS. Existing URLs absent from that candidate set are
+reported as `ambiguous_existing_image` and left untouched; articles outside current RSS coverage
+are counted and left untouched. Duplicate route sightings merge by canonical URL and cannot
+produce duplicate writes. The single-article path remains available for explicit editorial
+decisions. Both paths leave article status/revision and events unchanged.
 
 A state change and append-only event commit atomically through SQL triggers.
 `MEDIA_SYNC_TOKEN` is reserved for later read-only `/sync` endpoints and is never
