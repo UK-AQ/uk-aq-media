@@ -7,7 +7,8 @@ import {
   displayTitleNeuronRates,
   suggestDisplayTitlePermitted,
 } from '@uk-aq-media/enrichment';
-import { discoverAqn, discoverAqnPreviewMetadata } from './aqn';
+import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
+import { discoverAqn } from './aqn';
 import {
   configuredGuardianRouteKeys, discoverGuardian, guardianProfileRule, guardianRouteKind,
   guardianRouteRequiresRelevance,
@@ -26,6 +27,9 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
+export {
+  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata,
+} from './article-head-metadata';
 export {
   configuredGuardianRouteKeys, discoverGuardianCurrentRssImageView,
   discoverGuardianPreviewForArticle, GUARDIAN_ROUTES, guardianPreviewForArticleFromFeed,
@@ -288,7 +292,7 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
   }
 }
 
-async function fillAqnPreviewMetadata(db: D1Database, source: Source,
+async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
   articles: DiscoveredArticle[]): Promise<void> {
   if (source.content_fetch_policy !== 'article_head_allowed' ||
       source.image_policy !== 'remote_preview' || articles.length === 0) return;
@@ -304,10 +308,11 @@ async function fillAqnPreviewMetadata(db: D1Database, source: Source,
     const articleAllowsPreview = !state || state.image_policy === 'remote_preview';
     if (hasPreview || !articleAllowsPreview || state?.preview_metadata_checked_at) continue;
     try {
-      Object.assign(article, await discoverAqnPreviewMetadata(article, source));
+      Object.assign(article, await discoverArticleHeadPreviewMetadata(article, source));
     } catch (error) {
       console.warn(JSON.stringify({
-        event: 'aqn_article_head_metadata_failed',
+        event: 'article_head_metadata_failed',
+        source_key: source.source_key,
         article_hash: article.canonical_url_hash,
         error_code: error instanceof ScanError ? error.code : 'article_head_failed',
       }));
@@ -358,7 +363,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     invalid = result.items_invalid;
     if (seen > 0 && result.articles.length === 0) throw new ScanError('no_valid_feed_entries');
     const unique = new Map(result.articles.map(article => [article.canonical_url_hash, article]));
-    if (sourceKey === 'air-quality-news') await fillAqnPreviewMetadata(db, source, [...unique.values()]);
+    await fillArticleHeadPreviewMetadata(db, source, [...unique.values()]);
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
     const acceptedArticles: DiscoveredArticle[] = [];
