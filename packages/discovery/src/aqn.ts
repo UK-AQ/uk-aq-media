@@ -170,7 +170,8 @@ export async function discoverAqn(source: Source): Promise<{
 export async function parseAqnFeed(xml: string, source: Source): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
-  const parsed = parseRssItems(xml, source.discovery_config.max_items ?? 20);
+  const parsed = parseRssItems(xml, source.discovery_config.max_items ?? 20,
+    { title_context: 'aqn_leading_600' });
   const articles: DiscoveredArticle[] = [];
   let invalid = parsed.items_invalid;
   for (const item of parsed.items) {
@@ -183,6 +184,7 @@ export async function parseAqnFeed(xml: string, source: Source): Promise<{
     articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
       original_url: item.raw_url, title: item.title, author: item.author,
       published_at: item.published_at, categories: item.categories,
+      title_context: item.title_context,
       preview_url: preview, display_title: null, display_title_origin: null,
       preview_metadata_checked_at: null });
   }

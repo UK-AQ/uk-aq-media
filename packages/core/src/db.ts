@@ -13,6 +13,7 @@ export interface DiscoveredArticle {
   author: string | null;
   published_at: string | null;
   categories: string[];
+  title_context: string | null;
   preview_url: string | null;
   display_title: string | null;
   display_title_origin: 'publisher' | null;

@@ -6,6 +6,7 @@
   "exports": "./src/index.ts",
   "dependencies": {
     "@uk-aq-media/core": "*",
+    "@uk-aq-media/enrichment": "*",
     "fast-xml-parser": "^5.11.1"
   }
 }

@@ -48,7 +48,8 @@
     ]
   },
   "vars": {
-    "MEDIA_AI_MAX_CALLS_PER_RUN": 0,
-    "MEDIA_AI_MODEL": ""
+    "MEDIA_AI_MAX_CALLS_PER_RUN": 10,
+    "MEDIA_AI_MAX_CALLS_PER_DAY": 50,
+    "MEDIA_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
   }
 }

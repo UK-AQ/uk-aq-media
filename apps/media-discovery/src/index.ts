@@ -1,8 +1,22 @@
 import {
   DiscoveryMessageSchema, recordQueueFailure, runSourceScan, scheduledGuardianRouteKeys,
-  type DiscoveryMessage,
+  type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
 import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
+
+function configuredDisplayTitleAi(env: MediaDiscoveryEnv): DisplayTitleAiRuntime | undefined {
+  const model = String(env.MEDIA_AI_MODEL).trim();
+  const perRun = Number(env.MEDIA_AI_MAX_CALLS_PER_RUN);
+  const perDay = Number(env.MEDIA_AI_MAX_CALLS_PER_DAY);
+  if (!/^@cf\/[a-z0-9._/-]+$/i.test(model) || model.length > 200 ||
+      !Number.isSafeInteger(perRun) || perRun < 1 || perRun > 10 ||
+      !Number.isSafeInteger(perDay) || perDay < 1 || perDay > 50) {
+    console.warn(JSON.stringify({ event: 'display_title_ai_configuration_disabled' }));
+    return undefined;
+  }
+  return { binding: env.AI, model, maximum_calls_per_run: perRun,
+    maximum_calls_per_day: perDay };
+}
 
 async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number> {
   try {
@@ -65,7 +79,7 @@ export default {
       }
       try {
         await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
-          message.id, message.attempts);
+          message.id, message.attempts, configuredDisplayTitleAi(env));
         message.ack();
       } catch {
         console.error(JSON.stringify({ event: 'discovery_message_failed', message_id: message.id }));

@@ -1,7 +1,11 @@
 import {
-  z, initialEditorialState, loadAuthorRules, loadSource,
+  z, initialEditorialState, loadAuthorRules, loadSource, permitsAi,
   type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
+import {
+  D1DailyDisplayTitleBudget, LocalCallBudget, WorkersAiDisplayTitleProvider,
+  suggestDisplayTitlePermitted,
+} from '@uk-aq-media/enrichment';
 import { discoverAqn, discoverAqnPreviewMetadata } from './aqn';
 import {
   configuredGuardianRouteKeys, discoverGuardian, guardianProfileRule, guardianRouteKind,
@@ -167,6 +171,106 @@ type ExistingPreviewState = {
   preview_metadata_checked_at: string | null;
 };
 
+export type DisplayTitleAiRuntime = {
+  binding: Ai;
+  model: string;
+  maximum_calls_per_run: number;
+  maximum_calls_per_day: number;
+};
+
+type ClaimedTitleArticle = {
+  id: number;
+  title: string;
+  author: string | null;
+};
+
+async function claimEligibleTitleArticle(db: D1Database, sourceKey: string,
+  article: DiscoveredArticle, claimedAt: string): Promise<ClaimedTitleArticle | null> {
+  return db.prepare(`UPDATE media_articles SET ai_title_attempted_at = ?
+    WHERE canonical_url_hash = ?
+      AND source_key = ?
+      AND status IN ('pending', 'approved')
+      AND display_title IS NULL
+      AND ai_title_suggestion IS NULL
+      AND ai_title_suggestion_state IS NULL
+      AND ai_title_attempted_at IS NULL
+      AND length(title) > 64
+    RETURNING id, title, author`).bind(claimedAt, article.canonical_url_hash, sourceKey)
+    .first<ClaimedTitleArticle>();
+}
+
+async function releaseUnusedTitleClaim(db: D1Database, id: number,
+  claimedAt: string): Promise<void> {
+  await db.prepare(`UPDATE media_articles SET ai_title_attempted_at = NULL
+    WHERE id = ? AND ai_title_attempted_at = ? AND ai_title_suggestion IS NULL`)
+    .bind(id, claimedAt).run();
+}
+
+async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
+  articles: DiscoveredArticle[], runtime: DisplayTitleAiRuntime): Promise<void> {
+  if (!permitsAi(source, 'metadata')) return;
+  const localBudget = new LocalCallBudget(runtime.maximum_calls_per_run);
+  const dailyBudget = new D1DailyDisplayTitleBudget(db, runtime.maximum_calls_per_day);
+  const provider = new WorkersAiDisplayTitleProvider(runtime.binding, runtime.model);
+
+  for (const article of articles) {
+    const claimedAt = new Date().toISOString();
+    let claimed: ClaimedTitleArticle | null;
+    try {
+      claimed = await claimEligibleTitleArticle(db, source.source_key, article, claimedAt);
+    } catch {
+      console.warn(JSON.stringify({ event: 'display_title_ai_claim_failed',
+        article_hash: article.canonical_url_hash }));
+      return;
+    }
+    if (!claimed) continue;
+
+    const outcome = await suggestDisplayTitlePermitted(source, {
+      publisher: source.name,
+      title: claimed.title,
+      title_context: article.title_context,
+      author: claimed.author ?? article.author,
+      categories: article.categories,
+    }, provider, localBudget, dailyBudget);
+    if (outcome.status === 'skipped') {
+      try { await releaseUnusedTitleClaim(db, claimed.id, claimedAt); }
+      catch {
+        console.warn(JSON.stringify({ event: 'display_title_ai_claim_release_failed',
+          article_id: claimed.id }));
+      }
+      console.info(JSON.stringify({ event: 'display_title_ai_skipped', article_id: claimed.id,
+        reason: outcome.reason }));
+      if (outcome.reason === 'local_budget' || outcome.reason === 'daily_budget') return;
+      continue;
+    }
+    if (outcome.status === 'failed') {
+      console.warn(JSON.stringify({ event: 'display_title_ai_failed', article_id: claimed.id,
+        reason: outcome.reason }));
+      continue;
+    }
+
+    try {
+      const stored = await db.prepare(`UPDATE media_articles SET
+        ai_title_suggestion = ?, ai_title_suggestion_state = 'pending',
+        ai_title_model = ?, ai_title_prompt_version = ?, ai_title_generated_at = ?,
+        ai_title_decided_at = NULL, updated_at = ?
+        WHERE id = ? AND ai_title_attempted_at = ?
+          AND status IN ('pending', 'approved')
+          AND display_title IS NULL AND ai_title_suggestion IS NULL
+        RETURNING id`).bind(outcome.title, outcome.provenance.model,
+          outcome.provenance.version, outcome.provenance.generated_at,
+          outcome.provenance.generated_at, claimed.id, claimedAt).first<{ id: number }>();
+      if (!stored) {
+        console.warn(JSON.stringify({ event: 'display_title_ai_store_skipped',
+          article_id: claimed.id }));
+      }
+    } catch {
+      console.warn(JSON.stringify({ event: 'display_title_ai_store_failed',
+        article_id: claimed.id }));
+    }
+  }
+}
+
 async function fillAqnPreviewMetadata(db: D1Database, source: Source,
   articles: DiscoveredArticle[]): Promise<void> {
   if (source.content_fetch_policy !== 'article_head_allowed' ||
@@ -195,7 +299,7 @@ async function fillAqnPreviewMetadata(db: D1Database, source: Source,
 }
 
 export async function runSourceScan(db: D1Database, sourceKey: string, routeKey: string | undefined,
-  messageId: string, attempt: number): Promise<void> {
+  messageId: string, attempt: number, displayTitleAi?: DisplayTitleAiRuntime): Promise<void> {
   const runId = crypto.randomUUID();
   const started = new Date().toISOString();
   // Resolve the FK inside SQL, so malformed/unknown source messages can still have diagnostics.
@@ -240,6 +344,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     if (sourceKey === 'air-quality-news') await fillAqnPreviewMetadata(db, source, [...unique.values()]);
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
+    const acceptedArticles: DiscoveredArticle[] = [];
     // AQN remains at <=20 items. Guardian is <=10 items per route, so its extra route-evidence
     // statement still keeps every Queue invocation comfortably bounded.
     for (const article of unique.values()) {
@@ -250,6 +355,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         filtered++;
         continue;
       }
+      acceptedArticles.push(article);
       const publicationRule = publicationAuthorRule(matchedRules);
       const selectedAutoRule = publicationRule?.publication_policy === 'auto_approve'
         ? publicationRule : null;
@@ -272,6 +378,12 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       WHERE id = ?`).bind(now, now, seen, invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
     await db.batch(statements);
+    // Discovery is already committed and authoritative. Title AI is best-effort advisory work;
+    // its context remains only in these in-memory feed items and no failure escapes this helper.
+    if (displayTitleAi) {
+      try { await generateDisplayTitleSuggestions(db, source, acceptedArticles, displayTitleAi); }
+      catch { console.warn(JSON.stringify({ event: 'display_title_ai_run_failed', run_id: runId })); }
+    }
   } catch (error) {
     const code = error instanceof ScanError ? error.code : 'source_scan_failed';
     try { await finishRun(db, runId, 'failed', seen, invalid, filtered, code); }

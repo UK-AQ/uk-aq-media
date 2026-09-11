@@ -103,7 +103,64 @@ export interface ParsedRssItem {
   author: string | null;
   published_at: string | null;
   categories: string[];
+  title_context: string | null;
   preview_candidates: unknown[];
+}
+
+type TitleContextMode = 'aqn_leading_600' | 'guardian_first_paragraph';
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = {
+    amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"',
+  };
+  return value.replace(/&(#(?:x[0-9a-f]+|\d+)|[a-z]+);/gi, (entity, key: string) => {
+    if (key[0] !== '#') return named[key.toLowerCase()] ?? entity;
+    const hexadecimal = key[1]?.toLowerCase() === 'x';
+    const codePoint = Number.parseInt(key.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+    try { return Number.isSafeInteger(codePoint) ? String.fromCodePoint(codePoint) : entity; }
+    catch { return entity; }
+  });
+}
+
+function normaliseDescriptionText(value: string): string {
+  return decodeHtmlEntities(value.replace(/<[^>]*>/g, ' '))
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function unicodeSlice(value: string, maximum: number): string {
+  return [...value].slice(0, maximum).join('');
+}
+
+function rawDescription(value: unknown): string | null {
+  const raw = typeof value === 'string' ? value : record(value)['#text'];
+  return typeof raw === 'string' ? raw : null;
+}
+
+function aqnTitleContext(description: string): string | null {
+  const normalised = normaliseDescriptionText(description);
+  if (!normalised) return null;
+  if ([...normalised].length <= 600) return normalised;
+  const bounded = unicodeSlice(normalised, 600);
+  let sentenceEnd = 0;
+  for (const match of bounded.matchAll(/[.!?](?=\s|$)/gu)) sentenceEnd = (match.index ?? 0) + 1;
+  if (sentenceEnd > 0) return bounded.slice(0, sentenceEnd).trim();
+  const lastSpace = bounded.lastIndexOf(' ');
+  return (lastSpace > 0 ? bounded.slice(0, lastSpace) : bounded).trim() || null;
+}
+
+function guardianTitleContext(description: string): string | null {
+  const paragraph = /<p(?:\s[^>]*)?>([\s\S]*?)<\/p\s*>/i.exec(description)?.[1];
+  if (!paragraph) return null;
+  const normalised = normaliseDescriptionText(paragraph);
+  return normalised ? unicodeSlice(normalised, 1000) : null;
+}
+
+function titleContext(value: unknown, mode: TitleContextMode | undefined): string | null {
+  if (!mode) return null;
+  const description = rawDescription(value);
+  if (!description) return null;
+  return mode === 'guardian_first_paragraph'
+    ? guardianTitleContext(description) : aqnTitleContext(description);
 }
 
 function isImageMediaContent(value: unknown, allowUntypedImageUrl: boolean): boolean {
@@ -118,7 +175,10 @@ function isImageMediaContent(value: unknown, allowUntypedImageUrl: boolean): boo
 }
 
 export function parseRssItems(xml: string, maxItems: number,
-  options: { allow_untyped_image_media_content?: boolean } = {}): {
+  options: {
+    allow_untyped_image_media_content?: boolean;
+    title_context?: TitleContextMode;
+  } = {}): {
   items: ParsedRssItem[];
   items_seen: number;
   items_invalid: number;
@@ -132,7 +192,8 @@ export function parseRssItems(xml: string, maxItems: number,
     htmlEntities: true, maxNestedTags: 32,
     isArray: name => ['item', 'category', 'dc:creator', 'media:content',
       'media:thumbnail', 'enclosure'].includes(name),
-    updateTag: name => ['description', 'content:encoded'].includes(name) ? false : name,
+    updateTag: name => name === 'content:encoded' ||
+      (name === 'description' && !options.title_context) ? false : name,
   });
   let parsed: unknown;
   try { parsed = parser.parse(xml); } catch { throw new ScanError('invalid_rss'); }
@@ -159,6 +220,7 @@ export function parseRssItems(xml: string, maxItems: number,
       published_at: Number.isFinite(dateMs) ? new Date(dateMs).toISOString() : null,
       categories: list(item.category).map(value => text(value, 100))
         .filter((category): category is string => category !== null).slice(0, 20),
+      title_context: titleContext(item.description, options.title_context),
       preview_candidates: [
         ...list(item['media:thumbnail']),
         ...list(item['media:content']).filter(value =>

@@ -1,4 +1,4 @@
-import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json,
+import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, z,
   type Status } from '@uk-aq-media/core';
 
 type Action = 'approve' | 'reject' | 'hide' | 'unhide';
@@ -8,6 +8,114 @@ const transitions: Record<Action, { from: Status[]; to: Status; event: string }>
   hide: { from: ['approved'], to: 'hidden', event: 'hidden' },
   unhide: { from: ['hidden'], to: 'approved', event: 'unhidden' },
 };
+
+const ManualDisplayTitleBody = z.object({ display_title: z.string().nullable() }).strict();
+const MAX_ADMIN_BODY_BYTES = 4096;
+const MAX_HUMAN_DISPLAY_TITLE_CHARACTERS = 500;
+
+type TitleMutationRow = {
+  id: number;
+  status: Status;
+  title: string;
+  display_title: string | null;
+  display_title_origin: 'publisher' | 'human' | 'ai' | null;
+  ai_title_suggestion: string | null;
+  ai_title_suggestion_state: 'pending' | 'accepted' | 'rejected' | null;
+  ai_title_decided_at: string | null;
+};
+
+async function boundedJson(request: Request): Promise<unknown> {
+  const contentType = request.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
+  if (contentType !== 'application/json') throw new HttpError(415, 'json_content_type_required');
+  const declaredLength = request.headers.get('Content-Length');
+  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > MAX_ADMIN_BODY_BYTES) {
+    throw new HttpError(413, 'request_body_too_large');
+  }
+  if (!request.body) throw new HttpError(400, 'invalid_json');
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+  let bytes = 0;
+  let body = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_ADMIN_BODY_BYTES) throw new HttpError(413, 'request_body_too_large');
+      body += decoder.decode(value, { stream: true });
+    }
+    body += decoder.decode();
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(400, 'invalid_json');
+  } finally {
+    try { await reader.cancel('admin body read complete or rejected'); } catch { /* best effort */ }
+  }
+  try { return JSON.parse(body) as unknown; }
+  catch { throw new HttpError(400, 'invalid_json'); }
+}
+
+function normaliseHumanDisplayTitle(value: string | null): string | null {
+  if (value === null) return null;
+  if (/[\r\n\u2028\u2029]/u.test(value) || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new HttpError(400, 'invalid_display_title');
+  }
+  const title = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  if (!title || [...title].length > MAX_HUMAN_DISPLAY_TITLE_CHARACTERS) {
+    throw new HttpError(400, 'invalid_display_title');
+  }
+  return title;
+}
+
+async function decideAiTitle(db: D1Database, id: number,
+  decision: 'accept' | 'reject'): Promise<Response> {
+  const now = new Date().toISOString();
+  const changed = decision === 'accept'
+    ? await db.prepare(`UPDATE media_articles SET
+        display_title = ai_title_suggestion, display_title_origin = 'ai',
+        ai_title_suggestion_state = 'accepted', ai_title_decided_at = ?, updated_at = ?
+        WHERE id = ? AND ai_title_suggestion_state = 'pending'
+          AND ai_title_suggestion IS NOT NULL
+        RETURNING id, status, title, display_title, display_title_origin,
+          ai_title_suggestion, ai_title_suggestion_state, ai_title_decided_at`)
+      .bind(now, now, id).first<TitleMutationRow>()
+    : await db.prepare(`UPDATE media_articles SET
+        ai_title_suggestion_state = 'rejected', ai_title_decided_at = ?, updated_at = ?
+        WHERE id = ? AND ai_title_suggestion_state = 'pending'
+          AND ai_title_suggestion IS NOT NULL
+        RETURNING id, status, title, display_title, display_title_origin,
+          ai_title_suggestion, ai_title_suggestion_state, ai_title_decided_at`)
+      .bind(now, now, id).first<TitleMutationRow>();
+  if (changed) return json({ article: changed });
+  const exists = await db.prepare('SELECT id FROM media_articles WHERE id = ?').bind(id).first();
+  throw new HttpError(exists ? 409 : 404,
+    exists ? 'no_pending_ai_title_suggestion' : 'article_not_found');
+}
+
+async function setHumanDisplayTitle(request: Request, db: D1Database,
+  id: number): Promise<Response> {
+  const parsed = ManualDisplayTitleBody.safeParse(await boundedJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_display_title_body');
+  const displayTitle = normaliseHumanDisplayTitle(parsed.data.display_title);
+  const now = new Date().toISOString();
+  const changed = await db.prepare(`UPDATE media_articles SET
+    display_title = ?,
+    display_title_origin = CASE WHEN ? IS NULL THEN NULL ELSE 'human' END,
+    ai_title_suggestion_state = CASE
+      WHEN ? IS NOT NULL AND ai_title_suggestion_state = 'pending' THEN 'rejected'
+      ELSE ai_title_suggestion_state END,
+    ai_title_decided_at = CASE
+      WHEN ? IS NOT NULL AND ai_title_suggestion_state = 'pending' THEN ?
+      ELSE ai_title_decided_at END,
+    updated_at = ?
+    WHERE id = ?
+    RETURNING id, status, title, display_title, display_title_origin,
+      ai_title_suggestion, ai_title_suggestion_state, ai_title_decided_at`)
+    .bind(displayTitle, displayTitle, displayTitle, displayTitle, now, now, id)
+    .first<TitleMutationRow>();
+  if (!changed) throw new HttpError(404, 'article_not_found');
+  return json({ article: changed });
+}
 
 async function mutate(request: Request, db: D1Database, id: number, action: Action): Promise<Response> {
   const key = request.headers.get('Idempotency-Key');
@@ -49,6 +157,21 @@ export default {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       const url = new URL(request.url);
+      const titleDecision = /^\/admin\/articles\/([1-9]\d*)\/display-title\/(accept-ai|reject-ai)$/.exec(url.pathname);
+      if (titleDecision) {
+        if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+        const id = Number(titleDecision[1]);
+        if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
+        return await decideAiTitle(env.MEDIA_DB, id,
+          titleDecision[2] === 'accept-ai' ? 'accept' : 'reject');
+      }
+      const titleEdit = /^\/admin\/articles\/([1-9]\d*)\/display-title$/.exec(url.pathname);
+      if (titleEdit) {
+        if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
+        const id = Number(titleEdit[1]);
+        if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
+        return await setHumanDisplayTitle(request, env.MEDIA_DB, id);
+      }
       const match = /^\/admin\/articles\/([1-9]\d*)\/(approve|reject|hide|unhide)$/.exec(url.pathname);
       if (match) {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);

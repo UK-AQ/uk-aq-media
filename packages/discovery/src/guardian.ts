@@ -54,7 +54,7 @@ function configuredRoute(source: Source, routeKey: string): {
       source.discovery_method !== 'rss' || source.publication_policy !== 'manual' ||
       source.review_level !== 'standard' ||
       source.content_fetch_policy !== 'discovery_metadata_only' ||
-      source.ai_content_policy !== 'disabled' || source.image_policy !== 'remote_preview') {
+      source.ai_content_policy !== 'metadata_only' || source.image_policy !== 'remote_preview') {
     throw new ScanError('guardian_policy_mismatch');
   }
   const expected = GUARDIAN_ROUTES.find(route => route.route_key === routeKey);
@@ -97,7 +97,10 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
   items_seen: number;
   items_invalid: number;
 }> {
-  const parsed = parseRssItems(xml, maxItems, { allow_untyped_image_media_content: true });
+  const parsed = parseRssItems(xml, maxItems, {
+    allow_untyped_image_media_content: true,
+    title_context: 'guardian_first_paragraph',
+  });
   const articles: DiscoveredArticle[] = [];
   let invalid = parsed.items_invalid;
   for (const item of parsed.items) {
@@ -117,6 +120,7 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
       author: item.author,
       published_at: item.published_at,
       categories: item.categories,
+      title_context: item.title_context,
       preview_url: preview,
       display_title: null,
       display_title_origin: null,

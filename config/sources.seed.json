@@ -15,7 +15,7 @@
       "retain_excerpt": false
     },
     "content_fetch_policy": "article_head_allowed",
-    "ai_content_policy": "disabled",
+    "ai_content_policy": "metadata_only",
     "image_policy": "remote_preview"
   },
   {
@@ -106,7 +106,7 @@
       "retain_excerpt": false
     },
     "content_fetch_policy": "discovery_metadata_only",
-    "ai_content_policy": "disabled",
+    "ai_content_policy": "metadata_only",
     "image_policy": "remote_preview"
   },
   {

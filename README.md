@@ -14,10 +14,10 @@ This README describes this implementation, not a replacement contract.
 | --- | --- |
 | `apps/media-public` | Approved public feed only; `MEDIA_DB` binding |
 | `apps/media-admin` | Bearer-authenticated editorial reads/transitions; `MEDIA_DB`, `MEDIA_ADMIN_TOKEN` |
-| `apps/media-discovery` | Authenticated scheduler receiver and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, dormant `AI` binding and dormant `scheduled()` fallback handler |
+| `apps/media-discovery` | Authenticated scheduler receiver and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `AI`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, and dormant `scheduled()` fallback handler |
 | `packages/core` | Shared source/article/policy types, D1 source loading, canonical URL identity, HTTP helpers |
 | `packages/discovery` | Shared bounded RSS handling, AQN/Guardian adapters, source-run/article/evidence persistence, typed work messages |
-| `packages/enrichment` | Provider-neutral structured result, policy gate, local budget and disabled Workers AI skeleton |
+| `packages/enrichment` | Policy-gated display-title prompt/provider seam, output validation and local/durable AI budgets; broader enrichment remains disabled |
 | `migrations` | Core tables/indexes/triggers, immutable initial source seed and forward policy/schema changes |
 | `config/sources.seed.json` | Current target source permission/discovery posture |
 | `scripts` | Seed validation/generation and local Wrangler tools |
@@ -43,7 +43,9 @@ It is an applied immutable baseline and inserts missing source identities only.
 Current source configuration advances through reviewed later migrations; `0003`
 moves only AQN's original `discovery_metadata_only` state to
 `article_head_allowed`, while `0004` enables the bounded Guardian routes and adds
-author-rule/route provenance. AQN and The Guardian are enabled; the other eight
+author-rule/route provenance; `0005` permits Guardian RSS preview images; and `0006`
+adds current AI-title suggestion fields/daily reservations and narrowly advances AQN
+and Guardian to metadata-only AI. AQN and The Guardian are enabled; the other eight
 adapters remain deferred.
 
 ## HTTP surface
@@ -75,14 +77,24 @@ Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
 - `POST /admin/articles/:id/reject` — pending/approved to rejected.
 - `POST /admin/articles/:id/hide` — approved to hidden.
 - `POST /admin/articles/:id/unhide` — hidden to approved.
+- `POST /admin/articles/:id/display-title/accept-ai` — publish the current Pending
+  AI suggestion as an AI-origin display title.
+- `POST /admin/articles/:id/display-title/reject-ai` — reject the current Pending
+  AI suggestion without publishing it.
+- `PUT /admin/articles/:id/display-title` with
+  `{ "display_title": "Human wording" }` — set/change a human-origin title for any
+  article; use `{ "display_title": null }` to clear it and restore publisher-title fallback.
 
-Every POST requires a unique `Idempotency-Key` of 16–100 ASCII letters, digits,
+Every article-status transition POST requires a unique `Idempotency-Key` of 16–100 ASCII letters, digits,
 hyphens or underscores (a UUID is suitable). Reuse the same key when retrying the
 same action. A successful replay returns the original receipt with `replayed: true`,
 even if another action subsequently changed the article. Reusing a key for another
 article/action or requesting an invalid transition returns 409. A missing key is
 400. Missing/wrong authentication is 401; unknown articles/routes are 404; storage
-failure is 503. The bodies of POST requests are unused.
+failure is 503. Status-transition POST bodies are unused. Display-title operations
+do not change article status/revision or create article-status audit events; human
+titles are single-line and bounded to 500 Unicode characters, not the 64-character
+automatic-AI limit.
 
 A state change and append-only event commit atomically through SQL triggers.
 `MEDIA_SYNC_TOKEN` is reserved for later read-only `/sync` endpoints and is never
@@ -137,8 +149,10 @@ bodies.
 
 Each AQN scan fetches `https://airqualitynews.com/feed/`, with no redirect
 following, a 20-second timeout, a 1 MiB limit and at most 20 recent entries. It
-rejects XML entity declarations, ignores feed descriptions and `content:encoded`,
-and stores metadata only. When a permitted preview remains missing, it may also
+rejects XML entity declarations and always excludes `content:encoded`. It extracts
+only a transient, at-most-600-character leading RSS-description context for title
+AI, preferring the last complete sentence within that bound; it does not persist the
+description. When a permitted preview remains missing, it may also
 fetch the canonical AQN article with redirects disabled, a 10-second timeout and a
 256 KiB limit, stopping and cancelling as soon as `</head>` is obtained. Only
 publisher social image/title metadata is extracted; article bodies and descriptions
@@ -180,7 +194,9 @@ state is preserved. Per-route evidence records publisher-RSS provenance, matched
 author keys and first/last observation counts. Its author-auto flag is set only on the
 route whose observation inserted an Approved article or promoted Pending to Approved;
 later overlapping routes do not inherit an earlier auto-approval event. Guardian
-article-body, AI and image access all remain disabled/blocked.
+article-head/body access remains disabled. For title AI only, the parser extracts the
+first HTML paragraph of RSS `description` as transient standfirst context and discards
+later paragraphs; `content:encoded` is never exposed.
 
 Successful scans atomically persist articles, exactly one creation/auto-approval
 event per new identity, and run counters. Runs record bounded codes rather than
@@ -189,17 +205,29 @@ Failures retry after five minutes, at most three times; without a dead-letter qu
 exhausted messages are discarded and the next scheduled scan retries discovery.
 A long outage can exceed the feed's recent window; historical recovery is deferred.
 
-All ten source configurations disable AI. Guardian remains discovery-metadata-only
-and image-blocked; the eight unimplemented sources retain the same conservative
-posture. No seed asserts a permanent legal
+AQN and Guardian allow metadata-only AI for the narrow display-title task. The eight
+unimplemented sources retain disabled AI. No seed asserts a permanent legal
 permission; Defra richer/OGL processing remains disabled pending its adapter work.
 Source-level and article-level image blocks are both checked on public reads.
 
-The enrichment package validates structured advisory results and provenance, gates
-input by source policy before provider access, and defaults its local call guard
-to zero. AQN is explicitly excluded. The Workers AI skeleton has no inference call,
-model default, crawling path, or paid fallback. The per-run guard is not a durable
-daily/account-wide budget: that is a prerequisite for enabling live AI later.
+Automatic display-title AI runs only for accepted AQN/Guardian feed items whose stored
+publisher title exceeds 64 Unicode characters, whose current status is Pending or
+Approved, and which have neither a display title nor a previous automatic attempt/current
+suggestion. It uses only publisher name, original title, the bounded source-specific RSS
+context, author and bounded RSS categories. Discovery commits before inference; title
+AI never participates in relevance, approval or article-state decisions.
+
+Workers AI uses configured model `MEDIA_AI_MODEL` (initially
+`@cf/meta/llama-3.3-70b-instruct-fp8-fast`), prompt version
+`media-display-title-v1`, temperature 0, JSON-schema output and a 64-token response
+bound, with each inference aborted after 20 seconds. Local validation rejects empty, malformed, multiline, control-character or
+over-64-character output. Suggestions remain Pending/internal until accepted, while
+public responses continue exposing only `display_title` plus the original `title`.
+`MEDIA_AI_MAX_CALLS_PER_RUN=10` is enforced per source scan and
+`MEDIA_AI_MAX_CALLS_PER_DAY=50` is atomically reserved by UTC day in D1. Budget,
+capacity, output or storage failure cannot fail discovery, and there is no paid-provider
+fallback. The pre-existing generic summary/`why_it_matters` enrichment path remains
+unsupported and disabled.
 
 See the [phase handover](docs/phase-1-handover.md) for manual resource wiring,
 real-operation validation, known limits and rollback.

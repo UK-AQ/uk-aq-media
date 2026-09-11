@@ -14,11 +14,13 @@ const columns = ['source_key', 'name', 'canonical_domain', 'source_type', 'enabl
 // regenerating the historical seed must therefore preserve both original states.
 const initialSources = sources.map(source => {
   if (source.source_key === 'air-quality-news') {
-    return { ...source, content_fetch_policy: 'discovery_metadata_only' as const };
+    return { ...source, content_fetch_policy: 'discovery_metadata_only' as const,
+      ai_content_policy: 'disabled' as const };
   }
   if (source.source_key === 'the-guardian') {
     return { ...source, enabled: false, discovery_method: 'deferred' as const,
-      discovery_config: { retain_excerpt: false as const }, image_policy: 'blocked' as const };
+      discovery_config: { retain_excerpt: false as const }, ai_content_policy: 'disabled' as const,
+      image_policy: 'blocked' as const };
   }
   return source;
 });
