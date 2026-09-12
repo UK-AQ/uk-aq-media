@@ -48,8 +48,11 @@ export function canonicalizeUrl(raw: string, source: PublisherDomainInput): stri
   if (normaliseDomain(url.hostname) === matchedDomain) url.hostname = matchedDomain;
   url.protocol = 'https:';
   url.hash = '';
+  const sourceKey = typeof source === 'string' ? null : source.source_key;
   for (const key of [...url.searchParams.keys()]) {
-    if (key.toLowerCase().startsWith('utm_') || trackingKeys.has(key.toLowerCase())) {
+    const normalisedKey = key.toLowerCase();
+    if (normalisedKey.startsWith('utm_') || trackingKeys.has(normalisedKey) ||
+        (sourceKey === 'openaq' && normalisedKey === 'source')) {
       url.searchParams.delete(key);
     }
   }

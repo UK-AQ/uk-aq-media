@@ -231,7 +231,11 @@ async function releaseUnusedTitleClaim(db: D1Database, id: number,
 
 async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
   articles: DiscoveredArticle[], runtime: DisplayTitleAiRuntime): Promise<void> {
-  if (!permitsAi(source, 'metadata')) return;
+  // Automatic inference remains explicitly limited to the two already-authorised sources.
+  // Other metadata-only sources may use the authenticated editorial generation path, but a
+  // routine discovery observation must not itself spend AI budget.
+  if (!['air-quality-news', 'the-guardian'].includes(source.source_key) ||
+      !permitsAi(source, 'metadata')) return;
   const localBudget = new LocalRequestBudget(runtime.maximum_requests_per_run);
   const ledger = new D1DisplayTitleNeuronLedger(db, runtime.maximum_titles_per_request);
   const provider = new WorkersAiDisplayTitleProvider(runtime.binding, runtime.model);

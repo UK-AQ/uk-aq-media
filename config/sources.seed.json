@@ -215,6 +215,78 @@
     "image_policy": "remote_preview"
   },
   {
+    "source_key": "carbon-brief",
+    "name": "Carbon Brief",
+    "canonical_domain": "carbonbrief.org",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "carbon-brief-feed",
+          "url": "https://www.carbonbrief.org/feed/",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "metadata_only",
+    "image_policy": "remote_preview"
+  },
+  {
+    "source_key": "openaq",
+    "name": "OpenAQ",
+    "canonical_domain": "openaq.medium.com",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "openaq-medium",
+          "url": "https://openaq.medium.com/feed",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "metadata_only",
+    "image_policy": "remote_preview"
+  },
+  {
+    "source_key": "phys-org",
+    "name": "Phys.org",
+    "canonical_domain": "phys.org",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "phys-org-environment",
+          "url": "https://phys.org/rss-feed/earth-news/environment/",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview"
+  },
+  {
     "source_key": "the-times",
     "name": "The Times",
     "canonical_domain": "thetimes.com",

@@ -2,7 +2,8 @@
 
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
-Independent RSS discovery. It is not connected to the public UK AQ website.
+Independent RSS discovery, plus specialist Carbon Brief, OpenAQ and Phys.org feeds.
+It is not connected to the public UK AQ website.
 
 The behavioural authority is the sibling
 [Media contract](../TEST-uk-aq-system-docs/system_docs/media/media_contract.md).
@@ -53,7 +54,9 @@ conservatively charges that UTC day's full local neuron budget. AQN and The Guar
 are enabled alongside the three manual publisher RSS adapters added by `0010`. Migration
 `0011` expands those publisher routes, gives The Independent its explicit legacy
 `independent.co.uk` domain family, and removes or retires Defra from the current source
-catalogue without deleting referenced history. Four publisher adapters remain deferred.
+catalogue without deleting referenced history. Migration `0012` adds Carbon Brief,
+OpenAQ and Phys.org as manual/Standard generic RSS publishers. Four publisher adapters
+remain deferred.
 
 ## HTTP surface
 
@@ -145,9 +148,10 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 25 }`
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 28 }`
   when all current routes and all three Guardian author rules are enabled: one AQN scan,
-  eleven Guardian routes, four BBC routes, four Sky routes and five Independent routes.
+  eleven Guardian routes, four BBC routes, four Sky routes, five Independent routes and
+  one route for each specialist publisher.
   Disabled or structurally mismatched author rules omit only their profile route, so
   `queued` reports the actual bounded message count. The
   count reflects only enabled, internally configured supported work and may be zero.
@@ -183,7 +187,8 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
 helper that selects only allowlisted AQN, Guardian, BBC News, Sky News and Independent
-work when each D1 source is current and enabled. The caller cannot supply source or
+work, plus Carbon Brief, OpenAQ and Phys.org, when each D1 source is current and enabled.
+The caller cannot supply source or
 route selection. AQN retains its route-less `source_scan`; every Guardian and generic
 publisher RSS route receives its own `source_scan`. The consumer reloads and validates
 D1 policy and exact adapter routes. Work messages carry identities, never bodies.
@@ -262,6 +267,19 @@ Independent keeps `the-independent.com` as its canonical domain while the explic
 `independent.co.uk` family (including subdomains such as `static.independent.co.uk`) is
 accepted for legacy article/image ownership; unrelated domains remain rejected.
 
+Carbon Brief uses `https://www.carbonbrief.org/feed/`, with only its exact current
+same-publisher redirect to `https://www.carbonbrief.org/feed` permitted. OpenAQ uses
+`https://openaq.medium.com/feed`; its emitted article host `openaq.medium.com` is the
+canonical source domain. Phys.org uses
+`https://phys.org/rss-feed/earth-news/environment/`. All three use the generic publisher
+RSS adapter, remain manual/Standard, retain no excerpt, and pass the deterministic AQ
+relevance filter. Carbon Brief and OpenAQ permit metadata-only display-title AI;
+Phys.org keeps title AI disabled so its original headlines remain observable. Discovery
+always stores the original feed headline in `title`, leaves `display_title` null, and does
+not invoke AI for any of these three sources. Carbon Brief and OpenAQ remain eligible for
+an explicit authenticated editorial title request; any resulting suggestion stays
+separately Pending until editorial acceptance.
+
 Successful scans atomically persist articles, exactly one creation/auto-approval
 event per new identity, and run counters. Runs record bounded codes rather than
 feed content/error dumps. Queue acknowledgement follows completion of those writes.
@@ -269,8 +287,10 @@ Failures retry after five minutes, at most three times; without a dead-letter qu
 exhausted messages are discarded and the next scheduled scan retries discovery.
 A long outage can exceed the feed's recent window; historical recovery is deferred.
 
-AQN and Guardian allow metadata-only AI for the narrow display-title task. The three
-manual publisher RSS sources and four deferred publishers retain disabled AI. No seed
+AQN and Guardian retain automatic metadata-only AI for the narrow display-title task.
+Carbon Brief and OpenAQ permit the same bounded metadata use only through an explicit
+authenticated editorial request; discovery does not call AI for them. Phys.org, the three
+mainstream manual publisher RSS sources and four deferred publishers retain disabled AI. No seed
 asserts a permanent legal permission; Defra is retired from the current Media source
 catalogue.
 Source-level and article-level image blocks are both checked on public reads.
