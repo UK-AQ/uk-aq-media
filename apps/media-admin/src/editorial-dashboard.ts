@@ -3,9 +3,9 @@ import {
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
   loadSource, publisherHttpsUrl, remotePreviewUrl, z,
 } from '@uk-aq-media/core';
+import { fetchArticleHeadMetadata } from '@uk-aq-media/discovery';
 
 const MAX_BODY_BYTES = 16 * 1024;
-const MAX_HEAD_BYTES = 256 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_LIMIT = 50;
@@ -59,6 +59,7 @@ const ManualArticleBody = z.object({
 }).strict();
 const MetadataApplyBody = z.object({
   expected_current_image_url: z.string().max(2048).nullable(),
+  expected_proposed_image_url: z.url().max(2048).nullable(),
   replace_existing_image: z.boolean(),
   apply_publisher_display_title: z.boolean().default(true),
 }).strict();
@@ -67,13 +68,16 @@ type SourceRow = {
   source_key: string; name: string; canonical_domain: string; source_type: 'publisher' | 'government';
   enabled: number; publication_policy: 'manual' | 'auto_approve'; review_level: 'standard' | 'enhanced';
   priority: number; discovery_method: 'rss' | 'sitemap' | 'deferred'; discovery_config_json: string;
-  content_fetch_policy: string; ai_content_policy: string; image_policy: string;
+  content_fetch_policy: 'discovery_metadata_only' | 'article_head_allowed' | 'article_body_allowed';
+  ai_content_policy: string;
+  image_policy: 'remote_preview' | 'blocked' | 'local_copy_permitted';
   created_at: string; updated_at: string;
 };
 
 type HeadMetadata = {
   publisher: string | null; title: string | null; compact_title: string | null;
   author: string | null; published_at: string | null; image_url: string | null;
+  image_error: string | null;
   checked_at: string;
 };
 
@@ -173,96 +177,47 @@ function safeHostname(raw: string): string {
   return host;
 }
 
-function metaAttributes(tag: string): Map<string, string> {
-  const values = new Map<string, string>();
-  const expression = /([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
-  for (const match of tag.matchAll(expression)) {
-    const name = match[1]?.toLowerCase();
-    const value = match[2] ?? match[3] ?? match[4];
-    if (name && value !== undefined) values.set(name, value);
-  }
-  return values;
-}
-
-async function boundedHtmlHead(response: Response, signal: AbortSignal): Promise<string> {
-  if (!response.body) throw new HttpError(502, 'article_head_missing_body');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
-  let total = 0;
-  let html = '';
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) throw new HttpError(502, 'article_head_incomplete');
-      total += value.byteLength;
-      if (total > MAX_HEAD_BYTES) throw new HttpError(413, 'article_head_too_large');
-      html += decoder.decode(value, { stream: true });
-      const end = /<\/head\s*>/i.exec(html);
-      if (end) return html.slice(0, end.index + end[0].length);
-      if (signal.aborted) throw new HttpError(504, 'article_head_timeout');
-    }
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
-    throw new HttpError(signal.aborted ? 504 : 502,
-      signal.aborted ? 'article_head_timeout' : 'article_head_read_failed');
-  } finally { try { await reader.cancel(); } catch { /* best effort */ } }
-}
-
 async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
   'source_key' | 'canonical_domain' | 'content_fetch_policy' | 'image_policy'>): Promise<HeadMetadata> {
-  if (source.content_fetch_policy !== 'article_head_allowed') {
-    throw new HttpError(409, 'article_head_not_permitted');
-  }
-  const articleUrl = publisherHttpsUrl(canonicalUrl, source.canonical_domain);
-  if (!articleUrl) throw new HttpError(400, 'invalid_article_url');
-  safeHostname(articleUrl);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let metadata: Awaited<ReturnType<typeof fetchArticleHeadMetadata>>;
   try {
-    let response: Response;
-    try {
-      response = await fetch(articleUrl, { method: 'GET', redirect: 'manual', signal: controller.signal,
-        headers: { Accept: 'text/html,application/xhtml+xml',
-          'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)' } });
-    } catch { throw new HttpError(controller.signal.aborted ? 504 : 502,
-      controller.signal.aborted ? 'article_head_timeout' : 'article_head_fetch_failed'); }
-    if (response.status >= 300 && response.status < 400) {
-      await response.body?.cancel(); throw new HttpError(502, 'article_head_redirect');
-    }
-    if (!response.ok) { await response.body?.cancel(); throw new HttpError(502, 'article_head_fetch_failed'); }
-    const contentType = response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
-    if (!['text/html', 'application/xhtml+xml'].includes(contentType ?? '')) {
-      await response.body?.cancel(); throw new HttpError(415, 'article_head_not_html');
-    }
-    const html = await boundedHtmlHead(response, controller.signal);
-    const metadata = new Map<string, string>();
-    for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
-      const attrs = metaAttributes(tag);
-      const name = (attrs.get('property') ?? attrs.get('name'))?.toLowerCase();
-      const content = attrs.get('content');
-      if (name && content && !metadata.has(name)) metadata.set(name, content);
-    }
-    const titleTag = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html)?.[1] ?? null;
-    const originalTitle = cleanText(metadata.get('og:title') ?? metadata.get('twitter:title') ?? titleTag, 1000);
-    const compact = cleanText(metadata.get('twitter:title'), 1000);
-    const imageRaw = metadata.get('og:image') ?? metadata.get('twitter:image') ?? null;
-    const imageUrl = source.image_policy === 'remote_preview'
-      ? (source.source_key === 'the-guardian'
-        ? guardianRemotePreviewUrl(imageRaw)
-        : remotePreviewUrl(imageRaw, source.canonical_domain)) : null;
-    const publishedRaw = metadata.get('article:published_time');
-    const published = publishedRaw && !Number.isNaN(Date.parse(publishedRaw))
-      ? new Date(publishedRaw).toISOString() : null;
-    return {
-      publisher: cleanText(metadata.get('og:site_name'), 200),
-      title: originalTitle,
-      compact_title: compact && originalTitle && compact.length < originalTitle.length ? compact : null,
-      author: cleanText(metadata.get('author') ?? metadata.get('article:author'), 500),
-      published_at: published,
-      image_url: imageUrl,
-      checked_at: new Date().toISOString(),
-    };
-  } finally { clearTimeout(timer); }
+    metadata = await fetchArticleHeadMetadata(canonicalUrl, source);
+  } catch (error) {
+    throw articleHeadHttpError(error);
+  }
+  const originalTitle = cleanText(metadata.ogTitle ?? metadata.twitterTitle ?? metadata.htmlTitle, 1000);
+  const compact = cleanText(metadata.twitterTitle, 1000);
+  const published = metadata.publishedAt && !Number.isNaN(Date.parse(metadata.publishedAt))
+    ? new Date(metadata.publishedAt).toISOString() : null;
+  return {
+    publisher: cleanText(metadata.publisher, 200), title: originalTitle,
+    compact_title: compact && originalTitle && compact.length < originalTitle.length ? compact : null,
+    author: cleanText(metadata.author, 500), published_at: published,
+    image_url: metadata.previewUrl, image_error: metadata.previewError,
+    checked_at: metadata.checkedAt,
+  };
+}
+
+export function articleHeadHttpError(error: unknown): HttpError {
+  const code = error instanceof Error ? error.message : 'metadata_unavailable';
+  const status = code === 'article_head_not_permitted' ? 409
+    : code === 'invalid_article_head_url' ? 400
+    : code === 'article_head_too_large' ? 413
+    : code === 'article_head_timeout' ? 504
+    : code === 'article_head_not_html' ? 415
+    : 502;
+  return new HttpError(status, code);
+}
+
+export function metadataImageChange(currentImage: unknown, expectedProposal: string | null,
+  fetchedProposal: string | null, replaceExisting: boolean): boolean {
+  // A null proposal, or declining an existing-image replacement, makes this title-only;
+  // do not couple that operation to unrelated image metadata drift.
+  if (expectedProposal === null || currentImage !== null && !replaceExisting) return false;
+  if (fetchedProposal !== expectedProposal) {
+    throw new HttpError(409, 'metadata_proposal_changed');
+  }
+  return fetchedProposal !== currentImage;
 }
 
 async function sourceForUrl(db: D1Database, rawUrl: string): Promise<{
@@ -535,6 +490,7 @@ async function previewMetadata(db: D1Database, id: number): Promise<Response> {
   const changes = {
     image: metadata.image_url && metadata.image_url !== row.og_image_url
       ? { current: row.og_image_url ?? null, proposed: metadata.image_url,
+          expected_proposed_image_url: metadata.image_url,
           replacement_required: row.og_image_url !== null } : null,
     publisher_display_title: metadata.compact_title && row.display_title === null
       ? { current: null, proposed: metadata.compact_title } : null,
@@ -556,8 +512,9 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
     throw new HttpError(409, 'metadata_current_image_changed');
   }
   const metadata = await fetchHeadMetadata(String(row.canonical_url), row);
-  const mayChangeImage = Boolean(metadata.image_url && metadata.image_url !== row.og_image_url &&
-    (row.og_image_url === null || parsed.data.replace_existing_image));
+  const mayChangeImage = metadataImageChange(row.og_image_url,
+    parsed.data.expected_proposed_image_url, metadata.image_url,
+    parsed.data.replace_existing_image);
   const maySetTitle = Boolean(parsed.data.apply_publisher_display_title && metadata.compact_title &&
     row.display_title === null);
   if (!mayChangeImage && !maySetTitle) return json({ changed: false, reason: 'no_useful_change' });
@@ -667,11 +624,12 @@ async function addSource(request: Request, db: D1Database): Promise<Response> {
       db.prepare(`INSERT INTO media_sources
         (source_key, name, canonical_domain, source_type, enabled, publication_policy,
          review_level, priority, discovery_method, discovery_config_json,
-         content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
+        content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
         VALUES (?, ?, ?, ?, 0, 'manual', 'standard', 50, 'deferred',
-          '{"retain_excerpt":false}', 'discovery_metadata_only', 'disabled', 'blocked', ?, ?)`)
+          '{"retain_excerpt":false}', 'discovery_metadata_only', 'disabled',
+          CASE WHEN ? = 'publisher' THEN 'remote_preview' ELSE 'blocked' END, ?, ?)`)
         .bind(parsed.data.source_key, cleanText(parsed.data.name, 200), host,
-          parsed.data.source_type, now, now),
+          parsed.data.source_type, parsed.data.source_type, now, now),
       db.prepare(`INSERT INTO media_configuration_events
         (event_key, entity_type, entity_key, action, actor_type, before_json, after_json, created_at)
         VALUES (?, 'source', ?, 'created', 'admin', NULL, ?, ?)`)
@@ -679,7 +637,7 @@ async function addSource(request: Request, db: D1Database): Promise<Response> {
           canonical_domain: host, enabled: false, publication_policy: 'manual',
           review_level: 'standard', discovery_method: 'deferred',
           content_fetch_policy: 'discovery_metadata_only', ai_content_policy: 'disabled',
-          image_policy: 'blocked' }), now),
+          image_policy: parsed.data.source_type === 'publisher' ? 'remote_preview' : 'blocked' }), now),
     ]);
   }
   const source = await db.prepare('SELECT * FROM media_sources WHERE source_key = ?')
