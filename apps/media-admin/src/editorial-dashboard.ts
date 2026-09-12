@@ -14,7 +14,6 @@ const ArticleSort = z.enum([
   'published_desc', 'published_asc', 'approved_desc', 'approved_asc',
   'discovered_desc', 'updated_desc',
 ]);
-const AiTitleState = z.enum(['pending', 'accepted', 'rejected']);
 const SourceType = z.enum(['publisher', 'government']);
 const SourceMutation = z.object({
   publication_policy: PublicationPolicy.optional(),
@@ -299,10 +298,12 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
   const titleStates = csvValues(search, 'title_state');
   if (titleStates.length) {
     const clauses = titleStates.map(state => {
-      if (state === 'original') return "(a.display_title IS NULL AND coalesce(a.ai_title_suggestion_state, '') != 'pending')";
+      if (state === 'original') return "(a.display_title IS NULL AND coalesce(a.ai_title_suggestion_state, '') NOT IN ('pending', 'rejected'))";
+      if (state === 'publisher') return "a.display_title_origin = 'publisher' AND a.display_title IS NOT NULL AND coalesce(a.ai_title_suggestion_state, '') NOT IN ('pending', 'rejected')";
       if (state === 'human') return "a.display_title_origin = 'human'";
       if (state === 'ai') return "a.display_title_origin = 'ai'";
-      if (state === 'pending_ai') return "a.ai_title_suggestion_state = 'pending'";
+      if (state === 'pending_ai') return "a.display_title_origin IS NOT 'human' AND a.display_title_origin IS NOT 'ai' AND a.ai_title_suggestion_state = 'pending'";
+      if (state === 'rejected_ai') return "a.display_title_origin IS NOT 'human' AND a.display_title_origin IS NOT 'ai' AND a.ai_title_suggestion_state = 'rejected'";
       throw new HttpError(400, 'invalid_title_state');
     });
     where.push(`(${clauses.join(' OR ')})`);
@@ -320,7 +321,8 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
     binds.push(cursor[0], cursor[0], cursor[1]);
   }
   const sql = `SELECT a.id, a.source_key, a.canonical_url, a.title, a.display_title,
-      a.display_title_origin, a.ai_title_suggestion_state, a.publisher, a.author,
+      a.display_title_origin, a.ai_title_suggestion, a.ai_title_suggestion_state,
+      a.ai_title_generated_at, a.ai_title_decided_at, a.publisher, a.author,
       a.published_at, a.discovered_at, a.approved_at, a.updated_at, a.status,
       a.revision, a.approval_method, a.approval_author_rule_key, a.og_image_url,
       a.image_policy, ${spec.expression} AS cursor_value
@@ -343,33 +345,6 @@ async function listSelectors(db: D1Database): Promise<Response> {
       ORDER BY author COLLATE NOCASE LIMIT 250`).all(),
   ]);
   return json({ publications: sources.results, authors: authors.results.map(row => row.author) });
-}
-
-async function listAiTitles(db: D1Database, search: URLSearchParams): Promise<Response> {
-  const limit = limitFrom(search);
-  const parsedState = AiTitleState.safeParse(search.get('state') ?? 'pending');
-  if (!parsedState.success) throw new HttpError(400, 'invalid_ai_title_state');
-  const state = parsedState.data;
-  const cursor = decodeCursor(search.get('cursor'));
-  const where = ["a.ai_title_suggestion_state = ?", 'a.ai_title_suggestion IS NOT NULL'];
-  const binds: unknown[] = [state];
-  if (cursor) {
-    where.push("(coalesce(a.ai_title_generated_at, '') < ? OR (coalesce(a.ai_title_generated_at, '') = ? AND a.id < ?))");
-    binds.push(cursor[0], cursor[0], cursor[1]);
-  }
-  const { results } = await db.prepare(`SELECT a.id, a.source_key, a.publisher, a.title,
-      a.display_title, a.display_title_origin, a.ai_title_suggestion,
-      a.ai_title_suggestion_state, a.ai_title_model, a.ai_title_prompt_version,
-      a.ai_title_generated_at, a.ai_title_decided_at, a.status
-    FROM media_articles a WHERE ${where.join(' AND ')}
-    ORDER BY coalesce(a.ai_title_generated_at, '') DESC, a.id DESC LIMIT ?`)
-    .bind(...binds, limit + 1).all<Record<string, unknown>>();
-  const hasMore = results.length > limit;
-  const rows = results.slice(0, limit);
-  const last = rows.at(-1);
-  return json({ suggestions: rows, page: { limit, has_more: hasMore,
-    next_cursor: hasMore && last
-      ? encodeCursor(String(last.ai_title_generated_at ?? ''), Number(last.id)) : null } });
 }
 
 async function listRuns(db: D1Database, search: URLSearchParams): Promise<Response> {
@@ -740,10 +715,6 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
   if (url.pathname === '/admin/articles/lookup') {
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
     return lookupArticle(request, env.MEDIA_DB);
-  }
-  if (url.pathname === '/admin/ai-titles') {
-    if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
-    return listAiTitles(env.MEDIA_DB, url.searchParams);
   }
   if (url.pathname === '/admin/runs') {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);

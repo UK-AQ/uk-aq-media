@@ -13,8 +13,8 @@ import { handleEditorialDashboard } from './editorial-dashboard';
 type Action = 'approve' | 'reject' | 'hide' | 'unhide';
 const transitions: Record<Action, { from: Status[]; to: Status; event: string }> = {
   approve: { from: ['pending', 'rejected'], to: 'approved', event: 'approved' },
-  reject: { from: ['pending', 'approved'], to: 'rejected', event: 'rejected' },
-  hide: { from: ['approved'], to: 'hidden', event: 'hidden' },
+  reject: { from: ['pending', 'approved', 'hidden'], to: 'rejected', event: 'rejected' },
+  hide: { from: ['pending', 'approved', 'rejected'], to: 'hidden', event: 'hidden' },
   unhide: { from: ['hidden'], to: 'approved', event: 'unhidden' },
 };
 
