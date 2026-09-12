@@ -1,6 +1,7 @@
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 export const MAX_FEED_BYTES = 1024 * 1024;
+export const MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES = 64 * 1024;
 const FEED_TIMEOUT_MS = 20_000;
 const record = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -105,6 +106,7 @@ export interface ParsedRssItem {
   categories: string[];
   title_context: string | null;
   preview_candidates: RssPreviewCandidate[];
+  content_encoded_preview_url: string | null;
 }
 
 export type RssPreviewCandidateKind = 'media:thumbnail' | 'media:content' | 'enclosure';
@@ -196,10 +198,61 @@ function previewCandidate(kind: RssPreviewCandidateKind, value: unknown,
   };
 }
 
+type ContentEncodedPreviewOptions = {
+  max_scan_bytes: number;
+  validate_url: (raw: unknown) => string | null;
+};
+
+function utf8Prefix(value: string, maximumBytes: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    const characterBytes = codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2
+      : codePoint <= 0xffff ? 3 : 4;
+    if (bytes + characterBytes > maximumBytes) break;
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return value.slice(0, end);
+}
+
+function htmlAttribute(tag: string, name: 'height' | 'src' | 'width'): string | null {
+  const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>]+))`, 'i')
+    .exec(tag);
+  return match ? decodeHtmlEntities(match[1] ?? match[2] ?? match[3] ?? '') : null;
+}
+
+function explicitOneByOneImage(tag: string): boolean {
+  const dimension = (name: 'height' | 'width'): number | null => {
+    const raw = htmlAttribute(tag, name)?.trim();
+    if (!raw || !/^[1-9]\d*$/.test(raw)) return null;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  return dimension('width') === 1 && dimension('height') === 1;
+}
+
+function contentEncodedPreviewUrl(value: unknown,
+  options: ContentEncodedPreviewOptions | undefined): string | null {
+  if (!options) return null;
+  const html = rawDescription(value);
+  if (!html) return null;
+  const boundedHtml = utf8Prefix(html, options.max_scan_bytes);
+  for (const match of boundedHtml.matchAll(/<img\b[^>]{0,4096}>/gi)) {
+    const tag = match[0];
+    if (explicitOneByOneImage(tag)) continue;
+    const validated = options.validate_url(htmlAttribute(tag, 'src'));
+    if (validated) return validated;
+  }
+  return null;
+}
+
 export function parseRssItems(xml: string, maxItems: number,
   options: {
     allow_untyped_image_media_content?: boolean;
     title_context?: TitleContextMode;
+    content_encoded_preview?: ContentEncodedPreviewOptions;
   } = {}): {
   items: ParsedRssItem[];
   items_seen: number;
@@ -209,12 +262,18 @@ export function parseRssItems(xml: string, maxItems: number,
       /<!DOCTYPE|<!ENTITY/i.test(xml) || XMLValidator.validate(xml) !== true) {
     throw new ScanError('invalid_rss');
   }
+  const contentEncodedPreview = options.content_encoded_preview;
+  if (contentEncodedPreview && (!Number.isSafeInteger(contentEncodedPreview.max_scan_bytes) ||
+      contentEncodedPreview.max_scan_bytes < 1 ||
+      contentEncodedPreview.max_scan_bytes > MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES)) {
+    throw new ScanError('invalid_content_encoded_preview_scan_limit');
+  }
   const parser = new XMLParser({
     ignoreAttributes: false, parseTagValue: false, parseAttributeValue: false,
     htmlEntities: true, maxNestedTags: 32,
     isArray: name => ['item', 'category', 'dc:creator', 'media:content',
       'media:thumbnail', 'enclosure'].includes(name),
-    updateTag: name => name === 'content:encoded' ||
+    updateTag: name => (name === 'content:encoded' && !contentEncodedPreview) ||
       (name === 'description' && !options.title_context) ? false : name,
   });
   let parsed: unknown;
@@ -256,6 +315,8 @@ export function parseRssItems(xml: string, maxItems: number,
       title_context: titleContext(item.description, options.title_context),
       preview_candidates: rawPreviewCandidates.map(([kind, candidate], rssOrder) =>
         previewCandidate(kind, candidate, rssOrder)),
+      content_encoded_preview_url: contentEncodedPreviewUrl(
+        item['content:encoded'], contentEncodedPreview),
     });
   }
   return { items, items_seen: rawItems.length, items_invalid: invalid };

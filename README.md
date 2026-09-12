@@ -270,7 +270,13 @@ accepted for legacy article/image ownership; unrelated domains remain rejected.
 Carbon Brief uses `https://www.carbonbrief.org/feed/`, with only its exact current
 same-publisher redirect to `https://www.carbonbrief.org/feed` permitted. OpenAQ uses
 `https://openaq.medium.com/feed`; its emitted article host `openaq.medium.com` is the
-canonical source domain. Phys.org uses
+canonical source domain. Only the OpenAQ route opts into transient inspection of the first
+64 KiB of each RSS `content:encoded` value. It retains only the first suitable validated
+image URL on exact host `cdn-images-1.medium.com`; explicit 1x1 images and all other hosts,
+including Medium's tracking-pixel host, are rejected. The body HTML is discarded and is not
+persisted, exposed, used for relevance/title generation or supplied to AI. A valid RSS image
+also prevents the normal missing-preview article-head fallback, so Medium article-page HTTP
+403 responses are irrelevant for those observations. Phys.org uses
 `https://phys.org/rss-feed/earth-news/environment/`. All three use the generic publisher
 RSS adapter, remain manual/Standard, retain no excerpt, and pass the deterministic AQ
 relevance filter. Carbon Brief and OpenAQ permit metadata-only display-title AI;
@@ -281,6 +287,8 @@ an explicit authenticated editorial title request; any resulting suggestion stay
 separately Pending until editorial acceptance.
 
 Article canonical-domain validation remains separate from preview-image validation.
+OpenAQ article identity stays restricted to `openaq.medium.com`; only its preview policy
+permits exact host `cdn-images-1.medium.com`.
 Phys.org article identity stays restricted to `phys.org`; its preview-image policy also
 permits the exact observed publisher image host `scx2.b-cdn.net`. No `b-cdn.net` wildcard
 or other CDN hostname is accepted. Guardian's existing exact `i.guim.co.uk` exception uses

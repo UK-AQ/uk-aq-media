@@ -79,11 +79,16 @@ export function publisherHttpsUrl(raw: unknown, source: PublisherDomainInput): s
 
 const sourcePreviewImageHostnames: Readonly<Record<string, readonly string[]>> = {
   'the-guardian': ['i.guim.co.uk'],
+  openaq: ['cdn-images-1.medium.com'],
   'phys-org': ['scx2.b-cdn.net'],
 };
 
 function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): string | null {
   if (typeof raw !== 'string' || raw.length > 2048) return null;
+  const authority = /^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i.exec(raw)?.[1];
+  const hostAndPort = authority?.slice(authority.lastIndexOf('@') + 1);
+  if (hostAndPort && (hostAndPort.startsWith('[')
+    ? /^\[[^\]]+\]:\d+$/.test(hostAndPort) : /:\d+$/.test(hostAndPort))) return null;
   try {
     const url = new URL(raw);
     return url.protocol === 'https:' && !url.username && !url.password && !url.port &&

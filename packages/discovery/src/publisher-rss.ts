@@ -2,7 +2,9 @@ import {
   canonicalizeUrl, canonicalUrlHash, remotePreviewUrl,
   type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
-import { parseRssItems, readRssFeed, ScanError } from './rss';
+import {
+  MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES, parseRssItems, readRssFeed, ScanError,
+} from './rss';
 
 export const PUBLISHER_RSS_ROUTES = [
   { source_key: 'bbc-news', route_key: 'bbc-news-top',
@@ -40,7 +42,8 @@ export const PUBLISHER_RSS_ROUTES = [
     url: 'https://www.carbonbrief.org/feed/', canonical_domain: 'carbonbrief.org', max_items: 20,
     allowed_manual_redirect_url: 'https://www.carbonbrief.org/feed' },
   { source_key: 'openaq', route_key: 'openaq-medium',
-    url: 'https://openaq.medium.com/feed', canonical_domain: 'openaq.medium.com', max_items: 20 },
+    url: 'https://openaq.medium.com/feed', canonical_domain: 'openaq.medium.com', max_items: 20,
+    content_encoded_preview_scan_bytes: MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES },
   { source_key: 'phys-org', route_key: 'phys-org-environment',
     url: 'https://phys.org/rss-feed/earth-news/environment/', canonical_domain: 'phys.org',
     max_items: 20 },
@@ -99,16 +102,24 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   const route = configuredRoute(source, routeKey);
-  const parsed = parseRssItems(xml, route.max_items);
+  const expected = expectedRoute(source.source_key, routeKey)!;
+  const contentEncodedPreviewScanBytes = 'content_encoded_preview_scan_bytes' in expected
+    ? expected.content_encoded_preview_scan_bytes : null;
+  const parsed = parseRssItems(xml, route.max_items, contentEncodedPreviewScanBytes === null
+    ? {} : { content_encoded_preview: {
+      max_scan_bytes: contentEncodedPreviewScanBytes,
+      validate_url: candidate => remotePreviewUrl(candidate, source),
+    } });
   const articles: DiscoveredArticle[] = [];
   let invalid = parsed.items_invalid;
   for (const item of parsed.items) {
     let canonical: string;
     try { canonical = canonicalizeUrl(item.raw_url, source); }
     catch { invalid++; continue; }
-    const preview = source.image_policy === 'remote_preview' ? item.preview_candidates
-      .map(candidate => remotePreviewUrl(candidate.url, source))
-      .find(Boolean) ?? null : null;
+    const preview = source.image_policy === 'remote_preview' ? [
+      ...item.preview_candidates.map(candidate => remotePreviewUrl(candidate.url, source)),
+      item.content_encoded_preview_url,
+    ].find(Boolean) ?? null : null;
     articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
       original_url: item.raw_url, title: item.title, author: item.author,
       published_at: item.published_at, categories: item.categories, title_context: null,
