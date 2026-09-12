@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {
-  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata,
+  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
 } from '../packages/discovery/src/article-head-metadata';
+import { ScanError } from '../packages/discovery/src/rss';
 import type { DiscoveredArticle, Source } from '@uk-aq-media/core';
 import { articleHeadHttpError, metadataImageChange } from
   '../apps/media-admin/src/editorial-dashboard';
@@ -50,6 +51,61 @@ try {
   assert.equal(discovered.preview_url, 'https://images.publisher.example/accepted.jpg');
   assert.equal(discovered.display_title, 'Compact publisher title');
   assert.ok(discovered.preview_metadata_checked_at);
+} finally { globalThis.fetch = originalFetch; }
+
+async function checkRedirects(responses: Map<string, Response>, startUrl: string):
+  Promise<string[]> {
+  const requests: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    requests.push(url);
+    assert.equal(init?.redirect, 'manual');
+    assert.equal(new Headers(init?.headers).get('Accept'), 'text/html,application/xhtml+xml');
+    assert.match(new Headers(init?.headers).get('User-Agent') ?? '', /^UK-AQ-Media\//);
+    const response = responses.get(url);
+    assert.ok(response, `Unexpected article-head request: ${url}`);
+    return response;
+  };
+  try {
+    await fetchArticleHeadMetadata(startUrl, source);
+    return requests;
+  } finally { globalThis.fetch = originalFetch; }
+}
+
+const finalHtml = () => new Response('<head><title>Redirected article</title></head>',
+  { headers: { 'Content-Type': 'text/html' } });
+assert.deepEqual(await checkRedirects(new Map([
+  ['https://publisher.example/www', new Response(null,
+    { status: 301, headers: { Location: 'https://www.publisher.example/article' } })],
+  ['https://www.publisher.example/article', finalHtml()],
+]), 'https://publisher.example/www'), [
+  'https://publisher.example/www', 'https://www.publisher.example/article',
+]);
+assert.deepEqual(await checkRedirects(new Map([
+  ['https://publisher.example/path/start', new Response(null,
+    { status: 302, headers: { Location: '../article' } })],
+  ['https://publisher.example/article', finalHtml()],
+]), 'https://publisher.example/path/start'), [
+  'https://publisher.example/path/start', 'https://publisher.example/article',
+]);
+
+globalThis.fetch = async () => new Response(null,
+  { status: 307, headers: { Location: 'https://attacker.example/article' } });
+try {
+  await assert.rejects(fetchArticleHeadMetadata('https://publisher.example/start', source),
+    (error: unknown) => error instanceof ScanError &&
+      error.code === 'article_head_redirect_not_permitted');
+} finally { globalThis.fetch = originalFetch; }
+
+let redirectRequestCount = 0;
+globalThis.fetch = async () => {
+  redirectRequestCount += 1;
+  return new Response(null, { status: 308, headers: { Location: `/hop-${redirectRequestCount}` } });
+};
+try {
+  await assert.rejects(fetchArticleHeadMetadata('https://publisher.example/start', source),
+    (error: unknown) => error instanceof ScanError && error.code === 'article_head_redirect_limit');
+  assert.equal(redirectRequestCount, 4);
 } finally { globalThis.fetch = originalFetch; }
 
 assert.throws(() => metadataImageChange(null, 'https://publisher.example/a.jpg',
