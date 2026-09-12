@@ -10,6 +10,9 @@ import {
 import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
 import { discoverAqn } from './aqn';
 import {
+  configuredPublisherRssRouteKeys, discoverPublisherRss,
+} from './publisher-rss';
+import {
   configuredGuardianRouteKeys, discoverGuardian, guardianProfileRule, guardianRouteKind,
   guardianRouteRequiresRelevance,
   type GuardianRouteKey,
@@ -27,6 +30,11 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
+export {
+  configuredPublisherRssRouteKeys, discoverPublisherRss, parsePublisherRssFeed,
+  PUBLISHER_RSS_ROUTES,
+} from './publisher-rss';
+export type { PublisherRssSourceKey } from './publisher-rss';
 export {
   discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
 } from './article-head-metadata';
@@ -339,7 +347,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       return;
     }
 
-    let result: Awaited<ReturnType<typeof discoverAqn>>;
+    let result: { articles: DiscoveredArticle[]; items_seen: number; items_invalid: number };
     let rules: AuthorRule[] = [];
     if (sourceKey === 'air-quality-news' && routeKey === undefined) {
       result = await discoverAqn(source);
@@ -353,6 +361,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         return;
       }
       result = await discoverGuardian(source, routeKey);
+    } else if (routeKey && configuredPublisherRssRouteKeys(source).includes(routeKey)) {
+      result = await discoverPublisherRss(source, routeKey);
     } else {
       await finishRun(db, runId, 'skipped', 0, 0, 0, 'unsupported_adapter_or_route');
       return;
@@ -372,7 +382,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
-      if (guardianEvaluation && !guardianEvaluation.accepted) {
+      const publisherRelevant = sourceKey !== 'air-quality-news' && sourceKey !== 'the-guardian'
+        ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
+          canonical_url: article.canonical_url, categories: article.categories }).relevant : true;
+      if ((guardianEvaluation && !guardianEvaluation.accepted) || !publisherRelevant) {
         filtered++;
         continue;
       }

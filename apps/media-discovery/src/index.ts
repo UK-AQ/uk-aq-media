@@ -1,6 +1,6 @@
 import {
   DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
-  scheduledGuardianRouteKeys,
+  configuredPublisherRssRouteKeys, scheduledGuardianRouteKeys,
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
 import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
@@ -36,9 +36,12 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
   try {
     // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
     // Request data never participates in this internally selected, bounded work list.
-    const [aqn, guardian] = await Promise.all([
+    const [aqn, guardian, bbc, sky, independent] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
+      loadSource(env.MEDIA_DB, 'bbc-news'),
+      loadSource(env.MEDIA_DB, 'sky-news'),
+      loadSource(env.MEDIA_DB, 'the-independent'),
     ]);
     const messages: DiscoveryMessage[] = [];
     if (aqn?.enabled) messages.push({ type: 'source_scan', source_key: 'air-quality-news' });
@@ -46,6 +49,12 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       const rules = await loadAuthorRules(env.MEDIA_DB, 'the-guardian');
       for (const routeKey of scheduledGuardianRouteKeys(guardian, rules)) {
         messages.push({ type: 'source_scan', source_key: 'the-guardian', route_key: routeKey });
+      }
+    }
+    for (const source of [bbc, sky, independent]) {
+      if (!source?.enabled) continue;
+      for (const routeKey of configuredPublisherRssRouteKeys(source)) {
+        messages.push({ type: 'source_scan', source_key: source.source_key, route_key: routeKey });
       }
     }
     if (messages.length === 0) return 0;
