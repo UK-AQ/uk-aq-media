@@ -59,6 +59,7 @@ const ManualArticleBody = z.object({
 }).strict();
 const MetadataApplyBody = z.object({
   expected_current_image_url: z.string().max(2048).nullable(),
+  expected_proposed_image_url: z.url().max(2048).nullable(),
   replace_existing_image: z.boolean(),
   apply_publisher_display_title: z.boolean().default(true),
 }).strict();
@@ -182,7 +183,7 @@ async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
   try {
     metadata = await fetchArticleHeadMetadata(canonicalUrl, source);
   } catch (error) {
-    throw new HttpError(502, error instanceof Error ? error.message : 'metadata_unavailable');
+    throw articleHeadHttpError(error);
   }
   const originalTitle = cleanText(metadata.ogTitle ?? metadata.twitterTitle ?? metadata.htmlTitle, 1000);
   const compact = cleanText(metadata.twitterTitle, 1000);
@@ -195,6 +196,28 @@ async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
     image_url: metadata.previewUrl, image_error: metadata.previewError,
     checked_at: metadata.checkedAt,
   };
+}
+
+export function articleHeadHttpError(error: unknown): HttpError {
+  const code = error instanceof Error ? error.message : 'metadata_unavailable';
+  const status = code === 'article_head_not_permitted' ? 409
+    : code === 'invalid_article_head_url' ? 400
+    : code === 'article_head_too_large' ? 413
+    : code === 'article_head_timeout' ? 504
+    : code === 'article_head_not_html' ? 415
+    : 502;
+  return new HttpError(status, code);
+}
+
+export function metadataImageChange(currentImage: unknown, expectedProposal: string | null,
+  fetchedProposal: string | null, replaceExisting: boolean): boolean {
+  // A null proposal, or declining an existing-image replacement, makes this title-only;
+  // do not couple that operation to unrelated image metadata drift.
+  if (expectedProposal === null || currentImage !== null && !replaceExisting) return false;
+  if (fetchedProposal !== expectedProposal) {
+    throw new HttpError(409, 'metadata_proposal_changed');
+  }
+  return fetchedProposal !== currentImage;
 }
 
 async function sourceForUrl(db: D1Database, rawUrl: string): Promise<{
@@ -467,6 +490,7 @@ async function previewMetadata(db: D1Database, id: number): Promise<Response> {
   const changes = {
     image: metadata.image_url && metadata.image_url !== row.og_image_url
       ? { current: row.og_image_url ?? null, proposed: metadata.image_url,
+          expected_proposed_image_url: metadata.image_url,
           replacement_required: row.og_image_url !== null } : null,
     publisher_display_title: metadata.compact_title && row.display_title === null
       ? { current: null, proposed: metadata.compact_title } : null,
@@ -488,8 +512,9 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
     throw new HttpError(409, 'metadata_current_image_changed');
   }
   const metadata = await fetchHeadMetadata(String(row.canonical_url), row);
-  const mayChangeImage = Boolean(metadata.image_url && metadata.image_url !== row.og_image_url &&
-    (row.og_image_url === null || parsed.data.replace_existing_image));
+  const mayChangeImage = metadataImageChange(row.og_image_url,
+    parsed.data.expected_proposed_image_url, metadata.image_url,
+    parsed.data.replace_existing_image);
   const maySetTitle = Boolean(parsed.data.apply_publisher_display_title && metadata.compact_title &&
     row.display_title === null);
   if (!mayChangeImage && !maySetTitle) return json({ changed: false, reason: 'no_useful_change' });

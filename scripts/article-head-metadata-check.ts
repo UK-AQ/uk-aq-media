@@ -3,6 +3,8 @@ import {
   discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata,
 } from '../packages/discovery/src/article-head-metadata';
 import type { DiscoveredArticle, Source } from '@uk-aq-media/core';
+import { articleHeadHttpError, metadataImageChange } from
+  '../apps/media-admin/src/editorial-dashboard';
 
 const metadata = extractArticleHeadMetadata(`<head>
   <meta content='https://publisher.example/og.jpg' property='og:image'>
@@ -49,5 +51,27 @@ try {
   assert.equal(discovered.display_title, 'Compact publisher title');
   assert.ok(discovered.preview_metadata_checked_at);
 } finally { globalThis.fetch = originalFetch; }
+
+assert.throws(() => metadataImageChange(null, 'https://publisher.example/a.jpg',
+  'https://publisher.example/b.jpg', false), (error: unknown) =>
+  error instanceof Error && error.message === 'metadata_proposal_changed' &&
+  'status' in error && error.status === 409);
+assert.equal(metadataImageChange(null, 'https://publisher.example/a.jpg',
+  'https://publisher.example/a.jpg', false), true);
+assert.equal(metadataImageChange('https://publisher.example/old.jpg',
+  'https://publisher.example/a.jpg', 'https://publisher.example/changed.jpg', false), false);
+assert.equal(metadataImageChange('https://publisher.example/old.jpg',
+  'https://publisher.example/a.jpg', 'https://publisher.example/a.jpg', true), true);
+assert.equal(metadataImageChange(null, null, 'https://publisher.example/unrelated.jpg', false), false);
+
+for (const [code, status] of [
+  ['invalid_article_head_url', 400], ['article_head_not_permitted', 409],
+  ['article_head_too_large', 413], ['article_head_not_html', 415],
+  ['article_head_timeout', 504], ['article_head_fetch_failed', 502],
+] as const) {
+  const translated = articleHeadHttpError(new Error(code));
+  assert.equal(translated.status, status);
+  assert.equal(translated.message, code);
+}
 
 console.log('Article head metadata checks passed');
