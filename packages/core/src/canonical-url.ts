@@ -77,17 +77,26 @@ export function publisherHttpsUrl(raw: unknown, source: PublisherDomainInput): s
   } catch { return null; }
 }
 
-export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): string | null {
-  return publisherHttpsUrl(raw, source);
-}
+const sourcePreviewImageHostnames: Readonly<Record<string, readonly string[]>> = {
+  'the-guardian': ['i.guim.co.uk'],
+  'phys-org': ['scx2.b-cdn.net'],
+};
 
-const guardianImageHostnames = new Set(['i.guim.co.uk']);
-
-export function guardianRemotePreviewUrl(raw: unknown): string | null {
+function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): string | null {
   if (typeof raw !== 'string' || raw.length > 2048) return null;
   try {
     const url = new URL(raw);
     return url.protocol === 'https:' && !url.username && !url.password && !url.port &&
-      guardianImageHostnames.has(url.hostname.toLowerCase()) ? url.href : null;
+      hostnames.includes(url.hostname.toLowerCase()) ? url.href : null;
   } catch { return null; }
+}
+
+export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): string | null {
+  const publisherUrl = publisherHttpsUrl(raw, source);
+  if (publisherUrl || typeof source === 'string') return publisherUrl;
+  return exactPreviewImageUrl(raw, sourcePreviewImageHostnames[source.source_key] ?? []);
+}
+
+export function guardianRemotePreviewUrl(raw: unknown): string | null {
+  return exactPreviewImageUrl(raw, sourcePreviewImageHostnames['the-guardian']!);
 }

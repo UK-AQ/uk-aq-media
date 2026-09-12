@@ -280,6 +280,12 @@ not invoke AI for any of these three sources. Carbon Brief and OpenAQ remain eli
 an explicit authenticated editorial title request; any resulting suggestion stays
 separately Pending until editorial acceptance.
 
+Article canonical-domain validation remains separate from preview-image validation.
+Phys.org article identity stays restricted to `phys.org`; its preview-image policy also
+permits the exact observed publisher image host `scx2.b-cdn.net`. No `b-cdn.net` wildcard
+or other CDN hostname is accepted. Guardian's existing exact `i.guim.co.uk` exception uses
+the same centralized source-specific preview-host mechanism.
+
 Successful scans atomically persist articles, exactly one creation/auto-approval
 event per new identity, and run counters. Runs record bounded codes rather than
 feed content/error dumps. Queue acknowledgement follows completion of those writes.

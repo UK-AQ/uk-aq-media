@@ -3,7 +3,9 @@ import {
   discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
 } from '../packages/discovery/src/article-head-metadata';
 import { ScanError } from '../packages/discovery/src/rss';
-import type { DiscoveredArticle, Source } from '@uk-aq-media/core';
+import {
+  canonicalizeUrl, remotePreviewUrl, type DiscoveredArticle, type Source,
+} from '@uk-aq-media/core';
 import { articleHeadHttpError, metadataImageChange } from
   '../apps/media-admin/src/editorial-dashboard';
 
@@ -40,6 +42,23 @@ const article: DiscoveredArticle = {
   preview_url: null, display_title: null, display_title_origin: null,
   preview_metadata_checked_at: null,
 };
+
+const physOrgSource: Source = {
+  ...source,
+  source_key: 'phys-org',
+  name: 'Phys.org',
+  canonical_domain: 'phys.org',
+  ai_content_policy: 'disabled',
+};
+const physOrgPreview = 'https://scx2.b-cdn.net/gfx/news/hires/2026/article.jpg';
+assert.equal(remotePreviewUrl(physOrgPreview, physOrgSource), physOrgPreview);
+assert.equal(remotePreviewUrl(physOrgPreview, source), null);
+assert.equal(remotePreviewUrl('https://other.b-cdn.net/gfx/article.jpg', physOrgSource), null);
+assert.equal(remotePreviewUrl('http://scx2.b-cdn.net/gfx/article.jpg', physOrgSource), null);
+assert.equal(canonicalizeUrl('https://www.phys.org/news/article.html', physOrgSource),
+  'https://phys.org/news/article.html');
+assert.throws(() => canonicalizeUrl(physOrgPreview, physOrgSource), /off_source_article_url/);
+
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => new Response(`<head>
   <meta property="og:image" content="https://cdn.example/rejected.jpg">
@@ -51,6 +70,15 @@ try {
   assert.equal(discovered.preview_url, 'https://images.publisher.example/accepted.jpg');
   assert.equal(discovered.display_title, 'Compact publisher title');
   assert.ok(discovered.preview_metadata_checked_at);
+} finally { globalThis.fetch = originalFetch; }
+
+globalThis.fetch = async () => new Response(`<head>
+  <meta property="og:image" content="${physOrgPreview}">
+</head>`, { headers: { 'Content-Type': 'text/html' } });
+try {
+  const physMetadata = await fetchArticleHeadMetadata(
+    'https://phys.org/news/2026-09/article.html', physOrgSource);
+  assert.equal(physMetadata.previewUrl, physOrgPreview);
 } finally { globalThis.fetch = originalFetch; }
 
 async function checkRedirects(responses: Map<string, Response>, startUrl: string):
