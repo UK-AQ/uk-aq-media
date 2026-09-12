@@ -325,7 +325,8 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
   }
   const sql = `SELECT a.id, a.source_key, a.canonical_url, a.title, a.display_title,
       a.display_title_origin, a.ai_title_suggestion, a.ai_title_suggestion_state,
-      a.ai_title_generated_at, a.ai_title_decided_at, a.publisher, a.author,
+      a.ai_title_model, a.ai_title_prompt_version, a.ai_title_generated_at,
+      a.ai_title_decided_at, a.publisher, a.author,
       a.published_at, a.discovered_at, a.approved_at, a.updated_at, a.status,
       a.revision, a.approval_method, a.approval_author_rule_key, a.og_image_url,
       a.image_policy, ${spec.expression} AS cursor_value

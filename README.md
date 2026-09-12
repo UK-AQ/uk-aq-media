@@ -13,11 +13,11 @@ This README describes this implementation, not a replacement contract.
 | Area | Contents |
 | --- | --- |
 | `apps/media-public` | Approved public feed only; `MEDIA_DB` binding |
-| `apps/media-admin` | Bearer-authenticated editorial reads/transitions; `MEDIA_DB`, `MEDIA_ADMIN_TOKEN` |
+| `apps/media-admin` | Bearer-authenticated editorial reads/transitions and explicit title generation; `MEDIA_DB`, `AI`, `MEDIA_ADMIN_TOKEN` |
 | `apps/media-discovery` | Authenticated scheduler receiver and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `AI`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, and dormant `scheduled()` fallback handler |
 | `packages/core` | Shared source/article/policy types, D1 source loading, canonical URL identity, HTTP helpers |
 | `packages/discovery` | Shared bounded RSS handling, AQN/Guardian adapters, source-run/article/evidence persistence, typed work messages |
-| `packages/enrichment` | Policy-gated display-title prompt/provider seam, output validation and local/durable AI budgets; broader enrichment remains disabled |
+| `packages/enrichment` | Display-title prompt/provider seam, output validation and local/durable AI budgets; automatic generation remains policy-gated and explicit admin generation is separately authorised |
 | `migrations` | Core tables/indexes/triggers, immutable initial source seed and forward policy/schema changes |
 | `config/sources.seed.json` | Current target source permission/discovery posture |
 | `scripts` | Seed validation/generation and local Wrangler tools |
@@ -93,6 +93,10 @@ Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
   AI suggestion as an AI-origin display title.
 - `POST /admin/articles/:id/display-title/reject-ai` — reject the current Pending
   AI suggestion without publishing it.
+- `POST /admin/articles/:id/display-title/generate-ai` — explicitly request or refresh one
+  pending AI title suggestion for any existing article, using the shared model, prompt,
+  request-level neuron ledger and daily Media budget. This does not alter source automatic-AI
+  policy, the current display title, article status or approval state.
 - `PUT /admin/articles/:id/display-title` with
   `{ "display_title": "Human wording" }` — set/change a human-origin title for any
   article; use `{ "display_title": null }` to clear it and restore publisher-title fallback.
@@ -112,13 +116,16 @@ Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
   RSS and D1 state, reject a changed token with 409, then apply the still-current plan through
   one bounded compare-and-swap D1 statement.
 
-Every article-status transition POST requires a unique `Idempotency-Key` of 16–100 ASCII letters, digits,
+Every article-status transition POST and explicit AI-title generation POST requires a unique
+`Idempotency-Key` of 16–100 ASCII letters, digits,
 hyphens or underscores (a UUID is suitable). Reuse the same key when retrying the
 same action. A successful replay returns the original receipt with `replayed: true`,
 even if another action subsequently changed the article. Reusing a key for another
 article/action or requesting an invalid transition returns 409. A missing key is
 400. Missing/wrong authentication is 401; unknown articles/routes are 404; storage
-failure is 503. Status-transition POST bodies are unused. Display-title operations
+failure is 503. The explicit AI request key is incorporated into the durable neuron-ledger
+identity, so retrying that request cannot admit a second inference; a completed replay returns
+the still-current stored result when available. Status-transition POST bodies are unused. Display-title operations
 do not change article status/revision or create article-status audit events; human
 titles are single-line and bounded to 500 Unicode characters, not the 64-character
 automatic-AI limit.

@@ -471,14 +471,21 @@ export type DisplayTitleSuggestionOutcome = {
   };
 } | { status: 'skipped'; reason: string } | { status: 'failed'; reason: string };
 
-export async function suggestDisplayTitlePermitted(source: Source, input: DisplayTitleInput,
+export interface DisplayTitleNeuronLedger {
+  reserve(request: NeuronReservationRequest): Promise<NeuronReservationOutcome>;
+  markRequestStarted(requestId: string, now?: string): Promise<boolean>;
+  reconcile(requestId: string, usage: DisplayTitleTokenUsage, titlesGenerated: number,
+    now?: string): Promise<boolean>;
+  retainReservation(requestId: string, titlesGenerated: number,
+    reason: 'missing_usage' | 'malformed_usage' | 'provider_failure' |
+      'reconciliation_failure', now?: string): Promise<void>;
+}
+
+async function suggestDisplayTitle(input: DisplayTitleInput,
   provider: DisplayTitleProvider, localBudget: AiBudgetGuard,
-  ledger: D1DisplayTitleNeuronLedger, logicalRequestKey: string,
+  ledger: DisplayTitleNeuronLedger, logicalRequestKey: string,
   dailyNeuronBudget: number, accountFreeNeuronsPerDay: number,
   maximumTitlesPerRequest: number): Promise<DisplayTitleSuggestionOutcome> {
-  if (!permitsAi(source, 'metadata') || unicodeLength(input.title) <= DISPLAY_TITLE_AI_THRESHOLD) {
-    return { status: 'skipped', reason: 'source_policy_or_title_length' };
-  }
   if (!await localBudget.reserve()) return { status: 'skipped', reason: 'local_budget' };
   const rates = displayTitleNeuronRates(provider.model);
   if (!rates) return { status: 'skipped', reason: 'unknown_model_rates' };
@@ -502,25 +509,49 @@ export async function suggestDisplayTitlePermitted(source: Source, input: Displa
   try {
     const inspected = await provider.suggest(prepared);
     const generated = inspected.title ? 1 : 0;
+    const completedAt = new Date().toISOString();
     if (inspected.usage) {
       if (!await ledger.reconcile(reservation.reservation.request_id, inspected.usage,
-        generated)) {
+        generated, completedAt)) {
         await ledger.retainReservation(reservation.reservation.request_id, generated,
-          'reconciliation_failure');
+          'reconciliation_failure', completedAt);
       }
     } else {
       await ledger.retainReservation(reservation.reservation.request_id, generated,
-        inspected.usage_status === 'malformed' ? 'malformed_usage' : 'missing_usage');
+        inspected.usage_status === 'malformed' ? 'malformed_usage' : 'missing_usage', completedAt);
     }
     if (!inspected.title) return { status: 'failed', reason: 'invalid_provider_output' };
     return { status: 'suggested', title: inspected.title, provenance: {
       provider: provider.provider,
       model: provider.model,
       version: provider.version,
-      generated_at: new Date().toISOString(),
+      generated_at: completedAt,
     } };
   } catch {
     await ledger.retainReservation(reservation.reservation.request_id, 0, 'provider_failure');
     return { status: 'failed', reason: 'provider_or_output_failure' };
   }
+}
+
+export async function suggestDisplayTitlePermitted(source: Source, input: DisplayTitleInput,
+  provider: DisplayTitleProvider, localBudget: AiBudgetGuard,
+  ledger: DisplayTitleNeuronLedger, logicalRequestKey: string,
+  dailyNeuronBudget: number, accountFreeNeuronsPerDay: number,
+  maximumTitlesPerRequest: number): Promise<DisplayTitleSuggestionOutcome> {
+  if (!permitsAi(source, 'metadata') || unicodeLength(input.title) <= DISPLAY_TITLE_AI_THRESHOLD) {
+    return { status: 'skipped', reason: 'source_policy_or_title_length' };
+  }
+  return suggestDisplayTitle(input, provider, localBudget, ledger, logicalRequestKey,
+    dailyNeuronBudget, accountFreeNeuronsPerDay, maximumTitlesPerRequest);
+}
+
+/** Explicit authenticated editorial action. Source policy and the automatic length threshold
+ * intentionally do not apply; all budget, model, prompt and durable accounting controls do. */
+export async function suggestDisplayTitleExplicit(input: DisplayTitleInput,
+  provider: DisplayTitleProvider, localBudget: AiBudgetGuard,
+  ledger: DisplayTitleNeuronLedger, logicalRequestKey: string,
+  dailyNeuronBudget: number, accountFreeNeuronsPerDay: number,
+  maximumTitlesPerRequest: number): Promise<DisplayTitleSuggestionOutcome> {
+  return suggestDisplayTitle(input, provider, localBudget, ledger, logicalRequestKey,
+    dailyNeuronBudget, accountFreeNeuronsPerDay, maximumTitlesPerRequest);
 }

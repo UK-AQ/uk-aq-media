@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@uk-aq-media/core": "*",
-    "@uk-aq-media/discovery": "*"
+    "@uk-aq-media/discovery": "*",
+    "@uk-aq-media/enrichment": "*"
   }
 }

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   DISPLAY_TITLE_AI_MAX_OUTPUT_TOKENS,
+  DISPLAY_TITLE_PROMPT_VERSION,
+  LocalRequestBudget,
   NEURON_MICRO_UNITS,
   calculateNeuronMicrounits,
   ceilingWholeNeurons,
@@ -8,8 +10,11 @@ import {
   inspectDisplayTitleResponse,
   parseDisplayTitleUsage,
   prepareDisplayTitleRequest,
+  suggestDisplayTitleExplicit,
+  type DisplayTitleNeuronLedger,
+  type DisplayTitleProvider,
 } from '@uk-aq-media/enrichment';
-import { presentAiUsage } from '../apps/media-admin/src/index';
+import { EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, presentAiUsage } from '../apps/media-admin/src/index';
 
 const model = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const rates = displayTitleNeuronRates(model);
@@ -82,6 +87,54 @@ assert.equal(prepared.candidate_count, 1);
 assert.equal(prepared.maximum_output_tokens, DISPLAY_TITLE_AI_MAX_OUTPUT_TOKENS);
 assert.ok(prepared.conservative_prompt_token_ceiling >
   new TextEncoder().encode(JSON.stringify(prepared.request)).byteLength);
+
+let explicitProviderCalls = 0;
+const explicitProvider: DisplayTitleProvider = {
+  provider: 'cloudflare-workers-ai',
+  model,
+  version: DISPLAY_TITLE_PROMPT_VERSION,
+  prepare: prepareDisplayTitleRequest,
+  async suggest() {
+    explicitProviderCalls++;
+    return { title: 'Short AQ title', usage: {
+      prompt_tokens: 100, completion_tokens: 5, total_tokens: 105,
+    }, usage_status: 'usable' };
+  },
+};
+const admittedKeys = new Set<string>();
+const explicitLedger: DisplayTitleNeuronLedger = {
+  async reserve(request) {
+    if (admittedKeys.has(request.logical_request_key)) {
+      return { status: 'denied', reason: 'duplicate_request' };
+    }
+    admittedKeys.add(request.logical_request_key);
+    return { status: 'reserved', reservation: {
+      request_id: 'explicit-request-1', reserved_neuron_microunits: 1,
+    } };
+  },
+  async markRequestStarted() { return true; },
+  async reconcile() { return true; },
+  async retainReservation() {},
+};
+const explicitInput = { publisher: 'Policy-disabled publisher', title: 'Short AQ title',
+  title_context: null, author: null, categories: [] };
+const explicitFirst = await suggestDisplayTitleExplicit(explicitInput, explicitProvider,
+  new LocalRequestBudget(1), explicitLedger, 'admin-display-title:42:stable-key',
+  8_000, 10_000, 5);
+const explicitReplay = await suggestDisplayTitleExplicit(explicitInput, explicitProvider,
+  new LocalRequestBudget(1), explicitLedger, 'admin-display-title:42:stable-key',
+  8_000, 10_000, 5);
+assert.equal(explicitFirst.status, 'suggested');
+assert.deepEqual(explicitReplay, { status: 'skipped', reason: 'duplicate_request' });
+assert.equal(explicitProviderCalls, 1,
+  'the explicit path must not infer twice for one durable logical request key');
+assert.match(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, /ai_title_suggestion_state = 'pending'/);
+assert.match(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, /ai_title_decided_at = NULL/);
+assert.doesNotMatch(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, /\bdisplay_title\s*=/);
+assert.doesNotMatch(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, /\bstatus\s*=/);
+assert.doesNotMatch(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, /\bapproval_(?:method|at)\s*=/);
+assert.doesNotMatch(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, /\bstatus\s+IN\b/);
+assert.doesNotMatch(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL, /\bsource_key\b/);
 
 const presented = presentAiUsage({
   usage_date: '2026-09-11',

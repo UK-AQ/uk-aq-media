@@ -5,6 +5,10 @@ import {
   type GuardianPreviewCandidate, type GuardianPreviewLookup,
 } from '@uk-aq-media/discovery';
 import {
+  D1DisplayTitleNeuronLedger, LocalRequestBudget, WorkersAiDisplayTitleProvider,
+  displayTitleNeuronRates, suggestDisplayTitleExplicit,
+} from '@uk-aq-media/enrichment';
+import {
   applyGuardianImageRepairPlan, buildGuardianImageRepairPlan,
   requireCurrentGuardianImageRepairPlan,
 } from './guardian-image-bulk';
@@ -47,6 +51,17 @@ type TitleMutationRow = {
   ai_title_decided_at: string | null;
 };
 
+type ExplicitTitleArticleRow = TitleMutationRow & {
+  publisher: string;
+  author: string | null;
+  approval_method: string | null;
+  approved_at: string | null;
+  ai_title_attempted_at: string | null;
+  ai_title_model: string | null;
+  ai_title_prompt_version: string | null;
+  ai_title_generated_at: string | null;
+};
+
 type GuardianImageRow = {
   id: number;
   source_key: string;
@@ -77,17 +92,24 @@ export type AiUsageRow = {
 function configuredAiUsageLimits(env: MediaAdminEnv): {
   dailyBudgetNeurons: number;
   accountFreeNeurons: number;
+  maximumTitlesPerRequest: number;
+  model: string;
 } {
   const dailyBudgetNeurons = Number(env.MEDIA_AI_DAILY_NEURON_BUDGET);
   const accountFreeNeurons = Number(env.MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY);
+  const maximumTitlesPerRequest = Number(env.MEDIA_AI_MAX_TITLES_PER_REQUEST);
+  const model = String(env.MEDIA_AI_MODEL).trim();
   if (!Number.isSafeInteger(dailyBudgetNeurons) || dailyBudgetNeurons < 1 ||
       !Number.isSafeInteger(accountFreeNeurons) || accountFreeNeurons < 1 ||
       dailyBudgetNeurons > accountFreeNeurons ||
       !Number.isSafeInteger(dailyBudgetNeurons * NEURON_MICRO_UNITS) ||
-      !Number.isSafeInteger(accountFreeNeurons * NEURON_MICRO_UNITS)) {
+      !Number.isSafeInteger(accountFreeNeurons * NEURON_MICRO_UNITS) ||
+      !Number.isSafeInteger(maximumTitlesPerRequest) || maximumTitlesPerRequest < 1 ||
+      maximumTitlesPerRequest > 5 || !/^@cf\/[a-z0-9._/-]+$/i.test(model) ||
+      model.length > 200 || displayTitleNeuronRates(model) === null) {
     throw new HttpError(503, 'ai_usage_configuration_invalid');
   }
-  return { dailyBudgetNeurons, accountFreeNeurons };
+  return { dailyBudgetNeurons, accountFreeNeurons, maximumTitlesPerRequest, model };
 }
 
 function neurons(microunits: number): number {
@@ -269,6 +291,88 @@ async function setHumanDisplayTitle(request: Request, db: D1Database,
     .first<TitleMutationRow>();
   if (!changed) throw new HttpError(404, 'article_not_found');
   return json({ article: changed });
+}
+
+const EXPLICIT_TITLE_RETURNING = `id, status, title, display_title, display_title_origin,
+  ai_title_suggestion, ai_title_suggestion_state, ai_title_decided_at, publisher, author,
+  approval_method, approved_at, ai_title_attempted_at, ai_title_model,
+  ai_title_prompt_version, ai_title_generated_at`;
+
+export const EXPLICIT_DISPLAY_TITLE_UPDATE_SQL = `UPDATE media_articles SET
+  ai_title_attempted_at = ?, ai_title_suggestion = ?, ai_title_suggestion_state = 'pending',
+  ai_title_model = ?, ai_title_prompt_version = ?, ai_title_generated_at = ?,
+  ai_title_decided_at = NULL, updated_at = ? WHERE id = ? RETURNING ${EXPLICIT_TITLE_RETURNING}`;
+
+async function explicitTitleArticle(db: D1Database, id: number): Promise<ExplicitTitleArticleRow | null> {
+  return db.prepare(`SELECT ${EXPLICIT_TITLE_RETURNING} FROM media_articles WHERE id = ?`)
+    .bind(id).first<ExplicitTitleArticleRow>();
+}
+
+function presentExplicitGeneration(article: ExplicitTitleArticleRow, replayed: boolean) {
+  return json({ article, generation: {
+    outcome: article.ai_title_suggestion === article.title
+      ? 'no_change' : 'suggested',
+    replayed,
+  } });
+}
+
+async function replayExplicitGeneration(db: D1Database, id: number,
+  logicalRequestKey: string): Promise<Response | null> {
+  const ledger = await db.prepare(`SELECT request_started_at, completed_at, titles_generated
+    FROM media_ai_neuron_requests WHERE logical_request_key = ?`).bind(logicalRequestKey)
+    .first<{ request_started_at: string | null; completed_at: string | null;
+      titles_generated: number }>();
+  if (!ledger) return null;
+  if (!ledger.completed_at) throw new HttpError(409, 'ai_title_generation_in_progress');
+  const article = await explicitTitleArticle(db, id);
+  if (!article) throw new HttpError(404, 'article_not_found');
+  if (ledger.titles_generated === 1 && article.ai_title_generated_at === ledger.completed_at &&
+      article.ai_title_suggestion) return presentExplicitGeneration(article, true);
+  throw new HttpError(409, ledger.titles_generated === 0
+    ? 'ai_title_generation_produced_no_valid_suggestion'
+    : 'ai_title_generation_replay_result_no_longer_current');
+}
+
+async function generateExplicitAiTitle(request: Request, env: MediaAdminEnv,
+  id: number): Promise<Response> {
+  const key = request.headers.get('Idempotency-Key');
+  if (!key || !/^[A-Za-z0-9_-]{16,100}$/.test(key)) {
+    throw new HttpError(400, 'idempotency_key_required');
+  }
+  const logicalRequestKey = `admin-display-title:${id}:${key}`;
+  const replay = await replayExplicitGeneration(env.MEDIA_DB, id, logicalRequestKey);
+  if (replay) return replay;
+  const article = await explicitTitleArticle(env.MEDIA_DB, id);
+  if (!article) throw new HttpError(404, 'article_not_found');
+  const configured = configuredAiUsageLimits(env);
+  const outcome = await suggestDisplayTitleExplicit({
+    publisher: article.publisher,
+    title: article.title,
+    title_context: null,
+    author: article.author,
+    categories: [],
+  }, new WorkersAiDisplayTitleProvider(env.AI, configured.model),
+  new LocalRequestBudget(1),
+  new D1DisplayTitleNeuronLedger(env.MEDIA_DB, configured.maximumTitlesPerRequest),
+  logicalRequestKey, configured.dailyBudgetNeurons, configured.accountFreeNeurons,
+  configured.maximumTitlesPerRequest);
+  if (outcome.status === 'skipped' && outcome.reason === 'duplicate_request') {
+    const duplicate = await replayExplicitGeneration(env.MEDIA_DB, id, logicalRequestKey);
+    if (duplicate) return duplicate;
+  }
+  if (outcome.status === 'skipped') {
+    throw new HttpError(outcome.reason === 'daily_neuron_budget' ? 429 : 503,
+      `ai_title_generation_${outcome.reason}`);
+  }
+  if (outcome.status === 'failed') {
+    throw new HttpError(502, `ai_title_generation_${outcome.reason}`);
+  }
+  const stored = await env.MEDIA_DB.prepare(EXPLICIT_DISPLAY_TITLE_UPDATE_SQL)
+    .bind(outcome.provenance.generated_at, outcome.title, outcome.provenance.model,
+      outcome.provenance.version, outcome.provenance.generated_at,
+      outcome.provenance.generated_at, id).first<ExplicitTitleArticleRow>();
+  if (!stored) throw new HttpError(404, 'article_not_found');
+  return presentExplicitGeneration(stored, false);
 }
 
 function presentGuardianImageCandidate(candidate: GuardianPreviewCandidate | null) {
@@ -472,6 +576,13 @@ export default {
         if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
         return await decideAiTitle(env.MEDIA_DB, id,
           titleDecision[2] === 'accept-ai' ? 'accept' : 'reject');
+      }
+      const titleGeneration = /^\/admin\/articles\/([1-9]\d*)\/display-title\/generate-ai$/.exec(url.pathname);
+      if (titleGeneration) {
+        if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+        const id = Number(titleGeneration[1]);
+        if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
+        return await generateExplicitAiTitle(request, env, id);
       }
       const titleEdit = /^\/admin\/articles\/([1-9]\d*)\/display-title$/.exec(url.pathname);
       if (titleEdit) {

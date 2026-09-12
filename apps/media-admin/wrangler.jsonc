@@ -21,6 +21,9 @@
       "migrations_dir": "../../migrations"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
   "secrets": {
     "required": [
       "MEDIA_ADMIN_TOKEN"
@@ -28,6 +31,8 @@
   },
   "vars": {
     "MEDIA_AI_DAILY_NEURON_BUDGET": 8000,
-    "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY": 10000
+    "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY": 10000,
+    "MEDIA_AI_MAX_TITLES_PER_REQUEST": 5,
+    "MEDIA_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
   }
 }
