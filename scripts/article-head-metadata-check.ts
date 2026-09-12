@@ -89,6 +89,36 @@ assert.deepEqual(await checkRedirects(new Map([
   'https://publisher.example/path/start', 'https://publisher.example/article',
 ]);
 
+const independentSource: Source = {
+  ...source,
+  source_key: 'the-independent',
+  name: 'The Independent',
+  canonical_domain: 'the-independent.com',
+};
+const independentRequests: string[] = [];
+globalThis.fetch = async input => {
+  const url = String(input);
+  independentRequests.push(url);
+  if (url === 'https://independent.co.uk/news/legacy') {
+    return new Response(null, { status: 301,
+      headers: { Location: 'https://www.the-independent.com/news/current' } });
+  }
+  assert.equal(url, 'https://www.the-independent.com/news/current');
+  return new Response(`<head>
+    <meta property="og:image" content="https://static.independent.co.uk/legacy-image.jpg">
+  </head>`, { headers: { 'Content-Type': 'text/html' } });
+};
+try {
+  const independentMetadata = await fetchArticleHeadMetadata(
+    'https://independent.co.uk/news/legacy', independentSource);
+  assert.equal(independentMetadata.previewUrl,
+    'https://static.independent.co.uk/legacy-image.jpg');
+  assert.deepEqual(independentRequests, [
+    'https://independent.co.uk/news/legacy',
+    'https://www.the-independent.com/news/current',
+  ]);
+} finally { globalThis.fetch = originalFetch; }
+
 globalThis.fetch = async () => new Response(null,
   { status: 307, headers: { Location: 'https://attacker.example/article' } });
 try {

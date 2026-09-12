@@ -505,7 +505,8 @@ export default {
         return json({ articles: results });
       }
       if (url.pathname === '/admin/sources') {
-        const { results } = await env.MEDIA_DB.prepare('SELECT * FROM media_sources ORDER BY source_key LIMIT ?').bind(limit).all();
+        const { results } = await env.MEDIA_DB.prepare(`SELECT * FROM media_sources
+          WHERE retired_at IS NULL ORDER BY source_key LIMIT ?`).bind(limit).all();
         return json({ sources: results });
       }
       const { results } = await env.MEDIA_DB.prepare(

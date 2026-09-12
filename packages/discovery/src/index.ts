@@ -376,8 +376,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     const statements: D1PreparedStatement[] = [];
     const acceptedArticles: DiscoveredArticle[] = [];
     const acceptedRules = new Map<string, AuthorRule[]>();
-    // AQN remains at <=20 items. Guardian is <=10 items per route, so its extra route-evidence
-    // statement still keeps every Queue invocation comfortably bounded.
+    // AQN and generic publisher routes remain at <=20 items; Guardian is <=10 per route.
+    // Guardian's extra route-evidence statement still keeps every Queue invocation bounded.
     for (const article of unique.values()) {
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;

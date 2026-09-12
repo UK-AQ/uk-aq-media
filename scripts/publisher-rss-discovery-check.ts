@@ -1,20 +1,30 @@
 import assert from 'node:assert/strict';
-import { configuredPublisherRssRouteKeys, parsePublisherRssFeed } from '@uk-aq-media/discovery';
-import { initialEditorialState, type Source } from '@uk-aq-media/core';
+import { readFileSync } from 'node:fs';
+import {
+  configuredPublisherRssRouteKeys, GUARDIAN_ROUTES, parsePublisherRssFeed,
+  PUBLISHER_RSS_ROUTES,
+} from '@uk-aq-media/discovery';
+import {
+  canonicalizeUrl, initialEditorialState, publisherHttpsUrl, remotePreviewUrl,
+  SourceSchema, z,
+} from '@uk-aq-media/core';
 
-const source: Source = {
-  source_key: 'bbc-news', name: 'BBC News', canonical_domain: 'bbc.co.uk',
-  source_type: 'publisher', enabled: true, publication_policy: 'manual',
-  review_level: 'standard', priority: 50, discovery_method: 'rss',
-  discovery_config: { routes: [{ route_key: 'bbc-news-top',
-    url: 'https://feeds.bbci.co.uk/news/rss.xml', max_items: 10 }], retain_excerpt: false },
-  content_fetch_policy: 'discovery_metadata_only', ai_content_policy: 'disabled',
-  image_policy: 'remote_preview',
-};
-assert.deepEqual(configuredPublisherRssRouteKeys(source), ['bbc-news-top']);
-assert.deepEqual(initialEditorialState(source), {
-  status: 'pending', approval_method: null, approval_author_rule_key: null,
-});
+const sources = z.array(SourceSchema).parse(JSON.parse(
+  readFileSync('config/sources.seed.json', 'utf8'),
+));
+const publisherSources = sources.filter(source =>
+  ['bbc-news', 'sky-news', 'the-independent'].includes(source.source_key));
+assert.equal(PUBLISHER_RSS_ROUTES.length, 13);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 25);
+for (const configured of publisherSources) {
+  assert.deepEqual(configuredPublisherRssRouteKeys(configured),
+    PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
+      .map(route => route.route_key));
+  assert.deepEqual(initialEditorialState(configured), {
+    status: 'pending', approval_method: null, approval_author_rule_key: null,
+  });
+}
+const source = publisherSources.find(candidate => candidate.source_key === 'bbc-news')!;
 const parsed = await parsePublisherRssFeed(`<?xml version="1.0"?><rss version="2.0"><channel>
   <item><title>Air quality improves</title><link>https://www.bbc.co.uk/news/a?utm_source=rss</link>
   <category>Environment</category></item>
@@ -26,4 +36,29 @@ assert.equal(parsed.articles[0]?.canonical_url, 'https://bbc.co.uk/news/a');
 assert.equal(parsed.articles[0]?.title_context, null);
 assert.deepEqual(configuredPublisherRssRouteKeys({ ...source,
   canonical_domain: 'bbc.com' }), []);
+assert.throws(() => canonicalizeUrl('https://regional.bbc.co.uk/news/a', source),
+  /off_source_article_url/);
+
+const independent = publisherSources.find(candidate => candidate.source_key === 'the-independent')!;
+assert.equal(canonicalizeUrl('https://www.the-independent.com/news/current?utm_source=rss', independent),
+  'https://the-independent.com/news/current');
+assert.equal(canonicalizeUrl('https://www.independent.co.uk/news/legacy?utm_source=rss', independent),
+  'https://independent.co.uk/news/legacy');
+assert.equal(canonicalizeUrl('https://news.independent.co.uk/legacy', independent),
+  'https://news.independent.co.uk/legacy');
+assert.equal(publisherHttpsUrl('https://independent.co.uk/news/legacy', independent),
+  'https://independent.co.uk/news/legacy');
+assert.equal(publisherHttpsUrl('https://news.independent.co.uk/legacy', independent),
+  'https://news.independent.co.uk/legacy');
+assert.equal(remotePreviewUrl('https://static.independent.co.uk/image.jpg', independent),
+  'https://static.independent.co.uk/image.jpg');
+for (const rejected of [
+  'https://independent.co.uk.attacker.example/article',
+  'https://not-independent.co.uk/article',
+  'https://attacker.example/image.jpg',
+]) {
+  assert.equal(publisherHttpsUrl(rejected, independent), null);
+  assert.equal(remotePreviewUrl(rejected, independent), null);
+  assert.throws(() => canonicalizeUrl(rejected, independent), /off_source_article_url/);
+}
 console.log('Publisher RSS discovery checks passed');

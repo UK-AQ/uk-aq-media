@@ -6,11 +6,36 @@ import { parseRssItems, readRssFeed, ScanError } from './rss';
 
 export const PUBLISHER_RSS_ROUTES = [
   { source_key: 'bbc-news', route_key: 'bbc-news-top',
-    url: 'https://feeds.bbci.co.uk/news/rss.xml', canonical_domain: 'bbc.co.uk' },
+    url: 'https://feeds.bbci.co.uk/news/rss.xml', canonical_domain: 'bbc.co.uk', max_items: 20 },
+  { source_key: 'bbc-news', route_key: 'bbc-news-science-environment',
+    url: 'https://feeds.bbci.co.uk/news/science_and_environment/rss.xml',
+    canonical_domain: 'bbc.co.uk', max_items: 20 },
+  { source_key: 'bbc-news', route_key: 'bbc-news-uk',
+    url: 'https://feeds.bbci.co.uk/news/uk/rss.xml', canonical_domain: 'bbc.co.uk', max_items: 20 },
+  { source_key: 'bbc-news', route_key: 'bbc-news-health',
+    url: 'https://feeds.bbci.co.uk/news/health/rss.xml', canonical_domain: 'bbc.co.uk', max_items: 20 },
   { source_key: 'sky-news', route_key: 'sky-news-home',
-    url: 'https://feeds.skynews.com/feeds/rss/home.xml', canonical_domain: 'news.sky.com' },
+    url: 'https://feeds.skynews.com/feeds/rss/home.xml', canonical_domain: 'news.sky.com', max_items: 10 },
+  { source_key: 'sky-news', route_key: 'sky-news-uk',
+    url: 'https://feeds.skynews.com/feeds/rss/uk.xml', canonical_domain: 'news.sky.com', max_items: 10 },
+  { source_key: 'sky-news', route_key: 'sky-news-world',
+    url: 'https://feeds.skynews.com/feeds/rss/world.xml', canonical_domain: 'news.sky.com', max_items: 10 },
+  { source_key: 'sky-news', route_key: 'sky-news-technology',
+    url: 'https://feeds.skynews.com/feeds/rss/technology.xml', canonical_domain: 'news.sky.com', max_items: 10 },
   { source_key: 'the-independent', route_key: 'independent-home',
-    url: 'https://www.the-independent.com/rss', canonical_domain: 'the-independent.com' },
+    url: 'https://www.the-independent.com/rss', canonical_domain: 'the-independent.com', max_items: 20 },
+  { source_key: 'the-independent', route_key: 'independent-uk',
+    url: 'https://www.the-independent.com/news/uk/rss',
+    canonical_domain: 'the-independent.com', max_items: 20 },
+  { source_key: 'the-independent', route_key: 'independent-climate',
+    url: 'https://www.the-independent.com/climate-change/rss',
+    canonical_domain: 'the-independent.com', max_items: 10 },
+  { source_key: 'the-independent', route_key: 'independent-science',
+    url: 'https://www.the-independent.com/news/science/rss',
+    canonical_domain: 'the-independent.com', max_items: 10 },
+  { source_key: 'the-independent', route_key: 'independent-health',
+    url: 'https://www.the-independent.com/life-style/health-and-families/rss',
+    canonical_domain: 'the-independent.com', max_items: 10 },
 ] as const;
 
 export type PublisherRssSourceKey = typeof PUBLISHER_RSS_ROUTES[number]['source_key'];
@@ -32,7 +57,7 @@ function configuredRoute(source: Source, routeKey: string): {
       source.publication_policy !== 'manual' || source.review_level !== 'standard' ||
       source.content_fetch_policy !== 'discovery_metadata_only' ||
       source.ai_content_policy !== 'disabled' || source.image_policy !== 'remote_preview' ||
-      route.url !== expected.url || route.max_items > 10) {
+      route.url !== expected.url || route.max_items !== expected.max_items) {
     throw new ScanError('publisher_rss_config_mismatch');
   }
   return route;
@@ -61,10 +86,10 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
   let invalid = parsed.items_invalid;
   for (const item of parsed.items) {
     let canonical: string;
-    try { canonical = canonicalizeUrl(item.raw_url, source.canonical_domain); }
+    try { canonical = canonicalizeUrl(item.raw_url, source); }
     catch { invalid++; continue; }
     const preview = source.image_policy === 'remote_preview' ? item.preview_candidates
-      .map(candidate => remotePreviewUrl(candidate.url, source.canonical_domain))
+      .map(candidate => remotePreviewUrl(candidate.url, source))
       .find(Boolean) ?? null : null;
     articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
       original_url: item.raw_url, title: item.title, author: item.author,

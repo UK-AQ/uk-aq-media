@@ -48,7 +48,7 @@ export async function loadSource(db: D1Database, key: string): Promise<Source | 
   const row = await db.prepare(`SELECT source_key, name, canonical_domain, source_type,
     enabled, publication_policy, review_level, priority, discovery_method,
     discovery_config_json, content_fetch_policy, ai_content_policy, image_policy
-    FROM media_sources WHERE source_key = ?`).bind(key).first<{
+    FROM media_sources WHERE source_key = ? AND retired_at IS NULL`).bind(key).first<{
       discovery_config_json: string; enabled: number; [key: string]: unknown;
     }>();
   if (!row) return null;

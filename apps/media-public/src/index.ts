@@ -78,7 +78,7 @@ async function articleImage(request: Request, env: MediaPublicEnv,
       row.source_image_policy !== 'remote_preview') throw new HttpError(404, 'image_not_found');
   const publisherUrl = row.source_key === 'the-guardian'
     ? guardianRemotePreviewUrl(row.og_image_url)
-    : remotePreviewUrl(row.og_image_url, row.canonical_domain);
+    : remotePreviewUrl(row.og_image_url, row);
   if (!publisherUrl || !row.og_image_url) throw new HttpError(404, 'image_not_found');
 
   const requestUrl = new URL(request.url);

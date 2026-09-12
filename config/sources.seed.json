@@ -33,7 +33,22 @@
         {
           "route_key": "bbc-news-top",
           "url": "https://feeds.bbci.co.uk/news/rss.xml",
-          "max_items": 10
+          "max_items": 20
+        },
+        {
+          "route_key": "bbc-news-science-environment",
+          "url": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+          "max_items": 20
+        },
+        {
+          "route_key": "bbc-news-uk",
+          "url": "https://feeds.bbci.co.uk/news/uk/rss.xml",
+          "max_items": 20
+        },
+        {
+          "route_key": "bbc-news-health",
+          "url": "https://feeds.bbci.co.uk/news/health/rss.xml",
+          "max_items": 20
         }
       ],
       "retain_excerpt": false
@@ -132,6 +147,21 @@
           "route_key": "sky-news-home",
           "url": "https://feeds.skynews.com/feeds/rss/home.xml",
           "max_items": 10
+        },
+        {
+          "route_key": "sky-news-uk",
+          "url": "https://feeds.skynews.com/feeds/rss/uk.xml",
+          "max_items": 10
+        },
+        {
+          "route_key": "sky-news-world",
+          "url": "https://feeds.skynews.com/feeds/rss/world.xml",
+          "max_items": 10
+        },
+        {
+          "route_key": "sky-news-technology",
+          "url": "https://feeds.skynews.com/feeds/rss/technology.xml",
+          "max_items": 10
         }
       ],
       "retain_excerpt": false
@@ -155,6 +185,26 @@
         {
           "route_key": "independent-home",
           "url": "https://www.the-independent.com/rss",
+          "max_items": 20
+        },
+        {
+          "route_key": "independent-uk",
+          "url": "https://www.the-independent.com/news/uk/rss",
+          "max_items": 20
+        },
+        {
+          "route_key": "independent-climate",
+          "url": "https://www.the-independent.com/climate-change/rss",
+          "max_items": 10
+        },
+        {
+          "route_key": "independent-science",
+          "url": "https://www.the-independent.com/news/science/rss",
+          "max_items": 10
+        },
+        {
+          "route_key": "independent-health",
+          "url": "https://www.the-independent.com/life-style/health-and-families/rss",
           "max_items": 10
         }
       ],

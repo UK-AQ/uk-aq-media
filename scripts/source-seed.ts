@@ -5,6 +5,9 @@ const sources = z.array(SourceSchema).length(9).parse(
   JSON.parse(readFileSync('config/sources.seed.json', 'utf8')),
 );
 if (new Set(sources.map(s => s.source_key)).size !== sources.length) throw new Error('duplicate_source');
+if (sources.some(source => source.source_key === 'defra-uk-air')) {
+  throw new Error('retired_defra_in_current_source_seed');
+}
 const quote = (value: string | number): string => typeof value === 'number' ? String(value) :
   `'${value.replaceAll("'", "''")}'`;
 const columns = ['source_key', 'name', 'canonical_domain', 'source_type', 'enabled',

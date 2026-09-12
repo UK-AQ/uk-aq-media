@@ -1,8 +1,8 @@
 # UK AQ Media
 
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
-D1 state, with Queue-driven Air Quality News and Guardian RSS discovery. It is not
-connected to the public UK AQ website.
+D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
+Independent RSS discovery. It is not connected to the public UK AQ website.
 
 The behavioural authority is the sibling
 [Media contract](../TEST-uk-aq-system-docs/system_docs/media/media_contract.md).
@@ -50,7 +50,10 @@ and Guardian to metadata-only AI. Because `0006` had already reached `main`, `00
 adds the replacement request-level neuron ledger without rewriting possibly applied
 migration history. Any non-zero legacy daily counter is retained as unknown usage and
 conservatively charges that UTC day's full local neuron budget. AQN and The Guardian
-are enabled; the other eight adapters remain deferred.
+are enabled alongside the three manual publisher RSS adapters added by `0010`. Migration
+`0011` expands those publisher routes, gives The Independent its explicit legacy
+`independent.co.uk` domain family, and removes or retires Defra from the current source
+catalogue without deleting referenced history. Four publisher adapters remain deferred.
 
 ## HTTP surface
 
@@ -135,10 +138,11 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 12 }`
-  when all three Guardian author rules are enabled: one AQN scan plus eleven Guardian
-  route scans. Disabled or structurally mismatched author rules omit only their profile
-  route, so `queued` reports the actual bounded message count. The
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 25 }`
+  when all current routes and all three Guardian author rules are enabled: one AQN scan,
+  eleven Guardian routes, four BBC routes, four Sky routes and five Independent routes.
+  Disabled or structurally mismatched author rules omit only their profile route, so
+  `queued` reports the actual bounded message count. The
   count reflects only enabled, internally configured supported work and may be zero.
 - Authentication failure returns `401` before any D1 or Queue access. Other methods
   on that path return `405` with `Allow: POST`; unknown paths return `404`.
@@ -171,12 +175,11 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 ## Discovery and policy boundaries
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
-helper that selects only allowlisted AQN and Guardian work when each D1 source is
-enabled. The caller cannot supply source or route selection. AQN retains its
-route-less `source_scan`; Guardian receives one `source_scan` per configured general
-route and per enabled, structurally matching profile route. The consumer reloads and
-validates D1 policy and exact adapter routes. Work messages carry identities, never
-bodies.
+helper that selects only allowlisted AQN, Guardian, BBC News, Sky News and Independent
+work when each D1 source is current and enabled. The caller cannot supply source or
+route selection. AQN retains its route-less `source_scan`; every Guardian and generic
+publisher RSS route receives its own `source_scan`. The consumer reloads and validates
+D1 policy and exact adapter routes. Work messages carry identities, never bodies.
 
 Each AQN scan fetches `https://airqualitynews.com/feed/`, with no redirect
 following, a 20-second timeout, a 1 MiB limit and at most 20 recent entries. It
@@ -243,6 +246,15 @@ boundary, prefers the largest trustworthy positive declared width, then height, 
 dimensions provide no size advantage. AQN retains the shared parser's existing candidate order,
 and normal rediscovery still fills only null images rather than replacing non-null selections.
 
+BBC uses top, science-and-environment, UK and health feeds, each capped at 20 entries.
+Sky uses home, UK, world and technology feeds, each capped at 10 because the official
+feeds currently expose no more than that. The Independent uses home and UK feeds capped
+at 20 plus climate, science and health feeds capped at 10. Each route is a separate
+bounded Queue invocation and uses the shared deterministic AQ relevance filter. The
+Independent keeps `the-independent.com` as its canonical domain while the explicit
+`independent.co.uk` family (including subdomains such as `static.independent.co.uk`) is
+accepted for legacy article/image ownership; unrelated domains remain rejected.
+
 Successful scans atomically persist articles, exactly one creation/auto-approval
 event per new identity, and run counters. Runs record bounded codes rather than
 feed content/error dumps. Queue acknowledgement follows completion of those writes.
@@ -250,9 +262,10 @@ Failures retry after five minutes, at most three times; without a dead-letter qu
 exhausted messages are discarded and the next scheduled scan retries discovery.
 A long outage can exceed the feed's recent window; historical recovery is deferred.
 
-AQN and Guardian allow metadata-only AI for the narrow display-title task. The eight
-unimplemented sources retain disabled AI. No seed asserts a permanent legal
-permission; Defra richer/OGL processing remains disabled pending its adapter work.
+AQN and Guardian allow metadata-only AI for the narrow display-title task. The three
+manual publisher RSS sources and four deferred publishers retain disabled AI. No seed
+asserts a permanent legal permission; Defra is retired from the current Media source
+catalogue.
 Source-level and article-level image blocks are both checked on public reads.
 
 Automatic display-title AI runs only for accepted AQN/Guardian feed items whose stored

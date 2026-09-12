@@ -2,8 +2,11 @@ import {
   ArticleStatus, AuthorRuleSchema, HttpError, PublicationPolicy,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
   loadSource, publisherHttpsUrl, remotePreviewUrl, z,
+  SourceSchema,
 } from '@uk-aq-media/core';
-import { fetchArticleHeadMetadata } from '@uk-aq-media/discovery';
+import {
+  configuredPublisherRssRouteKeys, fetchArticleHeadMetadata,
+} from '@uk-aq-media/discovery';
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -224,11 +227,11 @@ async function sourceForUrl(db: D1Database, rawUrl: string): Promise<{
 }> {
   const domain = safeHostname(rawUrl);
   const { results } = await db.prepare(`SELECT * FROM media_sources
-    WHERE canonical_domain = ? OR ? LIKE '%.' || canonical_domain
-    ORDER BY length(canonical_domain) DESC LIMIT 1`).bind(domain, domain).all<SourceRow>();
-  const source = results[0] ?? null;
+    WHERE retired_at IS NULL ORDER BY length(canonical_domain) DESC, source_key LIMIT 100`)
+    .all<SourceRow>();
+  const source = results.find(candidate => publisherHttpsUrl(rawUrl, candidate)) ?? null;
   let canonicalUrl: string;
-  try { canonicalUrl = canonicalizeUrl(rawUrl, source?.canonical_domain ?? domain); }
+  try { canonicalUrl = canonicalizeUrl(rawUrl, source ?? domain); }
   catch { throw new HttpError(400, 'invalid_article_url'); }
   return { source, domain, canonicalUrl, hash: await canonicalUrlHash(canonicalUrl) };
 }
@@ -340,7 +343,8 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
 
 async function listSelectors(db: D1Database): Promise<Response> {
   const [sources, authors] = await Promise.all([
-    db.prepare('SELECT source_key, name FROM media_sources ORDER BY name, source_key LIMIT 100').all(),
+    db.prepare(`SELECT source_key, name FROM media_sources WHERE retired_at IS NULL
+      ORDER BY name, source_key LIMIT 100`).all(),
     db.prepare(`SELECT DISTINCT author FROM media_articles WHERE author IS NOT NULL AND trim(author) != ''
       ORDER BY author COLLATE NOCASE LIMIT 250`).all(),
   ]);
@@ -375,9 +379,12 @@ async function listSources(db: D1Database): Promise<Response> {
         ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS recent_run_status,
       (SELECT r.started_at FROM media_discovery_runs r WHERE r.source_key = s.source_key
         ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS recent_run_started_at
-    FROM media_sources s ORDER BY s.name, s.source_key LIMIT 100`).all<Record<string, unknown>>();
-  const rules = await db.prepare(`SELECT * FROM media_author_rules
-    ORDER BY source_key, display_name, author_key LIMIT 250`).all<Record<string, unknown>>();
+    FROM media_sources s WHERE s.retired_at IS NULL
+    ORDER BY s.name, s.source_key LIMIT 100`).all<Record<string, unknown>>();
+  const rules = await db.prepare(`SELECT ar.* FROM media_author_rules ar
+    JOIN media_sources s ON s.source_key = ar.source_key WHERE s.retired_at IS NULL
+    ORDER BY ar.source_key, ar.display_name, ar.author_key LIMIT 250`)
+    .all<Record<string, unknown>>();
   return json({ sources: results, author_rules: rules.results.map(rule => ({
     ...rule,
     byline_aliases: JSON.parse(String(rule.byline_aliases_json)),
@@ -416,7 +423,7 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
   const preview = parsed.data.preview_image_url
     ? (source.source_key === 'the-guardian'
       ? guardianRemotePreviewUrl(parsed.data.preview_image_url)
-      : remotePreviewUrl(parsed.data.preview_image_url, source.canonical_domain)) : null;
+      : remotePreviewUrl(parsed.data.preview_image_url, source)) : null;
   if (parsed.data.preview_image_url && !preview) throw new HttpError(400, 'invalid_preview_image_url');
   const now = new Date().toISOString();
   const eventKey = `admin:add:${idempotency}`;
@@ -519,7 +526,7 @@ async function adminImage(db: D1Database, id: number): Promise<Response> {
   if (!row || row.article_image_policy !== 'remote_preview' ||
       row.source_image_policy !== 'remote_preview') throw new HttpError(404, 'image_not_found');
   const imageUrl = row.source_key === 'the-guardian' ? guardianRemotePreviewUrl(row.og_image_url)
-    : remotePreviewUrl(row.og_image_url, row.canonical_domain);
+    : remotePreviewUrl(row.og_image_url, row);
   if (!imageUrl) throw new HttpError(404, 'image_not_found');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -543,13 +550,23 @@ async function adminImage(db: D1Database, id: number): Promise<Response> {
 }
 
 function sourceCanEnable(source: SourceRow): boolean {
-  if (!['air-quality-news', 'the-guardian'].includes(source.source_key) ||
-      source.discovery_method !== 'rss') return false;
   try {
     const config = JSON.parse(source.discovery_config_json) as Record<string, unknown>;
+    const parsed = SourceSchema.safeParse({
+      source_key: source.source_key, name: source.name,
+      canonical_domain: source.canonical_domain, source_type: source.source_type,
+      enabled: true, publication_policy: source.publication_policy,
+      review_level: source.review_level, priority: source.priority,
+      discovery_method: source.discovery_method, discovery_config: config,
+      content_fetch_policy: source.content_fetch_policy,
+      ai_content_policy: source.ai_content_policy, image_policy: source.image_policy,
+    });
+    if (!parsed.success || parsed.data.discovery_method !== 'rss') return false;
     return source.source_key === 'air-quality-news'
       ? config.url === 'https://airqualitynews.com/feed/'
-      : Array.isArray(config.routes) && config.routes.length > 0;
+      : source.source_key === 'the-guardian'
+        ? Array.isArray(config.routes) && config.routes.length > 0
+        : configuredPublisherRssRouteKeys(parsed.data).length > 0;
   } catch { return false; }
 }
 
@@ -557,7 +574,8 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
   const eventKey = `admin:source:${requireIdempotencyKey(request)}`;
   const parsed = SourceMutation.safeParse(await readJson(request));
   if (!parsed.success) throw new HttpError(400, 'invalid_source_mutation');
-  const existing = await db.prepare('SELECT * FROM media_sources WHERE source_key = ?')
+  const existing = await db.prepare(`SELECT * FROM media_sources
+    WHERE source_key = ? AND retired_at IS NULL`)
     .bind(sourceKey).first<SourceRow>();
   if (!existing) throw new HttpError(404, 'source_not_found');
   if (parsed.data.enabled === true && !sourceCanEnable(existing)) {
@@ -571,7 +589,7 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
     const now = new Date().toISOString();
     await db.batch([
       db.prepare(`UPDATE media_sources SET publication_policy = ?, enabled = ?, updated_at = ?
-        WHERE source_key = ?`).bind(nextPolicy, nextEnabled, now, sourceKey),
+        WHERE source_key = ? AND retired_at IS NULL`).bind(nextPolicy, nextEnabled, now, sourceKey),
       db.prepare(`INSERT INTO media_configuration_events
         (event_key, entity_type, entity_key, action, actor_type, before_json, after_json, created_at)
         VALUES (?, 'source', ?, 'updated', 'admin', ?, ?, ?)`)
@@ -580,7 +598,8 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
           enabled: Boolean(nextEnabled) }), now),
     ]);
   }
-  const source = await db.prepare('SELECT * FROM media_sources WHERE source_key = ?')
+  const source = await db.prepare(`SELECT * FROM media_sources
+    WHERE source_key = ? AND retired_at IS NULL`)
     .bind(sourceKey).first();
   return json({ source, replayed: Boolean(replay) });
 }

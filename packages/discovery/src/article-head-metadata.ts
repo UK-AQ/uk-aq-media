@@ -124,7 +124,7 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
   if (source.image_policy !== 'remote_preview') {
     throw new ScanError('article_head_not_permitted');
   }
-  const articleUrl = publisherHttpsUrl(canonicalUrl, source.canonical_domain);
+  const articleUrl = publisherHttpsUrl(canonicalUrl, source);
   if (!articleUrl) throw new ScanError('invalid_article_head_url');
 
   const controller = new AbortController();
@@ -157,7 +157,7 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
       let destination: URL;
       try { destination = new URL(location, requestUrl); }
       catch { throw new ScanError('article_head_redirect_malformed_location'); }
-      const permittedUrl = publisherHttpsUrl(destination.href, source.canonical_domain);
+      const permittedUrl = publisherHttpsUrl(destination.href, source);
       if (!permittedUrl) throw new ScanError('article_head_redirect_not_permitted');
       requestUrl = permittedUrl;
       redirectCount += 1;
@@ -181,7 +181,7 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
     const preview = candidates
       .map(value => source.source_key === 'the-guardian'
         ? guardianRemotePreviewUrl(value)
-        : remotePreviewUrl(value, source.canonical_domain)).find(Boolean) ?? null;
+        : remotePreviewUrl(value, source)).find(Boolean) ?? null;
     let previewError: string | null = null;
     if (!preview && candidates.length > 0) {
       try { previewError = `invalid_preview_image_host:${new URL(candidates[0]!).hostname}`; }
