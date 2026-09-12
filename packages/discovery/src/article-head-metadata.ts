@@ -6,6 +6,8 @@ import { ScanError } from './rss';
 
 const MAX_HEAD_BYTES = 256 * 1024;
 const HEAD_TIMEOUT_MS = 10_000;
+const MAX_HEAD_REDIRECTS = 3;
+const HEAD_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 function decodeHtmlEntities(value: string): string {
   const named: Record<string, string> = {
@@ -111,6 +113,10 @@ async function readHtmlHead(response: Response, signal: AbortSignal): Promise<st
   }
 }
 
+async function cancelResponseBody(response: Response): Promise<void> {
+  try { await response.body?.cancel(); } catch { /* best effort */ }
+}
+
 export async function fetchArticleHeadMetadata(canonicalUrl: string,
   source: Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>):
   Promise<ArticleHeadMetadata & { previewUrl: string | null; previewError: string | null;
@@ -124,29 +130,49 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HEAD_TIMEOUT_MS);
   try {
+    let requestUrl = articleUrl;
+    let redirectCount = 0;
     let response: Response;
-    try {
-      response = await fetch(articleUrl, {
-        method: 'GET', redirect: 'manual', signal: controller.signal,
-        headers: {
-          Accept: 'text/html,application/xhtml+xml',
-          'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)',
-        },
-      });
-    } catch {
-      throw new ScanError(controller.signal.aborted ? 'article_head_timeout' : 'article_head_fetch_failed');
+    for (;;) {
+      try {
+        response = await fetch(requestUrl, {
+          method: 'GET', redirect: 'manual', signal: controller.signal,
+          headers: {
+            Accept: 'text/html,application/xhtml+xml',
+            'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)',
+          },
+        });
+      } catch {
+        throw new ScanError(controller.signal.aborted
+          ? 'article_head_timeout' : 'article_head_fetch_failed');
+      }
+      if (!HEAD_REDIRECT_STATUSES.has(response.status)) break;
+
+      await cancelResponseBody(response);
+      if (redirectCount >= MAX_HEAD_REDIRECTS) {
+        throw new ScanError('article_head_redirect_limit');
+      }
+      const location = response.headers.get('Location')?.trim();
+      if (!location) throw new ScanError('article_head_redirect_missing_location');
+      let destination: URL;
+      try { destination = new URL(location, requestUrl); }
+      catch { throw new ScanError('article_head_redirect_malformed_location'); }
+      const permittedUrl = publisherHttpsUrl(destination.href, source.canonical_domain);
+      if (!permittedUrl) throw new ScanError('article_head_redirect_not_permitted');
+      requestUrl = permittedUrl;
+      redirectCount += 1;
     }
     if (response.status >= 300 && response.status < 400) {
-      await response.body?.cancel();
-      throw new ScanError('article_head_redirect');
+      await cancelResponseBody(response);
+      throw new ScanError('article_head_redirect_unsupported');
     }
     if (!response.ok) {
-      await response.body?.cancel();
+      await cancelResponseBody(response);
       throw new ScanError(`article_head_http_${response.status}`);
     }
     const contentType = response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase();
     if (contentType !== 'text/html' && contentType !== 'application/xhtml+xml') {
-      await response.body?.cancel();
+      await cancelResponseBody(response);
       throw new ScanError('article_head_not_html');
     }
     const metadata = extractArticleHeadMetadata(await readHtmlHead(response, controller.signal));
