@@ -125,6 +125,22 @@ assert.deepEqual(parseNgramLine('doc-1\tUK air-quality update today\t2'), {
   doc_id: 'doc-1', quadgram: 'UK air-quality update today', count: 2,
 });
 assert.throws(() => parseNgramLine('broken\trow'), /gdelt_ngram_tsv_invalid/);
+const overlongNgram = `doc-overlong\t${'x'.repeat(4097)}\t1`;
+assert.throws(() => parseNgramLine(overlongNgram), /gdelt_ngram_tsv_invalid/,
+  'the 4,096-character QUADGRAM bound must remain strict');
+const tolerantNgrams = await scanNgramLines(fixtureLines([
+  'doc-valid-1\tair quality in London\t1', overlongNgram,
+  'doc-valid-2\twildfires affect the region\t1',
+]));
+assert.equal(tolerantNgrams.ngram_rows, 2);
+assert.equal(tolerantNgrams.malformed_ngram_rows, 1);
+assert.equal(tolerantNgrams.matches_seen, 2);
+assert.deepEqual([...tolerantNgrams.matched_docs.keys()].sort(), ['doc-valid-1', 'doc-valid-2']);
+await assert.rejects(scanNgramLines(fixtureLines([overlongNgram])), /gdelt_ngram_empty/,
+  'a file with no usable NGRAM rows must remain fatal');
+await assert.rejects(scanNgramLines(fixtureLines(['doc-valid\tair quality\t1']), () => {
+  throw new Error('unexpected_scanner_failure');
+}), /unexpected_scanner_failure/, 'unexpected scanner failures must still escape');
 for (const [phrase, key] of [
   ['domestic wood-burning rules', 'gdelt-wood-burning'],
   ['health effects of wildfires', 'gdelt-wildfire'],
@@ -205,6 +221,10 @@ sqlite.exec(`INSERT INTO media_publisher_domain_scope
   (publisher_domain, publisher_scope, classification_reason, created_at, updated_at)
   VALUES ('known-non-uk.com', 'non_uk', 'fixture', '2026-09-13T12:00:00.000Z', '2026-09-13T12:00:00.000Z')`);
 const db = sqliteD1(sqlite);
+const malformedNgramColumn = sqlite.prepare('PRAGMA table_info(media_gdelt_files)')
+  .all().find(row => row.name === 'malformed_ngram_rows');
+assert.equal(malformedNgramColumn?.notnull, 1);
+assert.equal(malformedNgramColumn?.dflt_value, '0');
 const run = await startGdeltRun(db, new Date('2026-09-13T12:10:44.000Z'));
 const stamp = '20260913120000';
 const globalOnly = [
@@ -213,7 +233,16 @@ const globalOnly = [
   candidate('https://known-non-uk.com/air-pollution', 'Air pollution policy', families.pollution),
 ];
 await startGdeltFile(db, { run_id: run.run_id, file_stamp: stamp, expected_chunks: 1,
-  candidate_count: globalOnly.length, ngram_rows: 20, matches_seen: 2, malformed_toc_rows: 1 });
+  candidate_count: globalOnly.length, ngram_rows: 20, matches_seen: 2,
+  malformed_ngram_rows: 2, malformed_toc_rows: 1 });
+assert.deepEqual({ ...sqlite.prepare(`SELECT malformed_ngram_rows, malformed_toc_rows
+  FROM media_gdelt_files WHERE file_stamp = ?`).get(stamp) }, {
+  malformed_ngram_rows: 2, malformed_toc_rows: 1,
+});
+await assert.rejects(startGdeltFile(db, { run_id: run.run_id, file_stamp: stamp, expected_chunks: 1,
+  candidate_count: globalOnly.length, ngram_rows: 20, matches_seen: 2,
+  malformed_ngram_rows: 3, malformed_toc_rows: 1 }), /gdelt_file_manifest_changed/,
+  'processing-file replay must retain malformed NGRAM manifest evidence');
 const generationBefore = sqlite.prepare(`SELECT generation FROM media_public_feed_state
   WHERE scope = 'homepage_latest_6'`).get()!.generation;
 await ingestGdeltChunk(db, { run_id: run.run_id, file_stamp: stamp, chunk_index: 0,
@@ -225,6 +254,9 @@ assert.equal(sqlite.prepare(`SELECT generation FROM media_public_feed_state
   WHERE scope = 'homepage_latest_6'`).get()!.generation, generationBefore,
   'candidate-only writes must not affect the homepage generation');
 await completeGdeltFile(db, { run_id: run.run_id, file_stamp: stamp });
+assert.equal(sqlite.prepare('SELECT malformed_rows FROM media_gdelt_runs WHERE id = ?')
+  .get(run.run_id)!.malformed_rows, 3,
+  'run malformed_rows must aggregate distinct NGRAM and TOC evidence once');
 
 const stamp2 = '20260913120100';
 const aqnUrl = 'https://airqualitynews.com/2026/09/clean-air-plan?utm_source=gdelt';
@@ -236,7 +268,8 @@ const promoted = [
   candidate(irrelevantUkUrl, 'Hottest August breaks temperature record', families.wildfire),
 ];
 await startGdeltFile(db, { run_id: run.run_id, file_stamp: stamp2, expected_chunks: 2,
-  candidate_count: promoted.length, ngram_rows: 30, matches_seen: 3, malformed_toc_rows: 0 });
+  candidate_count: promoted.length, ngram_rows: 30, matches_seen: 3,
+  malformed_ngram_rows: 0, malformed_toc_rows: 0 });
 await ingestGdeltChunk(db, { run_id: run.run_id, file_stamp: stamp2, chunk_index: 0,
   candidates: promoted.slice(0, 2) }, new Date('2026-09-13T12:12:00.000Z'));
 await ingestGdeltChunk(db, { run_id: run.run_id, file_stamp: stamp2, chunk_index: 1,
@@ -333,7 +366,8 @@ const rejected = await seedEditorialUrl('rejected-air', 'rejected');
 const hidden = await seedEditorialUrl('hidden-air', 'hidden');
 const stamp3 = '20260913120200';
 await startGdeltFile(db, { run_id: run.run_id, file_stamp: stamp3, expected_chunks: 1,
-  candidate_count: 2, ngram_rows: 10, matches_seen: 2, malformed_toc_rows: 0 });
+  candidate_count: 2, ngram_rows: 10, matches_seen: 2,
+  malformed_ngram_rows: 0, malformed_toc_rows: 0 });
 await ingestGdeltChunk(db, { run_id: run.run_id, file_stamp: stamp3, chunk_index: 0,
   candidates: [rejected, hidden] }, new Date('2026-09-13T12:24:00.000Z'));
 assert.deepEqual(sqlite.prepare(`SELECT status FROM media_articles WHERE canonical_url IN (?, ?)

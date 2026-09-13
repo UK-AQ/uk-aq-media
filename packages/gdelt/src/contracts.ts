@@ -179,6 +179,7 @@ export const GdeltFileStartSchema = z.object({
   expected_chunks: z.number().int().min(0).max(100),
   candidate_count: z.number().int().min(0).max(GDELT_MAX_MATCHED_CANDIDATES_PER_FILE),
   ngram_rows: z.number().int().nonnegative(), matches_seen: z.number().int().nonnegative(),
+  malformed_ngram_rows: z.number().int().min(0).max(GDELT_MAX_DECOMPRESSED_BYTES),
   malformed_toc_rows: z.number().int().nonnegative(),
 }).strict();
 

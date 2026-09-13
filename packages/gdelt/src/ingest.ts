@@ -66,12 +66,13 @@ export async function startGdeltFile(db: D1Database, input: unknown,
   const run = await loadRun(db, data.run_id);
   validateFileInRun(run, data.file_stamp);
   const existing = await db.prepare(`SELECT run_id, status, expected_chunks, candidate_count,
-    ngram_rows, matches_seen, malformed_toc_rows FROM media_gdelt_files WHERE file_stamp = ?`)
+    ngram_rows, matches_seen, malformed_ngram_rows, malformed_toc_rows
+    FROM media_gdelt_files WHERE file_stamp = ?`)
     .bind(data.file_stamp).first<Record<string, unknown>>();
   if (existing?.status === 'processed') return { ok: true, replayed: true };
   if (existing) {
     for (const key of ['expected_chunks', 'candidate_count', 'ngram_rows', 'matches_seen',
-      'malformed_toc_rows'] as const) {
+      'malformed_ngram_rows', 'malformed_toc_rows'] as const) {
       if (Number(existing[key]) !== data[key]) throw new Error('gdelt_file_manifest_changed');
     }
     await db.prepare(`UPDATE media_gdelt_files SET run_id = ?, last_processed_at = ?
@@ -82,10 +83,11 @@ export async function startGdeltFile(db: D1Database, input: unknown,
   const timestamp = now.toISOString();
   await db.prepare(`INSERT INTO media_gdelt_files
     (file_stamp, run_id, status, expected_chunks, candidate_count, ngram_rows, matches_seen,
-      malformed_toc_rows, first_processed_at, last_processed_at)
-    VALUES (?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?)`)
+      malformed_ngram_rows, malformed_toc_rows, first_processed_at, last_processed_at)
+    VALUES (?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(data.file_stamp, data.run_id, data.expected_chunks, data.candidate_count,
-      data.ngram_rows, data.matches_seen, data.malformed_toc_rows, timestamp, timestamp).run();
+      data.ngram_rows, data.matches_seen, data.malformed_ngram_rows, data.malformed_toc_rows,
+      timestamp, timestamp).run();
   return { ok: true, replayed: false };
 }
 
@@ -349,9 +351,10 @@ export async function completeGdeltFile(db: D1Database, input: unknown,
   const run = await loadRun(db, data.run_id);
   validateFileInRun(run, data.file_stamp);
   const file = await db.prepare(`SELECT status, run_id, expected_chunks, candidate_count,
-    matches_seen, malformed_toc_rows FROM media_gdelt_files WHERE file_stamp = ?`)
+    matches_seen, malformed_ngram_rows, malformed_toc_rows FROM media_gdelt_files WHERE file_stamp = ?`)
     .bind(data.file_stamp).first<{ status: string; run_id: string; expected_chunks: number;
-      candidate_count: number; matches_seen: number; malformed_toc_rows: number }>();
+      candidate_count: number; matches_seen: number; malformed_ngram_rows: number;
+      malformed_toc_rows: number }>();
   if (!file) throw new Error('gdelt_file_not_found');
   if (file.status === 'processed') return { ok: true, replayed: true };
   if (file.run_id !== data.run_id) throw new Error('gdelt_file_run_mismatch');
@@ -382,7 +385,8 @@ export async function completeGdeltFile(db: D1Database, input: unknown,
       uk_promoted = uk_promoted + ?, uk_relevance_filtered = uk_relevance_filtered + ?,
       malformed_rows = malformed_rows + ?, updated_at = ? WHERE id = ? AND status = 'running'`)
       .bind(file.matches_seen, totals.inserted, totals.updated, totals.uk, totals.non_uk,
-        totals.unknown_scope, totals.promoted, totals.filtered, file.malformed_toc_rows,
+        totals.unknown_scope, totals.promoted, totals.filtered,
+        file.malformed_ngram_rows + file.malformed_toc_rows,
         timestamp, data.run_id),
   ]);
   return { ok: true, replayed: false };

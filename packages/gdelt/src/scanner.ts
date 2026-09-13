@@ -17,6 +17,7 @@ export type GdeltFileScan = {
   candidates: GdeltCandidateInput[];
   ngram_rows: number;
   matches_seen: number;
+  malformed_ngram_rows: number;
   malformed_toc_rows: number;
 };
 
@@ -47,16 +48,27 @@ function mergeFamilyMatches(target: NgramMatch, incoming: Map<GdeltFamilyKey, st
   }
 }
 
-export async function scanNgramLines(lines: AsyncIterable<string>): Promise<{
+export async function scanNgramLines(lines: AsyncIterable<string>,
+  parseRow: (line: string) => ReturnType<typeof parseNgramLine> = parseNgramLine): Promise<{
   matched_docs: Map<string, NgramMatch>; ngram_rows: number; matches_seen: number;
+  malformed_ngram_rows: number;
 }> {
   const matched_docs = new Map<string, NgramMatch>();
   let ngram_rows = 0;
   let matches_seen = 0;
+  let malformed_ngram_rows = 0;
   for await (const line of lines) {
     if (!line) continue;
+    let parsed: ReturnType<typeof parseNgramLine>;
+    try { parsed = parseRow(line); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'gdelt_ngram_tsv_invalid') {
+        malformed_ngram_rows++;
+        continue;
+      }
+      throw error;
+    }
     ngram_rows++;
-    const parsed = parseNgramLine(line);
     const families = matchGdeltFamilies(parsed.quadgram);
     if (!families.size) continue;
     matches_seen++;
@@ -68,7 +80,7 @@ export async function scanNgramLines(lines: AsyncIterable<string>): Promise<{
     }
   }
   if (ngram_rows === 0) throw new Error('gdelt_ngram_empty');
-  return { matched_docs, ngram_rows, matches_seen };
+  return { matched_docs, ngram_rows, matches_seen, malformed_ngram_rows };
 }
 
 function providerObservationDate(value: unknown): string | null {
@@ -236,7 +248,8 @@ async function scanFilePair(stamp: string): Promise<GdeltFileScan> {
   const toc = await gzipLines(urls.toc, GDELT_MAX_TOC_COMPRESSED_BYTES);
   const resolved = await resolveTocLines(toc, matched.matched_docs);
   return { candidates: resolved.candidates, ngram_rows: matched.ngram_rows,
-    matches_seen: matched.matches_seen, malformed_toc_rows: resolved.malformed_toc_rows };
+    matches_seen: matched.matches_seen, malformed_ngram_rows: matched.malformed_ngram_rows,
+    malformed_toc_rows: resolved.malformed_toc_rows };
 }
 
 type PairState = 'missing' | 'complete';
@@ -347,6 +360,7 @@ export async function runGdeltBatch(baseUrl: string, secret: string): Promise<Re
       const fileStart = await client.startFile({ run_id: runId, file_stamp: stamp,
         expected_chunks: expectedChunks, candidate_count: scan.candidates.length,
         ngram_rows: scan.ngram_rows, matches_seen: scan.matches_seen,
+        malformed_ngram_rows: scan.malformed_ngram_rows,
         malformed_toc_rows: scan.malformed_toc_rows });
       if (fileStart.replayed === true) { replayed++; completedThrough = stamp; continue; }
       for (let index = 0; index < expectedChunks; index++) {
