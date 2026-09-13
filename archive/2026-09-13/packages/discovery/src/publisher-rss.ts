@@ -1,4 +1,3 @@
-/usr/local/bin/bash: warning: setlocale: LC_ALL: cannot change locale (C.UTF-8): No such file or directory
 import {
   canonicalizeUrl, canonicalUrlHash, remotePreviewUrl,
   type DiscoveredArticle, type Source,
@@ -118,4 +117,3 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
   }
   return { articles, items_seen: parsed.items_seen, items_invalid: invalid };
 }
-

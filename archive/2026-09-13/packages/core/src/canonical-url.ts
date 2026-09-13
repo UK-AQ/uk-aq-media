@@ -1,4 +1,3 @@
-/usr/local/bin/bash: warning: setlocale: LC_ALL: cannot change locale (C.UTF-8): No such file or directory
 const trackingKeys = new Set(['fbclid', 'gclid', 'dclid', 'msclkid', 'mc_cid', 'mc_eid']);
 
 export type PublisherDomainIdentity = {
@@ -101,4 +100,3 @@ export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): st
 export function guardianRemotePreviewUrl(raw: unknown): string | null {
   return exactPreviewImageUrl(raw, sourcePreviewImageHostnames['the-guardian']!);
 }
-

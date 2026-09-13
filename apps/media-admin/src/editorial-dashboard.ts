@@ -1,5 +1,5 @@
 import {
-  ArticleStatus, AuthorRuleSchema, HttpError, PublicationPolicy,
+  ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, PublicationPolicy,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
   loadSource, publisherHttpsUrl, remotePreviewUrl, z,
   SourceSchema,
@@ -532,10 +532,11 @@ async function adminImage(db: D1Database, id: number): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    let upstream: Response;
-    try { upstream = await fetch(imageUrl, { method: 'GET', redirect: 'manual', signal: controller.signal,
-      headers: { Accept: 'image/*', 'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)' } }); }
-    catch { throw new HttpError(controller.signal.aborted ? 504 : 502, 'image_upstream_failed'); }
+    const imageFetch = await fetchRemotePreviewImage(imageUrl, row, controller.signal);
+    if (!imageFetch.response) {
+      throw new HttpError(imageFetch.failure === 'timeout' ? 504 : 502, 'image_upstream_failed');
+    }
+    const upstream = imageFetch.response;
     if (!upstream.ok || (upstream.status >= 300 && upstream.status < 400)) {
       await upstream.body?.cancel(); throw new HttpError(502, 'image_upstream_failed');
     }

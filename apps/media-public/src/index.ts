@@ -1,4 +1,4 @@
-import { boundedLimit, guardianRemotePreviewUrl, HttpError, httpFailure, json, remotePreviewUrl,
+import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, HttpError, httpFailure, json, remotePreviewUrl,
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 
@@ -103,19 +103,13 @@ async function articleImage(request: Request, env: MediaPublicEnv,
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), IMAGE_TIMEOUT_MS);
   try {
-    let upstream: Response;
-    try {
-      upstream = await fetch(publisherUrl, {
-        method: 'GET', redirect: 'manual', signal: controller.signal,
-        headers: {
-          Accept: 'image/*',
-          'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)',
-        },
-      });
-    } catch {
-      throw new HttpError(controller.signal.aborted ? 504 : 502,
-        controller.signal.aborted ? 'image_upstream_timeout' : 'image_upstream_failed');
+    const imageFetch = await fetchRemotePreviewImage(publisherUrl, row, controller.signal);
+    if (!imageFetch.response) {
+      throw new HttpError(imageFetch.failure === 'timeout' ? 504 : 502,
+        imageFetch.failure === 'timeout' ? 'image_upstream_timeout'
+          : imageFetch.failure === 'redirect' ? 'image_upstream_redirect' : 'image_upstream_failed');
     }
+    const upstream = imageFetch.response;
     if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
       throw new HttpError(502, 'image_upstream_redirect');

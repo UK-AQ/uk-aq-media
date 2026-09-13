@@ -1,4 +1,3 @@
-/usr/local/bin/bash: warning: setlocale: LC_ALL: cannot change locale (C.UTF-8): No such file or directory
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 export const MAX_FEED_BYTES = 1024 * 1024;
@@ -265,4 +264,3 @@ export function parseRssItems(xml: string, maxItems: number,
 export function rssAttribute(value: unknown, name: string): unknown {
   return record(value)[`@_${name}`];
 }
-
