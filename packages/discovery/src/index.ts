@@ -1,6 +1,6 @@
 import {
   z, initialEditorialState, loadAuthorRules, loadSource, permitsAi,
-  type AuthorRule, type Source, type DiscoveredArticle,
+  reconcileHomepageLatestSix, type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
   D1DisplayTitleNeuronLedger, LocalRequestBudget, WorkersAiDisplayTitleProvider,
@@ -421,6 +421,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       WHERE id = ?`).bind(now, now, seen, invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
     await db.batch(statements);
+    await reconcileHomepageLatestSix(db);
     // Discovery is already committed and authoritative. Title AI is best-effort advisory work;
     // its context remains only in these in-memory feed items and no failure escapes this helper.
     if (displayTitleAi) {

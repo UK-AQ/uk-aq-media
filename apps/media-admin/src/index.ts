@@ -1,4 +1,4 @@
-import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, z,
+import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, reconcileHomepageLatestSix, z,
   loadSource, type Status } from '@uk-aq-media/core';
 import {
   discoverGuardianPreviewForArticle, GUARDIAN_ROUTES,
@@ -262,7 +262,10 @@ async function decideAiTitle(db: D1Database, id: number,
         RETURNING id, status, title, display_title, display_title_origin,
           ai_title_suggestion, ai_title_suggestion_state, ai_title_decided_at`)
       .bind(now, now, id).first<TitleMutationRow>();
-  if (changed) return json({ article: changed });
+  if (changed) {
+    await reconcileHomepageLatestSix(db);
+    return json({ article: changed });
+  }
   const exists = await db.prepare('SELECT id FROM media_articles WHERE id = ?').bind(id).first();
   throw new HttpError(exists ? 409 : 404,
     exists ? 'no_pending_ai_title_suggestion' : 'article_not_found');
@@ -290,6 +293,7 @@ async function setHumanDisplayTitle(request: Request, db: D1Database,
     .bind(displayTitle, displayTitle, displayTitle, displayTitle, now, now, id)
     .first<TitleMutationRow>();
   if (!changed) throw new HttpError(404, 'article_not_found');
+  await reconcileHomepageLatestSix(db);
   return json({ article: changed });
 }
 
@@ -478,6 +482,7 @@ async function applyGuardianImageRefresh(request: Request, db: D1Database,
       preview_metadata_checked_at`).bind(lookup.proposed.url, now, now, id,
         input.expected_current_image_url).first<GuardianImageRow>();
   if (!changed) throw new HttpError(409, 'guardian_image_refresh_stale_current_image');
+  await reconcileHomepageLatestSix(db);
   return json({ changed: true,
     refresh: guardianImageRefreshView(changed, {
       ...lookup,
@@ -496,6 +501,7 @@ async function applyBulkGuardianImageRefresh(request: Request,
   const plan = await buildGuardianImageRepairPlan(db);
   requireCurrentGuardianImageRepairPlan(plan, parsed.data.repair_token);
   const changedArticleIds = await applyGuardianImageRepairPlan(db, plan);
+  await reconcileHomepageLatestSix(db);
   return json({ repair: {
     ...plan,
     apply: {
@@ -532,13 +538,17 @@ async function mutate(request: Request, db: D1Database, id: number, action: Acti
       action, action, action, now, action, now, action, now, action, id,
       ...transition.from, eventKey)
     .first<{ id: number; status: Status; revision: number }>();
-  if (changed) return json({ article: changed, replayed: false });
+  if (changed) {
+    await reconcileHomepageLatestSix(db);
+    return json({ article: changed, replayed: false });
+  }
   const event = await db.prepare(`SELECT article_id, event_type, to_status, revision
     FROM media_article_events WHERE event_key = ?`).bind(eventKey)
     .first<{ article_id: number; event_type: string; to_status: Status; revision: number }>();
   if (event) {
     if (event.article_id !== id || event.event_type !== transition.event) throw new HttpError(409, 'idempotency_key_conflict');
     // Return the original mutation receipt; it need not be the article's current state.
+    await reconcileHomepageLatestSix(db);
     return json({ article: { id, status: event.to_status, revision: event.revision }, replayed: true });
   }
   const exists = await db.prepare('SELECT id FROM media_articles WHERE id = ?').bind(id).first();

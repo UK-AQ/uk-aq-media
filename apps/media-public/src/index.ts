@@ -1,4 +1,4 @@
-import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, HttpError, httpFailure, json, remotePreviewUrl,
+import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, reconcileHomepageLatestSix, remotePreviewUrl,
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 
@@ -15,6 +15,17 @@ type ImageRow = {
 const IMAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const IMAGE_TIMEOUT_MS = 10_000;
+const HOMEPAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
+
+type HomepageRow = {
+  id: number;
+  canonical_url: string;
+  title: string;
+  display_title: string | null;
+  publisher: string;
+  published_at: string | null;
+  og_image_url: string | null;
+};
 
 function cursor(raw: string | null): [string, number] | null {
   if (!raw) return null;
@@ -26,6 +37,96 @@ function cursor(raw: string | null): [string, number] | null {
         typeof value[1] !== 'number' || !Number.isSafeInteger(value[1]) || value[1] < 1) throw new Error();
     return [value[0], value[1]];
   } catch { throw new HttpError(400, 'invalid_before_cursor'); }
+}
+
+function homepageGeneration(url: URL): number {
+  if (url.searchParams.size !== 1) throw new HttpError(400, 'invalid_homepage_generation');
+  const raw = url.searchParams.get('generation');
+  if (!raw || !/^\d{1,15}$/.test(raw)) throw new HttpError(400, 'invalid_homepage_generation');
+  const generation = Number(raw);
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw new HttpError(400, 'invalid_homepage_generation');
+  }
+  return generation;
+}
+
+function staleHomepageGeneration(generation: number): Response {
+  return json({ error: 'stale_homepage_generation', generation }, 409, 'no-store');
+}
+
+async function homepageRows(db: D1Database): Promise<HomepageRow[]> {
+  const { results } = await db.prepare(`SELECT a.id, a.canonical_url, a.title, a.display_title,
+      a.publisher, a.published_at,
+      CASE WHEN a.image_policy = 'remote_preview' AND s.image_policy = 'remote_preview'
+        THEN a.og_image_url ELSE NULL END AS og_image_url
+    FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    WHERE a.status = 'approved'
+    ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT 6`).all<HomepageRow>();
+  return results;
+}
+
+async function homepageFeedResponse(origin: string, rows: HomepageRow[]): Promise<Response> {
+  const articles = await Promise.all(rows.map(async article => ({
+    id: article.id,
+    canonical_url: article.canonical_url,
+    title: article.title,
+    display_title: article.display_title,
+    publisher: article.publisher,
+    published_at: article.published_at,
+    preview_image_url: article.og_image_url
+      ? await versionedArticleImageUrl(origin, article.id, article.og_image_url) : null,
+  })));
+  return json({ articles }, 200,
+    `public, max-age=${HOMEPAGE_CACHE_TTL_SECONDS}, s-maxage=${HOMEPAGE_CACHE_TTL_SECONDS}, immutable`);
+}
+
+function homepageSnapshot(rows: HomepageRow[]): string {
+  return homepageLatestSixSnapshot(rows.map(({ og_image_url, ...article }) => ({
+    ...article,
+    preview_image_url: og_image_url,
+  })));
+}
+
+async function homepageVersion(env: MediaPublicEnv): Promise<Response> {
+  const state = await homepageLatestSixState(env.MEDIA_DB);
+  return json({ generation: state.generation }, 200, 'no-store');
+}
+
+async function homepageFeed(request: Request, env: MediaPublicEnv,
+  context: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const requestedGeneration = homepageGeneration(url);
+  const cacheKey = new Request(new URL(`/articles/homepage?generation=${requestedGeneration}`, url.origin),
+    { method: 'GET' });
+  try {
+    const cached = await caches.default.match(cacheKey);
+    if (cached) return cached;
+  } catch {
+    console.warn(JSON.stringify({ event: 'homepage_latest_six_cache_read_failed' }));
+  }
+
+  const initialState = await homepageLatestSixState(env.MEDIA_DB);
+  if (initialState.generation !== requestedGeneration) {
+    return staleHomepageGeneration(initialState.generation);
+  }
+  const rows = await homepageRows(env.MEDIA_DB);
+  // Do not cache a feed built across a concurrent reconciliation boundary.
+  const confirmedState = await homepageLatestSixState(env.MEDIA_DB);
+  if (confirmedState.generation !== requestedGeneration) {
+    return staleHomepageGeneration(confirmedState.generation);
+  }
+  if (confirmedState.snapshot_json !== homepageSnapshot(rows)) {
+    // A writer may have committed its article mutation just before its follow-up reconciliation.
+    // Repair that short state gap rather than caching changed rows under the old generation.
+    const reconciledState = await reconcileHomepageLatestSix(env.MEDIA_DB);
+    return staleHomepageGeneration(reconciledState.generation);
+  }
+  const response = await homepageFeedResponse(url.origin, rows);
+  context.waitUntil((async () => {
+    try { await caches.default.put(cacheKey, response.clone()); }
+    catch { console.warn(JSON.stringify({ event: 'homepage_latest_six_cache_write_failed' })); }
+  })());
+  return response;
 }
 
 async function boundedImageBytes(response: Response): Promise<Uint8Array> {
@@ -151,6 +252,15 @@ export default {
         const id = Number(imageMatch[1]);
         if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
         return await articleImage(request, env, context, id);
+      }
+      if (url.pathname === '/articles/homepage/version') {
+        if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+        if (url.searchParams.size !== 0) throw new HttpError(400, 'invalid_homepage_version_query');
+        return await homepageVersion(env);
+      }
+      if (url.pathname === '/articles/homepage') {
+        if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+        return await homepageFeed(request, env, context);
       }
       if (url.pathname !== '/articles') return json({ error: 'not_found' }, 404);
       if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);

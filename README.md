@@ -3,7 +3,8 @@
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
 Independent RSS discovery, plus specialist Carbon Brief, OpenAQ and Phys.org feeds.
-It is not connected to the public UK AQ website.
+The public website reaches the approved homepage feed only through the sibling
+cache proxy; browser code has no Media credentials or direct Media origin access.
 
 The behavioural authority is the sibling
 [Media contract](../TEST-uk-aq-system-docs/system_docs/media/media_contract.md).
@@ -55,8 +56,8 @@ are enabled alongside the three manual publisher RSS adapters added by `0010`. M
 `0011` expands those publisher routes, gives The Independent its explicit legacy
 `independent.co.uk` domain family, and removes or retires Defra from the current source
 catalogue without deleting referenced history. Migration `0012` adds Carbon Brief,
-OpenAQ and Phys.org as manual/Standard generic RSS publishers. Four publisher adapters
-remain deferred.
+OpenAQ and Phys.org as manual/Standard generic RSS publishers. `0013` initializes the
+generation-backed homepage latest-six state. Four publisher adapters remain deferred.
 
 ## HTTP surface
 
@@ -64,6 +65,11 @@ Public:
 
 - `GET /articles?limit=20` — default 20, maximum 50; newest first by publication
   time (discovery time when absent), then descending ID.
+- `GET /articles/homepage/version` — no-store generation discovery for the homepage's
+  exact current six approved articles. `GET /articles/homepage?generation=<n>` serves
+  that fixed snapshot only when `n` is current; it returns 409 otherwise and uses an
+  immutable 24-hour edge cache entry keyed by the generation. The generation advances
+  only when that ordered six-item public snapshot changes.
 - `GET /article-images/:id?v=<image-version>` — transiently cached publisher preview bytes
   for a permitted approved article; the SHA-256-derived version changes with the stored
   publisher URL, while the edge TTL remains 24 hours and the upstream limit remains 5 MiB.
@@ -77,7 +83,7 @@ URL. Each `preview_image_url` contains the current stored-image version; the pro
 and validates that version from D1 rather than trusting arbitrary request query parameters.
 Descriptions/bodies and internal fields are absent.
 Only approved articles are selected. Successful responses allow five minutes of
-caching; errors use `no-store`. No cross-origin integration is configured yet.
+caching; errors use `no-store`. Browser access remains same-origin through the cache proxy.
 
 Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
 `Cache-Control: no-store`:

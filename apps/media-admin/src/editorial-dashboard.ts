@@ -1,7 +1,7 @@
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, PublicationPolicy,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
-  loadSource, publisherHttpsUrl, remotePreviewUrl, z,
+  loadSource, publisherHttpsUrl, reconcileHomepageLatestSix, remotePreviewUrl, z,
   SourceSchema,
 } from '@uk-aq-media/core';
 import {
@@ -516,6 +516,7 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
   const created = await db.prepare('SELECT id FROM media_articles WHERE canonical_url_hash = ?')
     .bind(identity.hash).first<{ id: number }>();
   if (!created) throw new HttpError(500, 'manual_article_create_failed');
+  await reconcileHomepageLatestSix(db);
   return articleDetail(db, created.id);
 }
 
@@ -569,6 +570,7 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
       Number(maySetTitle), metadata.compact_title, Number(maySetTitle), now, id,
       parsed.data.expected_current_image_url).first<{ id: number }>();
   if (!changed) throw new HttpError(409, 'metadata_article_changed');
+  await reconcileHomepageLatestSix(db);
   return articleDetail(db, id);
 }
 
