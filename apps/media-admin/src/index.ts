@@ -612,7 +612,7 @@ export default {
         if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
         return await mutate(request, env.MEDIA_DB, id, match[2] as Action);
       }
-      if (!['/admin/articles', '/admin/sources', '/admin/runs'].includes(url.pathname)) {
+      if (!['/admin/articles', '/admin/sources', '/admin/runs', '/admin/runs/gdelt'].includes(url.pathname)) {
         return json({ error: 'not_found' }, 404);
       }
       if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
@@ -629,6 +629,12 @@ export default {
         const { results } = await env.MEDIA_DB.prepare(`SELECT * FROM media_sources
           WHERE retired_at IS NULL ORDER BY source_key LIMIT ?`).bind(limit).all();
         return json({ sources: results });
+      }
+      if (url.pathname === '/admin/runs/gdelt') {
+        const { results } = await env.MEDIA_DB.prepare(
+          'SELECT * FROM media_gdelt_runs ORDER BY started_at DESC, id DESC LIMIT ?',
+        ).bind(limit).all();
+        return json({ runs: results });
       }
       const { results } = await env.MEDIA_DB.prepare(
         'SELECT * FROM media_discovery_runs ORDER BY started_at DESC, id DESC LIMIT ?',
