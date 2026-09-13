@@ -11,6 +11,29 @@ import {
 import { GDELT_MAX_INGEST_BODY_BYTES } from '@uk-aq-media/gdelt';
 
 const NEURON_MICRO_UNITS = 1_000_000;
+const MAX_EMPTY_GDELT_START_BODY_READS = 8;
+
+export async function assertEmptyGdeltStartBody(request: Request): Promise<void> {
+  const declared = request.headers.get('content-length')?.trim() ?? '';
+  if (/^\d+$/.test(declared) && Number(declared) > 0) {
+    throw new Error('gdelt_start_body_forbidden');
+  }
+  if (request.body === null) return;
+
+  const reader = request.body.getReader();
+  try {
+    for (let reads = 0; reads < MAX_EMPTY_GDELT_START_BODY_READS; reads++) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value.byteLength > 0) throw new Error('gdelt_start_body_forbidden');
+    }
+    throw new Error('gdelt_start_body_forbidden');
+  } finally {
+    try { await reader.cancel(); }
+    catch { /* The body is already closed or cancelled. */ }
+    reader.releaseLock();
+  }
+}
 
 async function readGdeltJson(request: Request): Promise<unknown> {
   if (request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !==
@@ -40,7 +63,7 @@ async function handleGdeltIngest(request: Request, env: MediaDiscoveryEnv,
     env.UK_AQ_MEDIA_GDELT_INGEST_SECRET)) return noStore({ error: 'unauthorized' }, 401);
   try {
     if (pathname === '/gdelt/web-ngrams/runs/start') {
-      if (request.body !== null) throw new Error('gdelt_start_body_forbidden');
+      await assertEmptyGdeltStartBody(request);
       return noStore(await startGdeltRun(env.MEDIA_DB));
     }
     const body = await readGdeltJson(request);

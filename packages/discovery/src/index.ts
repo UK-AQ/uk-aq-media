@@ -54,6 +54,19 @@ export type {
 export { displayTitleNeuronRates };
 export { mediaDeterministicRelevanceFilter } from './relevance';
 
+export async function reconcileHomepageLatestSixAfterSourceCommit(
+  reconcile: () => Promise<unknown>, context: {
+    run_id: string; source_key: string; route_key?: string;
+  },
+): Promise<void> {
+  try { await reconcile(); }
+  catch {
+    console.warn(JSON.stringify({ event: 'homepage_latest_six_reconcile_failed',
+      run_id: context.run_id, source_key: context.source_key,
+      ...(context.route_key ? { route_key: context.route_key } : {}) }));
+  }
+}
+
 function exactAliasInByline(byline: string, alias: string): boolean {
   const normalise = (value: string): string => value.normalize('NFKC')
     .replace(/\s+/g, ' ').trim().toLocaleLowerCase('en-GB');
@@ -331,7 +344,9 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
     await db.batch(statements);
-    await reconcileHomepageLatestSix(db);
+    await reconcileHomepageLatestSixAfterSourceCommit(() => reconcileHomepageLatestSix(db), {
+      run_id: runId, source_key: sourceKey, route_key: routeKey,
+    });
     // Discovery is already committed and authoritative. Title AI is best-effort advisory work;
     // its context remains only in these in-memory feed items and no failure escapes this helper.
     if (displayTitleAi) {

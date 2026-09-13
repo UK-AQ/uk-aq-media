@@ -86,6 +86,13 @@ function providerObservationDate(value: unknown): string | null {
 
 type ParsedToc = { id: string; date: string; lang: string; title: string; url: string };
 
+export function gdeltIngestResponseErrorCode(status: number, body: unknown): string {
+  const error = body && typeof body === 'object' && !Array.isArray(body)
+    ? (body as Record<string, unknown>).error : null;
+  return typeof error === 'string' && /^gdelt_[a-z0-9_]+$/.test(error) && error.length <= 100
+    ? error : `gdelt_ingest_http_${status}`;
+}
+
 function normalisedEnglishLanguage(value: string): 'English' | null {
   const language = value.normalize('NFKC').toLocaleLowerCase('en-GB').trim();
   return language === 'en' || language === 'english' ? 'English' : null;
@@ -278,8 +285,13 @@ class IngestClient {
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (bytes.byteLength > 64 * 1024) throw new Error('gdelt_ingest_response_too_large');
       let parsed: unknown;
-      try { parsed = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new Error('gdelt_ingest_invalid_json'); }
-      if (!response.ok || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      try { parsed = JSON.parse(new TextDecoder().decode(bytes)); }
+      catch {
+        throw new Error(response.ok ? 'gdelt_ingest_invalid_json' :
+          `gdelt_ingest_http_${response.status}`);
+      }
+      if (!response.ok) throw new Error(gdeltIngestResponseErrorCode(response.status, parsed));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error(`gdelt_ingest_http_${response.status}`);
       }
       return parsed as Record<string, unknown>;

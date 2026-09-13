@@ -12,8 +12,12 @@ import {
 import {
   completeGdeltFile, ingestGdeltChunk, startGdeltFile, startGdeltRun,
 } from '@uk-aq-media/gdelt/ingest';
-import { fixtureLines, parseNgramLine, parseTocLine, resolveTocLines, scanNgramLines } from
-  '@uk-aq-media/gdelt/scanner';
+import {
+  fixtureLines, gdeltIngestResponseErrorCode, parseNgramLine, parseTocLine, resolveTocLines,
+  scanNgramLines,
+} from '@uk-aq-media/gdelt/scanner';
+import mediaDiscoveryWorker, { assertEmptyGdeltStartBody } from '../apps/media-discovery/src/index';
+import { reconcileHomepageLatestSixAfterSourceCommit } from '@uk-aq-media/discovery';
 
 type SqlValue = string | number | bigint | null | Uint8Array;
 
@@ -84,6 +88,37 @@ const families = {
   wildfire: { family_key: 'gdelt-wildfire', matched_phrases: ['wildfires'] },
   wood: { family_key: 'gdelt-wood-burning', matched_phrases: ['wood burning'] },
 } as const satisfies Record<string, GdeltCandidateInput['families'][number]>;
+
+await assertEmptyGdeltStartBody(new Request('https://media.example/gdelt/web-ngrams/runs/start', {
+  method: 'POST',
+}));
+const emptyStartStream = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+await assertEmptyGdeltStartBody(new Request('https://media.example/gdelt/web-ngrams/runs/start', {
+  method: 'POST', body: emptyStartStream, duplex: 'half',
+} as unknown as RequestInit));
+await assert.rejects(assertEmptyGdeltStartBody(new Request(
+  'https://media.example/gdelt/web-ngrams/runs/start', { method: 'POST', body: 'x' },
+)), /gdelt_start_body_forbidden/);
+await assert.rejects(assertEmptyGdeltStartBody(new Request(
+  'https://media.example/gdelt/web-ngrams/runs/start', {
+    method: 'POST', headers: { 'content-length': '1' },
+  },
+)), /gdelt_start_body_forbidden/);
+const unauthenticatedStart = await mediaDiscoveryWorker.fetch(new Request(
+  'https://media.example/gdelt/web-ngrams/runs/start', { method: 'POST', body: 'forbidden' },
+), { UK_AQ_MEDIA_GDELT_INGEST_SECRET: 'fixture-secret' } as MediaDiscoveryEnv);
+assert.equal(unauthenticatedStart.status, 401,
+  'GDELT authentication must precede protected start-body validation and D1 work');
+assert.equal(gdeltIngestResponseErrorCode(400, { error: 'gdelt_start_body_forbidden' }),
+  'gdelt_start_body_forbidden');
+assert.equal(gdeltIngestResponseErrorCode(400, { error: '<untrusted>' }), 'gdelt_ingest_http_400');
+let postCommitReconcileAttempted = false;
+await reconcileHomepageLatestSixAfterSourceCommit(async () => {
+  postCommitReconcileAttempted = true;
+  throw new Error('fixture failure');
+}, { run_id: 'fixture-run', source_key: 'fixture-source', route_key: 'fixture-route' });
+assert.equal(postCommitReconcileAttempted, true,
+  'post-commit reconciliation must be attempted without escaping source success');
 
 // Provider-format and matching fixtures.
 assert.deepEqual(parseNgramLine('doc-1\tUK air-quality update today\t2'), {
