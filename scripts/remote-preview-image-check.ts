@@ -9,7 +9,16 @@ const openaq: PublisherDomainIdentity = {
 const bbc: PublisherDomainIdentity = {
   source_key: 'bbc-news', canonical_domain: 'bbc.co.uk',
 };
+const cambridgeNews: PublisherDomainIdentity = {
+  source_key: 'discovered-publisher-7d08f774ec420c35',
+  canonical_domain: 'cambridge-news.co.uk',
+};
+const unrelatedDynamicSource: PublisherDomainIdentity = {
+  source_key: 'discovered-publisher-c592df415547ae79',
+  canonical_domain: 'unrelated-news.example',
+};
 const bbcImageUrl = 'https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/example.jpg';
+const cambridgeImageUrl = 'https://i2-prod.liverpoolecho.co.uk/article/example.jpg';
 const initialUrl = 'https://cdn-images-1.medium.com/max/1024/1*SzapuwhysObdfvnB2Es4rw.png';
 const resolvedUrl = 'https://cdn-images-1.medium.com/v2/resize:fit:1024/1*SzapuwhysObdfvnB2Es4rw.png';
 
@@ -37,6 +46,15 @@ async function redirectFailure(location: string): Promise<void> {
 
 assert.equal(remotePreviewUrl(initialUrl, openaq), initialUrl);
 assert.equal(remotePreviewUrl(resolvedUrl, openaq), resolvedUrl);
+assert.equal(remotePreviewUrl(cambridgeImageUrl, cambridgeNews), cambridgeImageUrl);
+assert.equal(remotePreviewUrl(cambridgeImageUrl, unrelatedDynamicSource), null);
+for (const rejected of [
+  'http://i2-prod.liverpoolecho.co.uk/article/example.jpg',
+  'https://user:pass@i2-prod.liverpoolecho.co.uk/article/example.jpg',
+  'https://i2-prod.liverpoolecho.co.uk:443/article/example.jpg',
+  'https://i2-prod.liverpoolecho.co.uk.attacker.example/article/example.jpg',
+  'https://i3-prod.liverpoolecho.co.uk/article/example.jpg',
+]) assert.equal(remotePreviewUrl(rejected, cambridgeNews), null, rejected);
 const requested: string[] = [];
 const success = await fetchRemotePreviewImage(initialUrl, openaq, new AbortController().signal,
   sequentialFetcher([

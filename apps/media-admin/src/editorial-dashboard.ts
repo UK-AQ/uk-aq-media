@@ -64,7 +64,16 @@ const MetadataApplyBody = z.object({
   expected_proposed_image_url: z.url().max(2048).nullable(),
   replace_existing_image: z.boolean(),
   apply_publisher_display_title: z.boolean().default(true),
-}).strict();
+  expected_current_published_at: z.iso.datetime({ offset: true }).nullable().optional(),
+  expected_proposed_published_at: z.iso.datetime({ offset: true }).nullable().optional(),
+  apply_publisher_published_at: z.boolean().default(false),
+}).strict().superRefine((value, context) => {
+  if (value.apply_publisher_published_at &&
+      (value.expected_current_published_at !== null ||
+       !value.expected_proposed_published_at)) {
+    context.addIssue({ code: 'custom', message: 'invalid_published_at_apply' });
+  }
+});
 
 type SourceRow = {
   source_key: string; name: string; canonical_domain: string; source_type: 'publisher' | 'government';
@@ -213,8 +222,7 @@ async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
   }
   const originalTitle = cleanText(metadata.ogTitle ?? metadata.twitterTitle ?? metadata.htmlTitle, 1000);
   const compact = cleanText(metadata.twitterTitle, 1000);
-  const published = metadata.publishedAt && !Number.isNaN(Date.parse(metadata.publishedAt))
-    ? new Date(metadata.publishedAt).toISOString() : null;
+  const published = normalisePublisherPublishedAt(metadata.publishedAt);
   return {
     publisher: cleanText(metadata.publisher, 200), title: originalTitle,
     compact_title: compact && originalTitle && compact.length < originalTitle.length ? compact : null,
@@ -294,6 +302,31 @@ export function metadataImageChange(currentImage: unknown, expectedProposal: str
     throw new HttpError(409, 'metadata_proposal_changed');
   }
   return fetchedProposal !== currentImage;
+}
+
+export function normalisePublisherPublishedAt(value: string | null): string | null {
+  if (!value || Number.isNaN(Date.parse(value))) return null;
+  return new Date(value).toISOString();
+}
+
+export function metadataPublishedAtProposal(currentPublishedAt: unknown,
+  publisherPublishedAt: string | null): { current: null; proposed: string } | null {
+  return currentPublishedAt === null && publisherPublishedAt
+    ? { current: null, proposed: publisherPublishedAt }
+    : null;
+}
+
+export function metadataPublishedAtChange(currentPublishedAt: unknown,
+  expectedCurrent: string | null | undefined, expectedProposal: string | null | undefined,
+  fetchedProposal: string | null, apply: boolean): boolean {
+  if (!apply) return false;
+  if (expectedCurrent !== null || currentPublishedAt !== null) {
+    throw new HttpError(409, 'metadata_current_published_at_changed');
+  }
+  if (expectedProposal === null || fetchedProposal !== expectedProposal) {
+    throw new HttpError(409, 'metadata_published_at_proposal_changed');
+  }
+  return true;
 }
 
 async function sourceForUrl(db: D1Database, rawUrl: string): Promise<{
@@ -540,7 +573,7 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
 
 async function previewMetadata(db: D1Database, id: number): Promise<Response> {
   const row = await db.prepare(`SELECT a.id, a.canonical_url, a.title, a.display_title,
-      a.display_title_origin, a.og_image_url, a.status, a.revision, s.*
+      a.display_title_origin, a.og_image_url, a.published_at, a.status, a.revision, s.*
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.id = ?`).bind(id).first<Record<string, unknown> & SourceRow>();
   if (!row) throw new HttpError(404, 'article_not_found');
@@ -552,17 +585,19 @@ async function previewMetadata(db: D1Database, id: number): Promise<Response> {
           replacement_required: row.og_image_url !== null } : null,
     publisher_display_title: metadata.compact_title && row.display_title === null
       ? { current: null, proposed: metadata.compact_title } : null,
+    published_at: metadataPublishedAtProposal(row.published_at, metadata.published_at),
   };
   return json({ article: { id, title: row.title, status: row.status, revision: row.revision },
-    metadata, changes, has_useful_change: Boolean(changes.image || changes.publisher_display_title) });
+    metadata, changes, has_useful_change: Boolean(changes.image || changes.publisher_display_title ||
+      changes.published_at) });
 }
 
 async function applyMetadata(request: Request, db: D1Database, id: number): Promise<Response> {
   requireIdempotencyKey(request);
   const parsed = MetadataApplyBody.safeParse(await readJson(request));
   if (!parsed.success) throw new HttpError(400, 'invalid_metadata_apply_body');
-  const row = await db.prepare(`SELECT a.id, a.canonical_url, a.og_image_url, a.display_title,
-      a.display_title_origin, s.* FROM media_articles a JOIN media_sources s
+  const row = await db.prepare(`SELECT a.id, a.canonical_url, a.og_image_url, a.published_at,
+      a.display_title, a.display_title_origin, s.* FROM media_articles a JOIN media_sources s
       ON s.source_key = a.source_key WHERE a.id = ?`).bind(id)
     .first<Record<string, unknown> & SourceRow>();
   if (!row) throw new HttpError(404, 'article_not_found');
@@ -575,18 +610,26 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
     parsed.data.replace_existing_image);
   const maySetTitle = Boolean(parsed.data.apply_publisher_display_title && metadata.compact_title &&
     row.display_title === null);
-  if (!mayChangeImage && !maySetTitle) return json({ changed: false, reason: 'no_useful_change' });
+  const maySetPublishedAt = metadataPublishedAtChange(row.published_at,
+    parsed.data.expected_current_published_at, parsed.data.expected_proposed_published_at,
+    metadata.published_at, parsed.data.apply_publisher_published_at);
+  if (!mayChangeImage && !maySetTitle && !maySetPublishedAt) {
+    return json({ changed: false, reason: 'no_useful_change' });
+  }
   const now = new Date().toISOString();
   const changed = await db.prepare(`UPDATE media_articles SET
       og_image_url = CASE WHEN ? THEN ? ELSE og_image_url END,
       preview_metadata_checked_at = ?,
       display_title = CASE WHEN ? AND display_title IS NULL THEN ? ELSE display_title END,
       display_title_origin = CASE WHEN ? AND display_title IS NULL THEN 'publisher' ELSE display_title_origin END,
+      published_at = CASE WHEN ? AND published_at IS NULL THEN ? ELSE published_at END,
       updated_at = ?
-    WHERE id = ? AND og_image_url IS ?
+    WHERE id = ? AND og_image_url IS ? AND (? = 0 OR published_at IS ?)
     RETURNING id`).bind(Number(mayChangeImage), metadata.image_url, metadata.checked_at,
-      Number(maySetTitle), metadata.compact_title, Number(maySetTitle), now, id,
-      parsed.data.expected_current_image_url).first<{ id: number }>();
+      Number(maySetTitle), metadata.compact_title, Number(maySetTitle),
+      Number(maySetPublishedAt), metadata.published_at, now, id,
+      parsed.data.expected_current_image_url, Number(maySetPublishedAt),
+      parsed.data.expected_current_published_at ?? null).first<{ id: number }>();
   if (!changed) throw new HttpError(409, 'metadata_article_changed');
   await reconcileHomepageLatestSix(db);
   return articleDetail(db, id);

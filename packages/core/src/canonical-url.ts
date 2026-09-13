@@ -84,6 +84,10 @@ const sourcePreviewImageHostnames: Readonly<Record<string, readonly string[]>> =
   'phys-org': ['scx2.b-cdn.net'],
 };
 
+const publisherDomainPreviewImageHostnames: Readonly<Record<string, readonly string[]>> = {
+  'cambridge-news.co.uk': ['i2-prod.liverpoolecho.co.uk'],
+};
+
 function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): string | null {
   if (typeof raw !== 'string' || raw.length > 2048) return null;
   const authority = /^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i.exec(raw)?.[1];
@@ -100,7 +104,11 @@ function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): strin
 export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): string | null {
   const publisherUrl = publisherHttpsUrl(raw, source);
   if (publisherUrl || typeof source === 'string') return publisherUrl;
-  return exactPreviewImageUrl(raw, sourcePreviewImageHostnames[source.source_key] ?? []);
+  const additionalHostnames = [
+    ...(sourcePreviewImageHostnames[source.source_key] ?? []),
+    ...(publisherDomainPreviewImageHostnames[normaliseDomain(source.canonical_domain)] ?? []),
+  ];
+  return exactPreviewImageUrl(raw, additionalHostnames);
 }
 
 export function guardianRemotePreviewUrl(raw: unknown): string | null {

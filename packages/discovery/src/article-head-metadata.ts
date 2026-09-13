@@ -88,6 +88,16 @@ function compactPublisherTitle(originalTitle: string,
   return null;
 }
 
+function hasSufficientEarlyMetadata(htmlHead: string): boolean {
+  const metadata = extractArticleHeadMetadata(htmlHead);
+  const publishedAt = metadata.publishedAt ? Date.parse(metadata.publishedAt) : Number.NaN;
+  return Boolean(
+    (metadata.ogImage || metadata.twitterImage) &&
+    Number.isFinite(publishedAt) &&
+    (metadata.ogTitle || metadata.twitterTitle || metadata.htmlTitle),
+  );
+}
+
 async function readHtmlHead(response: Response, signal: AbortSignal): Promise<string> {
   if (!response.body) throw new ScanError('article_head_missing_body');
   const reader = response.body.getReader();
@@ -98,11 +108,20 @@ async function readHtmlHead(response: Response, signal: AbortSignal): Promise<st
     for (;;) {
       const { value, done } = await reader.read();
       if (done) throw new ScanError('article_head_incomplete');
-      bytes += value.byteLength;
-      if (bytes > MAX_HEAD_BYTES) throw new ScanError('article_head_too_large');
-      html += decoder.decode(value, { stream: true });
+      const remaining = MAX_HEAD_BYTES - bytes;
+      const exceedsLimit = value.byteLength > remaining;
+      const boundedValue = exceedsLimit ? value.subarray(0, remaining) : value;
+      bytes += boundedValue.byteLength;
+      html += decoder.decode(boundedValue, { stream: true });
       const closingHead = /<\/head\s*>/i.exec(html);
-      if (closingHead) return html.slice(0, closingHead.index + closingHead[0].length);
+      const body = /<body\b/i.exec(html);
+      if (closingHead && (!body || closingHead.index < body.index)) {
+        return html.slice(0, closingHead.index + closingHead[0].length);
+      }
+      const headOnly = body ? html.slice(0, body.index) : html;
+      if (hasSufficientEarlyMetadata(headOnly)) return headOnly;
+      if (body) throw new ScanError('article_head_incomplete');
+      if (exceedsLimit || bytes >= MAX_HEAD_BYTES) throw new ScanError('article_head_too_large');
     }
   } catch (error) {
     if (error instanceof ScanError) throw error;

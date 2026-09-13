@@ -44,6 +44,53 @@ const article: DiscoveredArticle = {
 };
 const originalFetch = globalThis.fetch;
 
+function streamedHtml(chunks: string[], onCancel?: () => void): Response {
+  const encoder = new TextEncoder();
+  let index = 0;
+  return new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[index++];
+      if (chunk === undefined) controller.close();
+      else controller.enqueue(encoder.encode(chunk));
+    },
+    cancel() { onCancel?.(); },
+  }), { headers: { 'Content-Type': 'text/html' } });
+}
+
+let earlyStreamCancelled = false;
+globalThis.fetch = async () => streamedHtml([
+  `<head><meta property="og:image" content="https://images.publisher.example/early.jpg">
+    <meta property="article:published_time" content="2026-09-13T13:08:11Z">
+    <title>Complete early metadata</title>`,
+  'x'.repeat(256 * 1024),
+], () => { earlyStreamCancelled = true; });
+try {
+  const early = await fetchArticleHeadMetadata(article.canonical_url, source);
+  assert.equal(early.previewUrl, 'https://images.publisher.example/early.jpg');
+  assert.equal(early.publishedAt, '2026-09-13T13:08:11Z');
+  assert.equal(early.htmlTitle, 'Complete early metadata');
+  assert.equal(earlyStreamCancelled, true);
+} finally { globalThis.fetch = originalFetch; }
+
+globalThis.fetch = async () => new Response(
+  `<head><title>Insufficient metadata</title>
+    <meta property="og:image" content="https://images.publisher.example/invalid-date.jpg">
+    <meta property="article:published_time" content="not-a-date">${'x'.repeat(256 * 1024)}`,
+  { headers: { 'Content-Type': 'text/html' } });
+try {
+  await assert.rejects(fetchArticleHeadMetadata(article.canonical_url, source),
+    (error: unknown) => error instanceof ScanError && error.code === 'article_head_too_large');
+} finally { globalThis.fetch = originalFetch; }
+
+globalThis.fetch = async () => new Response(`<head><title>Head title only</title><body>
+  <meta property="og:image" content="https://images.publisher.example/body.jpg">
+  <meta property="article:published_time" content="2026-09-13T13:08:11Z"></head>`,
+{ headers: { 'Content-Type': 'text/html' } });
+try {
+  await assert.rejects(fetchArticleHeadMetadata(article.canonical_url, source),
+    (error: unknown) => error instanceof ScanError && error.code === 'article_head_incomplete');
+} finally { globalThis.fetch = originalFetch; }
+
 const bbcSource: Source = {
   ...source,
   source_key: 'bbc-news',
