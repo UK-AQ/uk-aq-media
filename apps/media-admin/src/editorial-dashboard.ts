@@ -5,7 +5,7 @@ import {
   SourceSchema,
 } from '@uk-aq-media/core';
 import {
-  configuredPublisherRssRouteKeys, fetchArticleHeadMetadata,
+  configuredPublisherRssRouteKeys, discoverPublisherRss, fetchArticleHeadMetadata,
 } from '@uk-aq-media/discovery';
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -82,6 +82,12 @@ type HeadMetadata = {
   image_error: string | null;
   checked_at: string;
 };
+
+export type MetadataProvider = 'article_head' | 'publisher_rss';
+
+export function metadataProviderFor(sourceKey: string): MetadataProvider {
+  return sourceKey === 'openaq' ? 'publisher_rss' : 'article_head';
+}
 
 function limitFrom(search: URLSearchParams, fallback = 20): number {
   const raw = Number(search.get('limit') ?? fallback);
@@ -198,6 +204,56 @@ async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
     image_url: metadata.previewUrl, image_error: metadata.previewError,
     checked_at: metadata.checkedAt,
   };
+}
+
+export function metadataFromOpenAqRss(canonicalUrl: string, publisher: string,
+  articles: ReadonlyArray<{
+    canonical_url: string;
+    title: string;
+    author: string | null;
+    published_at: string | null;
+    preview_url: string | null;
+  }>, checkedAt: string): HeadMetadata | null {
+  const article = articles.find(candidate => candidate.canonical_url === canonicalUrl);
+  if (!article) return null;
+  return {
+    publisher: cleanText(publisher, 200), title: cleanText(article.title, 1000),
+    compact_title: null, author: cleanText(article.author, 500),
+    published_at: article.published_at && !Number.isNaN(Date.parse(article.published_at))
+      ? new Date(article.published_at).toISOString() : null,
+    image_url: article.preview_url,
+    image_error: article.preview_url ? null : 'preview_image_metadata_missing',
+    checked_at: checkedAt,
+  };
+}
+
+export function requireOpenAqRssMetadata(canonicalUrl: string, publisher: string,
+  articles: Parameters<typeof metadataFromOpenAqRss>[2], checkedAt: string): HeadMetadata {
+  const metadata = metadataFromOpenAqRss(canonicalUrl, publisher, articles, checkedAt);
+  if (!metadata) throw new HttpError(409, 'metadata_rss_article_not_found');
+  return metadata;
+}
+
+async function fetchOpenAqRssMetadata(db: D1Database, canonicalUrl: string,
+  sourceName: string): Promise<HeadMetadata> {
+  const source = await loadSource(db, 'openaq');
+  if (!source) throw new HttpError(409, 'metadata_rss_source_not_available');
+  let observation: Awaited<ReturnType<typeof discoverPublisherRss>>;
+  try {
+    observation = await discoverPublisherRss(source, 'openaq-medium');
+  } catch {
+    throw new HttpError(502, 'metadata_rss_unavailable');
+  }
+  return requireOpenAqRssMetadata(canonicalUrl, sourceName, observation.articles,
+    new Date().toISOString());
+}
+
+async function fetchMetadata(db: D1Database, canonicalUrl: string,
+  source: Pick<SourceRow, 'source_key' | 'name' | 'canonical_domain' |
+    'content_fetch_policy' | 'image_policy'>): Promise<HeadMetadata> {
+  return metadataProviderFor(source.source_key) === 'publisher_rss'
+    ? fetchOpenAqRssMetadata(db, canonicalUrl, source.name)
+    : fetchHeadMetadata(canonicalUrl, source);
 }
 
 export function articleHeadHttpError(error: unknown): HttpError {
@@ -469,7 +525,7 @@ async function previewMetadata(db: D1Database, id: number): Promise<Response> {
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.id = ?`).bind(id).first<Record<string, unknown> & SourceRow>();
   if (!row) throw new HttpError(404, 'article_not_found');
-  const metadata = await fetchHeadMetadata(String(row.canonical_url), row);
+  const metadata = await fetchMetadata(db, String(row.canonical_url), row);
   const changes = {
     image: metadata.image_url && metadata.image_url !== row.og_image_url
       ? { current: row.og_image_url ?? null, proposed: metadata.image_url,
@@ -494,7 +550,7 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
   if (row.og_image_url !== parsed.data.expected_current_image_url) {
     throw new HttpError(409, 'metadata_current_image_changed');
   }
-  const metadata = await fetchHeadMetadata(String(row.canonical_url), row);
+  const metadata = await fetchMetadata(db, String(row.canonical_url), row);
   const mayChangeImage = metadataImageChange(row.og_image_url,
     parsed.data.expected_proposed_image_url, metadata.image_url,
     parsed.data.replace_existing_image);

@@ -289,6 +289,12 @@ separately Pending until editorial acceptance.
 Article canonical-domain validation remains separate from preview-image validation.
 OpenAQ article identity stays restricted to `openaq.medium.com`; only its preview policy
 permits exact host `cdn-images-1.medium.com`.
+Admin **Reload metadata** is source-aware: OpenAQ reloads its configured
+`openaq-medium` RSS route, matches the existing article by canonical URL and uses that
+bounded RSS observation for its title/author/date/preview proposal. It does not fetch
+the Medium article page, whose bounded article-head response is expected to be 403.
+The OpenAQ RSS `content:encoded` scan remains limited to the first suitable permitted
+image URL; body HTML is discarded and is not exposed, persisted or supplied to AI.
 Phys.org article identity stays restricted to `phys.org`; its preview-image policy also
 permits the exact observed publisher image host `scx2.b-cdn.net`. No `b-cdn.net` wildcard
 or other CDN hostname is accepted. Guardian's existing exact `i.guim.co.uk` exception uses
