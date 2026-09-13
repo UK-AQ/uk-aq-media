@@ -290,7 +290,7 @@ const dynamic = sqlite.prepare(`SELECT s.enabled, s.publication_policy, s.review
     'https://local-paper.co.uk/news/wood-burning-rules'))!;
 assert.deepEqual({ ...dynamic }, { enabled: 0, publication_policy: 'manual', review_level: 'enhanced',
   discovery_method: 'deferred', content_fetch_policy: 'discovery_metadata_only',
-  ai_content_policy: 'disabled', image_policy: 'blocked', status: 'pending' });
+  ai_content_policy: 'disabled', image_policy: 'remote_preview', status: 'pending' });
 assert.equal(sqlite.prepare(`SELECT publisher_scope FROM media_gdelt_candidates
   WHERE publisher_domain = 'local-paper.co.uk'`).get()!.publisher_scope, 'uk');
 assert.equal(sqlite.prepare(`SELECT publisher_scope FROM media_gdelt_candidates

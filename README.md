@@ -62,7 +62,9 @@ catalogue without deleting referenced history. Migration `0012` adds Carbon Brie
 OpenAQ and Phys.org as manual/Standard generic RSS publishers. `0013` initializes the
 generation-backed homepage latest-six state. `0014` adds GDELT checkpoint,
 run/file/chunk evidence, global candidate/family state and the conservative publisher-domain
-scope registry. Four publisher adapters remain deferred.
+scope registry; `0015` adds separate malformed NGram accounting; and `0016` advances only
+still-blocked GDELT dynamic publisher sources to `remote_preview`. Four publisher adapters
+remain deferred.
 
 ## GDELT Web NGrams discovery
 
@@ -95,7 +97,10 @@ canonical URL hash and retain provider-observation/file/family provenance separa
 `media_articles`. TOC `date` never becomes `published_at`, and TOC `img` is ignored.
 Explicit domain scope wins, then registrable `.uk` is UK; generic TLDs remain unknown unless
 mapped. Relevant UK candidates reuse configured publisher policy. An unknown UK domain gets
-one deterministic disabled manual/Enhanced metadata-only source with AI and images blocked.
+one deterministic disabled manual/Enhanced metadata-only source with AI disabled and
+`image_policy='remote_preview'`. That image policy permits only bounded presentation-metadata
+retrieval and validated remote preview use; it does not enable article-body retrieval, AI,
+local image copying, ordinary source discovery, source enablement or automatic approval.
 Non-UK, unknown and relevance-filtered candidates stay outside article/editorial/public
 state. Promotions use shared article persistence and homepage latest-six reconciliation;
 candidate-only writes cannot change the homepage generation.

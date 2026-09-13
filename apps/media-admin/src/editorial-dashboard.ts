@@ -76,6 +76,24 @@ type SourceRow = {
   created_at: string; updated_at: string;
 };
 
+export function sourceImagePolicyDisplay(sourceKey: string,
+  imagePolicy: SourceRow['image_policy']): string {
+  if (sourceKey.startsWith('discovered-publisher-') && imagePolicy === 'remote_preview') {
+    return 'remote preview permitted / GDELT-discovered source';
+  }
+  if (imagePolicy === 'remote_preview') return 'remote preview permitted';
+  if (imagePolicy === 'blocked') return 'preview images blocked';
+  return 'local image copy permitted';
+}
+
+function presentSource(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...row,
+    image_policy_display: sourceImagePolicyDisplay(
+      String(row.source_key), row.image_policy as SourceRow['image_policy']),
+  };
+}
+
 type HeadMetadata = {
   publisher: string | null; title: string | null; compact_title: string | null;
   author: string | null; published_at: string | null; image_url: string | null;
@@ -442,7 +460,7 @@ async function listSources(db: D1Database): Promise<Response> {
     JOIN media_sources s ON s.source_key = ar.source_key WHERE s.retired_at IS NULL
     ORDER BY ar.source_key, ar.display_name, ar.author_key LIMIT 250`)
     .all<Record<string, unknown>>();
-  return json({ sources: results, author_rules: rules.results.map(rule => ({
+  return json({ sources: results.map(presentSource), author_rules: rules.results.map(rule => ({
     ...rule,
     byline_aliases: JSON.parse(String(rule.byline_aliases_json)),
   })) });
@@ -661,7 +679,7 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
   const source = await db.prepare(`SELECT * FROM media_sources
     WHERE source_key = ? AND retired_at IS NULL`)
     .bind(sourceKey).first();
-  return json({ source, replayed: Boolean(replay) });
+  return json({ source: source ? presentSource(source) : source, replayed: Boolean(replay) });
 }
 
 async function addSource(request: Request, db: D1Database): Promise<Response> {
@@ -696,7 +714,8 @@ async function addSource(request: Request, db: D1Database): Promise<Response> {
   }
   const source = await db.prepare('SELECT * FROM media_sources WHERE source_key = ?')
     .bind(replay?.entity_key ?? parsed.data.source_key).first();
-  return json({ source, replayed: Boolean(replay) }, replay ? 200 : 201);
+  return json({ source: source ? presentSource(source) : source,
+    replayed: Boolean(replay) }, replay ? 200 : 201);
 }
 
 async function mutateAuthorRule(request: Request, db: D1Database, authorKey: string): Promise<Response> {

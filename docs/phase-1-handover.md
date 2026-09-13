@@ -21,11 +21,14 @@ generic SQL/source/query capability.
 
 Candidate writes precede promotion. Only relevant UK publishers enter `media_articles`.
 Configured outlets retain existing policies; an unknown `.uk` outlet receives a deterministic
-disabled manual/Enhanced, metadata-only, AI-disabled, image-blocked source. Non-UK and unknown
-candidates remain retained but invisible to current editorial/public/homepage surfaces. Shared
-persistence preserves one canonical article, publisher-RSS plus GDELT evidence, and rejected/
-hidden state. Shared homepage reconciliation runs after UK article mutations; candidate-only
-writes do not reconcile.
+disabled manual/Enhanced, deferred, `discovery_metadata_only`, AI-disabled source with
+`image_policy='remote_preview'`. Remote preview permits only bounded presentation-metadata
+retrieval and validated remote image use; it does not permit article-body retrieval, AI use,
+local image copying, ordinary source discovery, source enablement or automatic approval.
+Non-UK and unknown candidates remain retained but invisible to current editorial/public/
+homepage surfaces. Shared persistence preserves one canonical article, publisher-RSS plus
+GDELT evidence, and rejected/hidden state. Shared homepage reconciliation runs after UK article
+mutations; candidate-only writes do not reconcile.
 
 Exact bounds are five minutes safety lag, 120 minutes initial lookback, 15 minutes overlap,
 240 new catch-up minutes and six new complete pairs per run. Limits are 200 candidates/file,
