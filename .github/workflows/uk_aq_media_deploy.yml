@@ -50,11 +50,13 @@ jobs:
       - name: Verify Cloudflare configuration and required secrets
         env:
           UK_AQ_MEDIA_WORKER_HTTP_SECRET: ${{ secrets.UK_AQ_MEDIA_WORKER_HTTP_SECRET }}
+          UK_AQ_MEDIA_GDELT_INGEST_SECRET: ${{ secrets.UK_AQ_MEDIA_GDELT_INGEST_SECRET }}
         run: |
           set -euo pipefail
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing repository variable UK_AQ_MEDIA_CLOUDFLARE_ACCOUNT_ID"; exit 1; }
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing repository secret UK_AQ_MEDIA_CFLARE_API_TOKEN"; exit 1; }
           test -n "$UK_AQ_MEDIA_WORKER_HTTP_SECRET" || { echo "::error::Missing repository secret UK_AQ_MEDIA_WORKER_HTTP_SECRET"; exit 1; }
+          test -n "$UK_AQ_MEDIA_GDELT_INGEST_SECRET" || { echo "::error::Missing repository secret UK_AQ_MEDIA_GDELT_INGEST_SECRET"; exit 1; }
 
       - name: Apply D1 migrations
         run: npx wrangler d1 migrations apply MEDIA_DB --remote --config apps/media-discovery/wrangler.jsonc
@@ -68,12 +70,16 @@ jobs:
       - name: Apply discovery Worker secret
         env:
           UK_AQ_MEDIA_WORKER_HTTP_SECRET: ${{ secrets.UK_AQ_MEDIA_WORKER_HTTP_SECRET }}
+          UK_AQ_MEDIA_GDELT_INGEST_SECRET: ${{ secrets.UK_AQ_MEDIA_GDELT_INGEST_SECRET }}
         run: |
           set -euo pipefail
           secrets_json="$(jq -n \
             --arg UK_AQ_MEDIA_WORKER_HTTP_SECRET "${UK_AQ_MEDIA_WORKER_HTTP_SECRET}" \
-            '{UK_AQ_MEDIA_WORKER_HTTP_SECRET: $UK_AQ_MEDIA_WORKER_HTTP_SECRET}')"
+            --arg UK_AQ_MEDIA_GDELT_INGEST_SECRET "${UK_AQ_MEDIA_GDELT_INGEST_SECRET}" \
+            '{UK_AQ_MEDIA_WORKER_HTTP_SECRET: $UK_AQ_MEDIA_WORKER_HTTP_SECRET,
+              UK_AQ_MEDIA_GDELT_INGEST_SECRET: $UK_AQ_MEDIA_GDELT_INGEST_SECRET}')"
           unset UK_AQ_MEDIA_WORKER_HTTP_SECRET
+          unset UK_AQ_MEDIA_GDELT_INGEST_SECRET
           for attempt in 1 2 3; do
             if printf '%s' "$secrets_json" | npx wrangler secret bulk \
               --config apps/media-discovery/wrangler.jsonc \

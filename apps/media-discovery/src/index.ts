@@ -4,8 +4,70 @@ import {
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
 import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
+import {
+  completeGdeltFile, failGdeltRun, finishGdeltRun, ingestGdeltChunk,
+  startGdeltFile, startGdeltRun,
+} from '@uk-aq-media/gdelt/ingest';
+import { GDELT_MAX_INGEST_BODY_BYTES } from '@uk-aq-media/gdelt';
 
 const NEURON_MICRO_UNITS = 1_000_000;
+
+async function readGdeltJson(request: Request): Promise<unknown> {
+  if (request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !==
+      'application/json') throw new Error('gdelt_json_content_type_required');
+  const declared = Number(request.headers.get('content-length') ?? 0);
+  if (declared > GDELT_MAX_INGEST_BODY_BYTES) throw new Error('gdelt_ingest_body_too_large');
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > GDELT_MAX_INGEST_BODY_BYTES) throw new Error('gdelt_ingest_body_too_large');
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)); }
+  catch { throw new Error('gdelt_invalid_json'); }
+}
+
+function noStore(value: unknown, status = 200): Response {
+  const response = json(value, status);
+  response.headers.set('Cache-Control', 'no-store');
+  return response;
+}
+
+async function handleGdeltIngest(request: Request, env: MediaDiscoveryEnv,
+  pathname: string): Promise<Response> {
+  if (request.method !== 'POST') {
+    const response = noStore({ error: 'method_not_allowed' }, 405);
+    response.headers.set('Allow', 'POST');
+    return response;
+  }
+  if (!await secretMatches(request.headers.get('x-uk-aq-gdelt-ingest-secret'),
+    env.UK_AQ_MEDIA_GDELT_INGEST_SECRET)) return noStore({ error: 'unauthorized' }, 401);
+  try {
+    if (pathname === '/gdelt/web-ngrams/runs/start') {
+      if (request.body !== null) throw new Error('gdelt_start_body_forbidden');
+      return noStore(await startGdeltRun(env.MEDIA_DB));
+    }
+    const body = await readGdeltJson(request);
+    if (pathname === '/gdelt/web-ngrams/files/start') {
+      return noStore(await startGdeltFile(env.MEDIA_DB, body));
+    }
+    if (pathname === '/gdelt/web-ngrams/files/chunk') {
+      return noStore(await ingestGdeltChunk(env.MEDIA_DB, body));
+    }
+    if (pathname === '/gdelt/web-ngrams/files/complete') {
+      return noStore(await completeGdeltFile(env.MEDIA_DB, body));
+    }
+    if (pathname === '/gdelt/web-ngrams/runs/finish') {
+      return noStore(await finishGdeltRun(env.MEDIA_DB, body));
+    }
+    if (pathname === '/gdelt/web-ngrams/runs/fail') {
+      return noStore(await failGdeltRun(env.MEDIA_DB, body));
+    }
+    return noStore({ error: 'not_found' }, 404);
+  } catch (error) {
+    const known = error instanceof Error && /^gdelt_[a-z0-9_]+$/.test(error.message);
+    const code = known
+      ? error.message.slice(0, 100) : 'gdelt_ingest_failed';
+    console.error(JSON.stringify({ event: 'gdelt_ingest_failed', error_code: code }));
+    return noStore({ error: code }, code.endsWith('_not_found') ? 404 : known ? 400 : 503);
+  }
+}
 
 function configuredDisplayTitleAi(env: MediaDiscoveryEnv): DisplayTitleAiRuntime | undefined {
   const model = String(env.MEDIA_AI_MODEL).trim();
@@ -73,6 +135,9 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith('/gdelt/web-ngrams/')) {
+      return handleGdeltIngest(request, env, url.pathname);
+    }
     if (url.pathname !== '/scheduler/run') return json({ error: 'not_found' }, 404);
     if (request.method !== 'POST') {
       const response = json({ error: 'method_not_allowed' }, 405);

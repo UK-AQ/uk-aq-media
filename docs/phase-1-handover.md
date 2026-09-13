@@ -5,6 +5,78 @@ All implementation is in `TEST-uk-aq-media`, remote identity
 No remote resource creation, migration, deployment, website integration or other
 repository mutation was performed.
 
+## GDELT Web NGrams blanket discovery addendum — 13 September 2026
+
+Phase 1 now includes one global English-language GDELT Web NGrams acquisition path. A
+dedicated GitHub Action runs at `37 */2 * * *`, with manual dispatch, a 45-minute job limit
+and non-cancelling concurrency protection. It streams paired
+`<YYYYMMDDHHMM00>.ngrams.txt.gz` and `<YYYYMMDDHHMM00>.toc.json.gz` files in Node. The
+existing RSS scheduler, Queue consumer cadence and `/scheduler/run` behavior are unchanged.
+
+Migration `0014_gdelt_web_ngrams.sql` adds `media_publisher_domain_scope`; checkpoint/run/
+file/chunk tables; and separate global candidate plus normalised family-evidence tables.
+D1 remains authoritative through a dedicated `x-uk-aq-gdelt-ingest-secret` boundary on the
+discovery Worker. Its fixed POST operations validate strict bounded schemas and expose no
+generic SQL/source/query capability.
+
+Candidate writes precede promotion. Only relevant UK publishers enter `media_articles`.
+Configured outlets retain existing policies; an unknown `.uk` outlet receives a deterministic
+disabled manual/Enhanced, metadata-only, AI-disabled, image-blocked source. Non-UK and unknown
+candidates remain retained but invisible to current editorial/public/homepage surfaces. Shared
+persistence preserves one canonical article, publisher-RSS plus GDELT evidence, and rejected/
+hidden state. Shared homepage reconciliation runs after UK article mutations; candidate-only
+writes do not reconcile.
+
+Exact bounds are five minutes safety lag, 120 minutes initial lookback, 15 minutes overlap,
+240 new catch-up minutes and six new complete pairs per run. Limits are 200 candidates/file,
+600 candidates/run, two candidates/request, 128 KiB/request, 96 MiB compressed NGram, 64 MiB
+compressed TOC, 768 MiB decompressed/file stream, 64 KiB/line, 2,048 characters/URL and 1,000
+characters/title. HEAD/file/ingestion timeouts are 15/120/30 seconds. Both objects missing is
+harmless; a partial pair, invalid TSV/gzip, unresolved matched DOCID or exceeded bound fails
+without advancing beyond durable work. A malformed individual TOC row is counted and skipped
+when doing so does not hide an unresolved matched DOCID.
+
+TOC `date` is provider-observation provenance only; a GDELT-only article has null
+`published_at` until a permitted publisher-native path supplies it. TOC `img` is discarded.
+The batch stores no body, runs no article-head/body fetch, invokes no AI and never uses the
+GDELT DOC API. Global AQ dashboard/editorial/public Phase 2 is not present.
+
+Before an authorised deployment, create one random secret of at least 32 characters. Store
+it as the GitHub Actions secret and discovery Worker secret named
+`UK_AQ_MEDIA_GDELT_INGEST_SECRET`. Set the repository variable
+`UK_AQ_MEDIA_GDELT_INGEST_URL` to the discovery Worker's HTTPS origin. Do not put either value
+in source.
+
+Manual repository/deployment sequence (not executed here):
+
+```sh
+npm ci
+npm run types
+npm run check
+npx wrangler d1 migrations apply MEDIA_DB --remote --config apps/media-discovery/wrangler.jsonc
+npx wrangler deploy --config apps/media-public/wrangler.jsonc
+npx wrangler deploy --config apps/media-admin/wrangler.jsonc
+# Apply both required discovery secrets via the reviewed workflow or wrangler secret bulk.
+npx wrangler deploy --config apps/media-discovery/wrangler.jsonc
+```
+
+Expected migration output names `0014_gdelt_web_ngrams.sql`. After deployment, manually
+dispatch the dedicated GDELT workflow once. Inspect the newest GDELT run/file/candidate rows
+and establish: missing minutes are harmless; complete pairs resolve; all four families can
+match; repeat observations stay one candidate; scope is conservative; relevant UK candidates
+promote under existing policy; unknown UK publishers remain disabled Pending/Enhanced;
+non-UK/unknown stay outside `media_articles`; direct/GDELT overlap remains one article with
+both provider observations; rejected/hidden state survives; publication time is not fabricated;
+no GDELT image/body/AI behavior occurs; failures leave direct discovery/public data intact;
+and homepage generation changes only for a real promoted public-snapshot change.
+
+Rollback is application-first: disable the GDELT workflow or remove its secret to stop this
+path without affecting RSS discovery. Export D1 before a destructive schema rollback.
+Migration `0014` is additive; do not drop it after candidates/articles exist without a
+separately reviewed data-retention and FK-safe rollback. A code rollback can leave these tables
+dormant. No system-doc edit is requested because the current Web NGrams contract already
+describes this behavior.
+
 ## Display-title AI accounting addendum — 11 September 2026
 
 The current local implementation adds advisory display-title suggestions and a

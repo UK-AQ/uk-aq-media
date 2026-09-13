@@ -61,7 +61,7 @@ const HOMEPAGE_SNAPSHOT_CTE = `
 
 const RECONCILE_HOMEPAGE_LATEST_SIX_SQL = `${HOMEPAGE_SNAPSHOT_CTE}
   INSERT INTO media_public_feed_state (scope, generation, snapshot_json, updated_at)
-  SELECT '${HOMEPAGE_LATEST_SIX_SCOPE}', 1, snapshot_json, ? FROM snapshot
+  SELECT '${HOMEPAGE_LATEST_SIX_SCOPE}', 1, snapshot_json, ? FROM snapshot WHERE true
   ON CONFLICT(scope) DO UPDATE SET
     generation = media_public_feed_state.generation + 1,
     snapshot_json = excluded.snapshot_json,

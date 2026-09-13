@@ -1,5 +1,5 @@
 import {
-  z, initialEditorialState, loadAuthorRules, loadSource, permitsAi,
+  z, loadAuthorRules, loadSource, permitsAi,
   reconcileHomepageLatestSix, type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
@@ -19,6 +19,9 @@ import {
 } from './guardian';
 import { mediaDeterministicRelevanceFilter } from './relevance';
 import { ScanError } from './rss';
+import {
+  persistArticle, persistDiscoveryEvidence, publicationAuthorRule,
+} from './persistence';
 
 export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
   z.object({
@@ -49,6 +52,7 @@ export type {
   GuardianRssArticleImageEvidence, GuardianRssCandidateEvidence, GuardianRssImageView,
 } from './guardian';
 export { displayTitleNeuronRates };
+export { mediaDeterministicRelevanceFilter } from './relevance';
 
 function exactAliasInByline(byline: string, alias: string): boolean {
   const normalise = (value: string): string => value.normalize('NFKC')
@@ -87,102 +91,6 @@ export function evaluateGuardianArticle(rules: AuthorRule[], routeKey: GuardianR
     mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
       canonical_url: article.canonical_url, categories: article.categories }).relevant;
   return { matchedRules, accepted };
-}
-
-function publicationAuthorRule(rules: AuthorRule[]): AuthorRule | null {
-  return rules.find(rule => rule.publication_policy === 'auto_approve') ??
-    rules.find(rule => rule.publication_policy === 'pending') ?? null;
-}
-
-function persistArticle(db: D1Database, source: Source, article: DiscoveredArticle,
-  matchedRules: AuthorRule[], approvalObservationKey: string | null,
-  now: string): D1PreparedStatement {
-  const editorial = initialEditorialState(source, publicationAuthorRule(matchedRules));
-  // Conflict updates preserve editorial decisions. Only Pending can be promoted by a later,
-  // positively identified trusted-author observation; Rejected/Hidden always win.
-  return db.prepare(`INSERT INTO media_articles (source_key, canonical_url, canonical_url_hash,
-    original_url, title, publisher, author, published_at, discovered_at, last_seen_at,
-    topics_json, status, review_level, approval_method, approval_author_rule_key,
-    og_image_url, image_policy, display_title, display_title_origin, preview_metadata_checked_at,
-    approved_at, mutation_key, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(canonical_url_hash) DO UPDATE SET
-      last_seen_at = max(media_articles.last_seen_at, excluded.last_seen_at),
-      updated_at = max(media_articles.updated_at, excluded.updated_at),
-      author = coalesce(media_articles.author, excluded.author),
-      og_image_url = CASE
-        WHEN media_articles.og_image_url IS NULL AND media_articles.image_policy = 'remote_preview'
-          THEN excluded.og_image_url ELSE media_articles.og_image_url END,
-      display_title = coalesce(media_articles.display_title, excluded.display_title),
-      display_title_origin = CASE
-        WHEN media_articles.display_title IS NULL AND excluded.display_title IS NOT NULL
-          THEN excluded.display_title_origin ELSE media_articles.display_title_origin END,
-      preview_metadata_checked_at = coalesce(media_articles.preview_metadata_checked_at,
-        excluded.preview_metadata_checked_at),
-      status = CASE WHEN media_articles.status = 'pending'
-        AND excluded.approval_method = 'trusted_author_auto' THEN 'approved'
-        ELSE media_articles.status END,
-      approval_method = CASE WHEN media_articles.status = 'pending'
-        AND excluded.approval_method = 'trusted_author_auto' THEN excluded.approval_method
-        ELSE media_articles.approval_method END,
-      approval_author_rule_key = CASE WHEN media_articles.status = 'pending'
-        AND excluded.approval_method = 'trusted_author_auto' THEN excluded.approval_author_rule_key
-        ELSE media_articles.approval_author_rule_key END,
-      approved_at = CASE WHEN media_articles.status = 'pending'
-        AND excluded.approval_method = 'trusted_author_auto' THEN excluded.approved_at
-        ELSE media_articles.approved_at END,
-      revision = CASE WHEN media_articles.status = 'pending'
-        AND excluded.approval_method = 'trusted_author_auto' THEN media_articles.revision + 1
-        ELSE media_articles.revision END,
-      mutation_key = CASE WHEN media_articles.status = 'pending'
-        AND excluded.approval_method = 'trusted_author_auto'
-        THEN excluded.mutation_key
-        ELSE media_articles.mutation_key END
-    RETURNING id, revision`).bind(source.source_key, article.canonical_url,
-      article.canonical_url_hash, article.original_url, article.title, source.name, article.author,
-      article.published_at, now, now, JSON.stringify(article.categories), editorial.status,
-      source.review_level, editorial.approval_method, editorial.approval_author_rule_key,
-      article.preview_url, source.image_policy, article.display_title, article.display_title_origin,
-      article.preview_metadata_checked_at, editorial.status === 'approved' ? now : null,
-      approvalObservationKey, now, now);
-}
-
-function persistDiscoveryEvidence(db: D1Database, source: Source, routeKey: string,
-  article: DiscoveredArticle, matchedRules: AuthorRule[], approvalObservationKey: string | null,
-  now: string): D1PreparedStatement {
-  const ruleKeys = matchedRules.map(rule => rule.author_key);
-  const selectedAutoRule = matchedRules.find(rule => rule.publication_policy === 'auto_approve') ?? null;
-  return db.prepare(`INSERT INTO media_article_discovery_evidence
-    (article_id, source_key, provider_key, route_key, matched_author_keys_json,
-      always_include_applied, author_auto_approval_applied, first_seen_at, last_seen_at,
-      observation_count)
-    VALUES ((SELECT id FROM media_articles WHERE canonical_url_hash = ?), ?, 'publisher_rss', ?, ?, ?,
-      CASE WHEN ? IS NOT NULL AND EXISTS (
-        SELECT 1 FROM media_articles
-        WHERE canonical_url_hash = ? AND mutation_key = ?
-          AND approval_method = 'trusted_author_auto'
-          AND approval_author_rule_key = ?
-      ) THEN 1 ELSE 0 END, ?, ?, 1)
-    ON CONFLICT(article_id, provider_key, route_key) DO UPDATE SET
-      matched_author_keys_json = (
-        SELECT json_group_array(author_key) FROM (
-          SELECT value AS author_key FROM json_each(media_article_discovery_evidence.matched_author_keys_json)
-          UNION
-          SELECT value AS author_key FROM json_each(excluded.matched_author_keys_json)
-          ORDER BY author_key
-        )
-      ),
-      always_include_applied = max(media_article_discovery_evidence.always_include_applied,
-        excluded.always_include_applied),
-      author_auto_approval_applied = max(
-        media_article_discovery_evidence.author_auto_approval_applied,
-        excluded.author_auto_approval_applied),
-      last_seen_at = max(media_article_discovery_evidence.last_seen_at, excluded.last_seen_at),
-      observation_count = media_article_discovery_evidence.observation_count + 1`)
-    .bind(article.canonical_url_hash, source.source_key, routeKey, JSON.stringify(ruleKeys),
-      Number(matchedRules.some(rule => rule.inclusion_policy === 'always_include')),
-      approvalObservationKey, article.canonical_url_hash, approvalObservationKey,
-      selectedAutoRule?.author_key ?? null, now, now);
 }
 
 type ExistingPreviewState = {
@@ -381,7 +289,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     const acceptedArticles: DiscoveredArticle[] = [];
     const acceptedRules = new Map<string, AuthorRule[]>();
     // AQN and generic publisher routes remain at <=20 items; Guardian is <=10 per route.
-    // Guardian's extra route-evidence statement still keeps every Queue invocation bounded.
+    // One article and one provider-evidence statement per item remains below D1's batch bound.
     for (const article of unique.values()) {
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
@@ -396,6 +304,13 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       acceptedArticles.push(article);
       acceptedRules.set(article.canonical_url_hash, matchedRules);
     }
+    const acceptedHashes = acceptedArticles.map(article => article.canonical_url_hash);
+    const existingHashes = acceptedHashes.length === 0 ? new Set<string>() : new Set(
+      (await db.prepare(`SELECT canonical_url_hash FROM media_articles
+        WHERE canonical_url_hash IN (${acceptedHashes.map(() => '?').join(', ')})`)
+        .bind(...acceptedHashes).all<{ canonical_url_hash: string }>()).results
+        .map(row => row.canonical_url_hash),
+    );
     await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
     for (const article of acceptedArticles) {
       const matchedRules = acceptedRules.get(article.canonical_url_hash) ?? [];
@@ -404,21 +319,16 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         ? publicationRule : null;
       const approvalObservationKey = selectedAutoRule
         ? `author-auto:${runId}:${article.canonical_url_hash}` : null;
-      statements.push(db.prepare(`UPDATE media_discovery_runs SET
-        items_inserted = items_inserted + CASE WHEN EXISTS
-          (SELECT 1 FROM media_articles WHERE canonical_url_hash = ?) THEN 0 ELSE 1 END,
-        items_updated = items_updated + CASE WHEN EXISTS
-          (SELECT 1 FROM media_articles WHERE canonical_url_hash = ?) THEN 1 ELSE 0 END
-        WHERE id = ?`).bind(article.canonical_url_hash, article.canonical_url_hash, runId));
       statements.push(persistArticle(db, source, article, matchedRules, approvalObservationKey, now));
-      if (sourceKey === 'the-guardian' && routeKey) {
-        statements.push(persistDiscoveryEvidence(db, source, routeKey, article, matchedRules,
-          approvalObservationKey, now));
-      }
+      statements.push(persistDiscoveryEvidence(db, source, 'publisher_rss', routeKey ?? sourceKey,
+        article, matchedRules, approvalObservationKey, now));
     }
     statements.push(db.prepare(`UPDATE media_discovery_runs SET status = 'succeeded',
-      finished_at = ?, updated_at = ?, items_seen = ?, items_invalid = ?, items_filtered = ?
-      WHERE id = ?`).bind(now, now, seen, invalid, filtered, runId));
+      finished_at = ?, updated_at = ?, items_seen = ?, items_inserted = ?, items_updated = ?,
+      items_invalid = ?, items_filtered = ? WHERE id = ?`).bind(now, now, seen,
+        acceptedHashes.filter(hash => !existingHashes.has(hash)).length,
+        acceptedHashes.filter(hash => existingHashes.has(hash)).length,
+        invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
     await db.batch(statements);
     await reconcileHomepageLatestSix(db);

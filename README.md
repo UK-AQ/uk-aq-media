@@ -2,7 +2,9 @@
 
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
-Independent RSS discovery, plus specialist Carbon Brief, OpenAQ and Phys.org feeds.
+Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, and a
+separate global GDELT Web NGrams batch that retains English AQ candidates globally but
+promotes only relevant UK-publisher candidates into the existing Media system.
 The public website reaches the approved homepage feed only through the sibling
 cache proxy; browser code has no Media credentials or direct Media origin access.
 
@@ -16,9 +18,10 @@ This README describes this implementation, not a replacement contract.
 | --- | --- |
 | `apps/media-public` | Approved public feed only; `MEDIA_DB` binding |
 | `apps/media-admin` | Bearer-authenticated editorial reads/transitions and explicit title generation; `MEDIA_DB`, `AI`, `MEDIA_ADMIN_TOKEN` |
-| `apps/media-discovery` | Authenticated scheduler receiver and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `AI`, `UK_AQ_MEDIA_WORKER_HTTP_SECRET`, and dormant `scheduled()` fallback handler |
+| `apps/media-discovery` | Authenticated scheduler receiver, fixed-schema GDELT ingestion boundary and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `AI`, two dedicated HTTP secrets, and dormant `scheduled()` fallback handler |
 | `packages/core` | Shared source/article/policy types, D1 source loading, canonical URL identity, HTTP helpers |
 | `packages/discovery` | Shared bounded RSS handling, AQN/Guardian adapters, source-run/article/evidence persistence, typed work messages |
+| `packages/gdelt` | Global Web NGrams windowing, strong-family matching, streaming Node scanner and D1 candidate/UK-promotion operations |
 | `packages/enrichment` | Display-title prompt/provider seam, output validation and local/durable AI budgets; automatic generation remains policy-gated and explicit admin generation is separately authorised |
 | `migrations` | Core tables/indexes/triggers, immutable initial source seed and forward policy/schema changes |
 | `config/sources.seed.json` | Current target source permission/discovery posture |
@@ -57,7 +60,48 @@ are enabled alongside the three manual publisher RSS adapters added by `0010`. M
 `independent.co.uk` domain family, and removes or retires Defra from the current source
 catalogue without deleting referenced history. Migration `0012` adds Carbon Brief,
 OpenAQ and Phys.org as manual/Standard generic RSS publishers. `0013` initializes the
-generation-backed homepage latest-six state. Four publisher adapters remain deferred.
+generation-backed homepage latest-six state. `0014` adds GDELT checkpoint,
+run/file/chunk evidence, global candidate/family state and the conservative publisher-domain
+scope registry. Four publisher adapters remain deferred.
+
+## GDELT Web NGrams discovery
+
+`.github/workflows/uk_aq_media_gdelt.yml` runs at minute 37 every two hours and supports
+manual dispatch. One concurrency group prevents overlapping workflow runs. The Node 22 batch
+streams and gunzips paired minute objects from GDELT's Web NGrams bucket; it does not use the
+GDELT DOC API and does not scan bulk files inside a Worker or `/scheduler/run`.
+
+The run uses a dedicated secret-authenticated backend boundary on `media-discovery`. Its
+fixed routes accept only strict run, file, candidate-chunk, completion and failure shapes;
+they cannot select SQL or invoke generic database work. D1 owns the checkpoint and all
+candidate/article state. The runner holds only the current file's matched DOCID map and
+candidate chunk data.
+
+Exact bounds are a five-minute safety lag, 120-minute initial lookback, 15-minute overlap,
+at most 240 new catch-up minutes and six new complete pairs per run. Limits are 200 matched
+candidates/file, 600/run and two candidates per 128 KiB ingestion request. HEAD, file and
+ingestion timeouts are 15, 120 and 30 seconds. Compressed caps are 96 MiB for NGram and
+64 MiB for TOC; each decompressed stream is capped at 768 MiB and each line at 64 KiB.
+Article URLs are HTTPS-only and capped at 2,048 characters; titles at 1,000 characters.
+Both objects missing is normal. Partial pairs and structurally broken files fail without
+advancing past undurable work.
+
+The four normalised families are `gdelt-wood-burning`, `gdelt-wildfire`,
+`gdelt-air-pollution` and `gdelt-air-quality`. Candidates deduplicate by the existing Media
+canonical URL hash and retain provider-observation/file/family provenance separately from
+`media_articles`. TOC `date` never becomes `published_at`, and TOC `img` is ignored.
+Explicit domain scope wins, then registrable `.uk` is UK; generic TLDs remain unknown unless
+mapped. Relevant UK candidates reuse configured publisher policy. An unknown UK domain gets
+one deterministic disabled manual/Enhanced metadata-only source with AI and images blocked.
+Non-UK, unknown and relevance-filtered candidates stay outside article/editorial/public
+state. Promotions use shared article persistence and homepage latest-six reconciliation;
+candidate-only writes cannot change the homepage generation.
+
+Required GitHub configuration is `UK_AQ_MEDIA_GDELT_INGEST_URL` as a repository variable and
+the same new `UK_AQ_MEDIA_GDELT_INGEST_SECRET` value as both a repository secret and discovery
+Worker secret. The deployment workflow applies the Worker secret before deploying discovery.
+`npm run gdelt:check` is the focused deterministic fixture; `npm run gdelt:run` is the real
+batch entrypoint.
 
 ## HTTP surface
 

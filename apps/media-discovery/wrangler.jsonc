@@ -44,7 +44,8 @@
   },
   "secrets": {
     "required": [
-      "UK_AQ_MEDIA_WORKER_HTTP_SECRET"
+      "UK_AQ_MEDIA_WORKER_HTTP_SECRET",
+      "UK_AQ_MEDIA_GDELT_INGEST_SECRET"
     ]
   },
   "vars": {
