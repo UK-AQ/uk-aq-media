@@ -101,7 +101,7 @@ for (const weak of ['smoke', 'fire', 'stove', 'biomass']) {
 }
 
 const toc = parseTocLine(JSON.stringify({ ID: 'doc-1', date: '20260913120000', img: 'https://evil.example/i.jpg',
-  lang: 'English', title: 'Air quality update', url: 'https://www.example.co.uk/a?utm_source=gdelt' }));
+  lang: 'en', title: 'Air quality update', url: 'https://www.example.co.uk/a?utm_source=gdelt' }));
 assert.equal(toc?.date, '2026-09-13T12:00:00.000Z');
 assert.equal('img' in (toc ?? {}), false, 'GDELT image must not enter the parsed promotion model');
 assert.equal(parseTocLine(JSON.stringify({ ID: 2, date: 20260913120100, lang: 'English',
@@ -116,9 +116,9 @@ const ngrams = await scanNgramLines(fixtureLines([
   'doc-fr\tair quality en France\t1',
 ]));
 const joined = await resolveTocLines(fixtureLines([
-  JSON.stringify({ ID: 'doc-1', date: '20260913120000', img: 'https://evil.example/a.jpg', lang: 'English',
+  JSON.stringify({ ID: 'doc-1', date: '20260913120000', img: 'https://evil.example/a.jpg', lang: 'en',
     title: 'Air quality and air pollution in London', url: 'https://www.example.co.uk/story?utm_source=one' }),
-  JSON.stringify({ ID: 'doc-1', date: '20260913120100', lang: 'English',
+  JSON.stringify({ ID: 'doc-1', date: '20260913120100', lang: 'EN',
     title: 'Updated air quality and air pollution in London', url: 'https://example.co.uk/story?utm_source=two' }),
   JSON.stringify({ ID: 'doc-2', date: '20260913120000', lang: 'English',
     title: 'Regional wildfires', url: 'https://elsewhere.com/climate' }),
@@ -126,6 +126,12 @@ const joined = await resolveTocLines(fixtureLines([
     title: 'Qualite de air', url: 'https://example.fr/article' }),
 ] ), ngrams.matched_docs);
 assert.equal(joined.candidates.length, 2, 'English filtering and canonical candidate dedupe must apply');
+assert.equal(joined.candidates[0]?.language, 'English',
+  'live GDELT lang=en must be retained and normalised internally');
+assert.equal(joined.candidates[1]?.language, 'English',
+  'the English compatibility label must remain accepted');
+assert.equal(joined.candidates.some(value => value.url.includes('example.fr')), false,
+  'non-English candidates must remain excluded');
 assert.equal(joined.candidates[0]?.families.length, 2, 'multiple family evidence must be retained once');
 assert.equal(joined.candidates[0]?.provider_observed_at, '2026-09-13T12:01:00.000Z');
 await assert.rejects(resolveTocLines(fixtureLines([
@@ -137,7 +143,18 @@ await assert.rejects(resolveTocLines(fixtureLines([
 assert.throws(() => gdeltArticleIdentityUrl('http://example.co.uk/a'), /unsafe_gdelt_article_url/);
 assert.throws(() => gdeltArticleIdentityUrl('https://user:pass@example.co.uk/a'), /unsafe_gdelt_article_url/);
 assert.equal(registrablePublisherDomain('news.example.co.uk'), 'example.co.uk');
+assert.equal(registrablePublisherDomain('news.example.com.au'), 'example.com.au');
+assert.equal(registrablePublisherDomain('news.example.co.nz'), 'example.co.nz');
 assert.equal(registrablePublisherDomain('news.example.com'), 'example.com');
+assert.deepEqual(gdeltArticleIdentityUrl('https://news.example.com.au/story'), {
+  raw_url: 'https://news.example.com.au/story',
+  publisher_host: 'news.example.com.au',
+  publisher_domain: 'example.com.au',
+});
+assert.throws(() => registrablePublisherDomain('co.uk'),
+  /invalid_registrable_publisher_domain/);
+assert.throws(() => registrablePublisherDomain('publisher.not-a-real-tld'),
+  /invalid_registrable_publisher_domain/);
 assert.equal(domainMatchesBoundary('news.theguardian.com', 'theguardian.com'), true);
 assert.equal(domainMatchesBoundary('guardian.com.evil.example', 'guardian.com'), false);
 assert.equal(canonicalizeUrl('https://www.example.co.uk/a?utm_source=gdelt', 'example.co.uk'),
@@ -156,7 +173,8 @@ const db = sqliteD1(sqlite);
 const run = await startGdeltRun(db, new Date('2026-09-13T12:10:44.000Z'));
 const stamp = '20260913120000';
 const globalOnly = [
-  candidate('https://unknown-global.com/air-quality', 'Air quality standards compared', families.air),
+  candidate('https://news.unknown-global.com.au/air-quality',
+    'Air quality standards compared', families.air),
   candidate('https://known-non-uk.com/air-pollution', 'Air pollution policy', families.pollution),
 ];
 await startGdeltFile(db, { run_id: run.run_id, file_stamp: stamp, expected_chunks: 1,
@@ -208,7 +226,7 @@ assert.deepEqual({ ...dynamic }, { enabled: 0, publication_policy: 'manual', rev
 assert.equal(sqlite.prepare(`SELECT publisher_scope FROM media_gdelt_candidates
   WHERE publisher_domain = 'local-paper.co.uk'`).get()!.publisher_scope, 'uk');
 assert.equal(sqlite.prepare(`SELECT publisher_scope FROM media_gdelt_candidates
-  WHERE publisher_domain = 'unknown-global.com'`).get()!.publisher_scope, 'unknown');
+  WHERE publisher_domain = 'unknown-global.com.au'`).get()!.publisher_scope, 'unknown');
 assert.equal(sqlite.prepare(`SELECT publisher_scope FROM media_gdelt_candidates
   WHERE publisher_domain = 'known-non-uk.com'`).get()!.publisher_scope, 'non_uk');
 assert.equal(sqlite.prepare(`SELECT count(*) AS count FROM media_article_discovery_evidence

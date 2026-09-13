@@ -1,4 +1,5 @@
 import { z } from '@uk-aq-media/core';
+import { parse } from 'tldts';
 
 export const GDELT_BASE_URL =
   'https://storage.googleapis.com/data.gdeltproject.org/gdeltv5/weblegacy/ngrams/';
@@ -66,20 +67,17 @@ export function domainMatchesBoundary(host: string, domain: string): boolean {
   return normalHost === normalDomain || normalHost.endsWith(`.${normalDomain}`);
 }
 
-const ukSecondLevelSuffixes = new Set([
-  'ac.uk', 'co.uk', 'gov.uk', 'ltd.uk', 'me.uk', 'net.uk', 'nhs.uk', 'org.uk',
-  'plc.uk', 'police.uk', 'sch.uk',
-]);
-
 export function registrablePublisherDomain(host: string): string {
-  const labels = host.toLowerCase().replace(/^www\./, '').split('.').filter(Boolean);
-  if (labels.length < 2) throw new Error('invalid_publisher_host');
-  const lastTwo = labels.slice(-2).join('.');
-  if (ukSecondLevelSuffixes.has(lastTwo)) {
-    if (labels.length < 3) throw new Error('unregistrable_uk_domain');
-    return labels.slice(-3).join('.');
+  const parsed = parse(host.toLowerCase().replace(/^www\./, ''), {
+    // Private PSL suffixes preserve distinct hosted publishers such as user.github.io.
+    allowPrivateDomains: true,
+    extractHostname: false,
+    validateHostname: true,
+  });
+  if (!parsed.domain || !parsed.isIcann && !parsed.isPrivate) {
+    throw new Error('invalid_registrable_publisher_domain');
   }
-  return lastTwo;
+  return parsed.domain;
 }
 
 function validHostname(host: string): boolean {

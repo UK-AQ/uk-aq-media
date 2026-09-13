@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@uk-aq-media/core": "*",
-    "@uk-aq-media/discovery": "*"
+    "@uk-aq-media/discovery": "*",
+    "tldts": "7.4.12"
   }
 }

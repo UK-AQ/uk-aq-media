@@ -86,6 +86,11 @@ function providerObservationDate(value: unknown): string | null {
 
 type ParsedToc = { id: string; date: string; lang: string; title: string; url: string };
 
+function normalisedEnglishLanguage(value: string): 'English' | null {
+  const language = value.normalize('NFKC').toLocaleLowerCase('en-GB').trim();
+  return language === 'en' || language === 'english' ? 'English' : null;
+}
+
 export function parseTocLine(line: string): ParsedToc | null {
   let value: unknown;
   try { value = JSON.parse(line); } catch { return null; }
@@ -115,7 +120,8 @@ Promise<{ candidates: GdeltCandidateInput[]; malformed_toc_rows: number }> {
     const families = matchedDocs.get(parsed.id);
     if (!families) continue;
     unresolved.delete(parsed.id);
-    if (parsed.lang.trim().toLowerCase() !== 'english') continue;
+    const language = normalisedEnglishLanguage(parsed.lang);
+    if (!language) continue;
     let identity: ReturnType<typeof gdeltArticleIdentityUrl>;
     let canonicalUrl: string;
     try {
@@ -143,7 +149,7 @@ Promise<{ candidates: GdeltCandidateInput[]; malformed_toc_rows: number }> {
       }
     } else {
       candidates.set(canonicalUrl, GdeltCandidateInputSchema.parse({
-        url: identity.raw_url, title: parsed.title, language: 'English',
+        url: identity.raw_url, title: parsed.title, language,
         provider_observed_at: parsed.date,
         families: incomingFamilies.sort((left, right) => left.family_key.localeCompare(right.family_key)),
       }));
