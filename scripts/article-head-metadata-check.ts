@@ -42,6 +42,24 @@ const article: DiscoveredArticle = {
   preview_url: null, display_title: null, display_title_origin: null,
   preview_metadata_checked_at: null,
 };
+const originalFetch = globalThis.fetch;
+
+const bbcSource: Source = {
+  ...source,
+  source_key: 'bbc-news',
+  name: 'BBC News',
+  canonical_domain: 'bbc.co.uk',
+};
+const bbcPreview =
+  'https://ichef.bbci.co.uk/ace/branded_news/1200/cpsprodpb/example/live/article.jpg';
+globalThis.fetch = async () => new Response(`<head>
+  <meta property="og:image" content="${bbcPreview}">
+</head>`, { headers: { 'Content-Type': 'text/html' } });
+try {
+  const bbcMetadata = await fetchArticleHeadMetadata(
+    'https://www.bbc.co.uk/news/articles/example', bbcSource);
+  assert.equal(bbcMetadata.previewUrl, bbcPreview);
+} finally { globalThis.fetch = originalFetch; }
 
 const physOrgSource: Source = {
   ...source,
@@ -59,7 +77,6 @@ assert.equal(canonicalizeUrl('https://www.phys.org/news/article.html', physOrgSo
   'https://phys.org/news/article.html');
 assert.throws(() => canonicalizeUrl(physOrgPreview, physOrgSource), /off_source_article_url/);
 
-const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => new Response(`<head>
   <meta property="og:image" content="https://cdn.example/rejected.jpg">
   <meta name="twitter:image" content="https://images.publisher.example/accepted.jpg">

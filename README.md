@@ -66,8 +66,11 @@ scope registry. Four publisher adapters remain deferred.
 
 ## GDELT Web NGrams discovery
 
-`.github/workflows/uk_aq_media_gdelt.yml` runs at minute 37 every two hours and supports
-manual dispatch. One concurrency group prevents overlapping workflow runs. The Node 22 batch
+`.github/workflows/uk_aq_media_gdelt.yml` supports manual dispatch and is dispatched by the
+TEST Ops central scheduler at minutes 10, 25, 40 and 55 each hour. It has no native GitHub
+Actions Cron, so the Ops job is the sole scheduling authority; the separate Media RSS discovery
+job remains a two-hour `worker_http` route. One concurrency group prevents overlapping workflow
+runs. The Node 22 batch
 streams and gunzips paired minute objects from GDELT's Web NGrams bucket; it does not use the
 GDELT DOC API and does not scan bulk files inside a Worker or `/scheduler/run`.
 

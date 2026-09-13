@@ -1,8 +1,6 @@
 name: Discover UK AQ Media through GDELT Web NGrams
 
 on:
-  schedule:
-    - cron: '37 */2 * * *'
   workflow_dispatch:
 
 permissions:

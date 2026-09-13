@@ -1,0 +1,44 @@
+name: Discover UK AQ Media through GDELT Web NGrams
+
+on:
+  schedule:
+    - cron: '37 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uk-aq-media-gdelt-web-ngrams
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Stream and ingest bounded GDELT files
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      UK_AQ_MEDIA_GDELT_INGEST_URL: ${{ vars.UK_AQ_MEDIA_GDELT_INGEST_URL }}
+      UK_AQ_MEDIA_GDELT_INGEST_SECRET: ${{ secrets.UK_AQ_MEDIA_GDELT_INGEST_SECRET }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify ingestion configuration
+        run: |
+          set -euo pipefail
+          test -n "$UK_AQ_MEDIA_GDELT_INGEST_URL" || { echo "::error::Missing repository variable UK_AQ_MEDIA_GDELT_INGEST_URL"; exit 1; }
+          test -n "$UK_AQ_MEDIA_GDELT_INGEST_SECRET" || { echo "::error::Missing repository secret UK_AQ_MEDIA_GDELT_INGEST_SECRET"; exit 1; }
+
+      - name: Run bounded GDELT acquisition
+        run: npm run gdelt:run

@@ -44,15 +44,28 @@ for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org']) {
     publication_policy: 'auto_approve' }), []);
 }
 const source = publisherSources.find(candidate => candidate.source_key === 'bbc-news')!;
-const parsed = await parsePublisherRssFeed(`<?xml version="1.0"?><rss version="2.0"><channel>
+const bbcPreview =
+  'https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/example/live/article.jpg';
+const parsed = await parsePublisherRssFeed(`<?xml version="1.0"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
   <item><title>Air quality improves</title><link>https://www.bbc.co.uk/news/a?utm_source=rss</link>
-  <category>Environment</category></item>
+  <category>Environment</category><media:thumbnail url="${bbcPreview}" /></item>
   <item><title>Missing link</title></item>
 </channel></rss>`, source, 'bbc-news-top');
 assert.equal(parsed.items_seen, 2);
 assert.equal(parsed.items_invalid, 1);
 assert.equal(parsed.articles[0]?.canonical_url, 'https://bbc.co.uk/news/a');
+assert.equal(parsed.articles[0]?.preview_url, bbcPreview);
 assert.equal(parsed.articles[0]?.title_context, null);
+assert.equal(remotePreviewUrl(bbcPreview, source), bbcPreview);
+for (const rejected of [
+  'https://other.bbci.co.uk/image.jpg',
+  'https://ichef.bbc.com/image.jpg',
+  'http://ichef.bbci.co.uk/image.jpg',
+  'https://user:secret@ichef.bbci.co.uk/image.jpg',
+  'https://ichef.bbci.co.uk:443/image.jpg',
+  'https://nested.ichef.bbci.co.uk/image.jpg',
+]) assert.equal(remotePreviewUrl(rejected, source), null);
 assert.deepEqual(configuredPublisherRssRouteKeys({ ...source,
   canonical_domain: 'bbc.com' }), []);
 assert.throws(() => canonicalizeUrl('https://regional.bbc.co.uk/news/a', source),
@@ -85,6 +98,7 @@ assert.equal(openaqParsed.articles[0]?.display_title, null);
 assert.equal('content_encoded_preview_url' in openaqParsed.articles[0]!, false);
 assert.doesNotMatch(JSON.stringify(openaqParsed.articles[0]), /RSS body marker/);
 assert.equal(remotePreviewUrl(openaqPreview, openaq), openaqPreview);
+assert.equal(remotePreviewUrl(bbcPreview, openaq), null);
 for (const rejected of [
   'https://medium.com/_/stat?event=post.clientViewed',
   'https://attacker.example/image.png',

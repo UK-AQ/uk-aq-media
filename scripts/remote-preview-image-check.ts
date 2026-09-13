@@ -9,6 +9,7 @@ const openaq: PublisherDomainIdentity = {
 const bbc: PublisherDomainIdentity = {
   source_key: 'bbc-news', canonical_domain: 'bbc.co.uk',
 };
+const bbcImageUrl = 'https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/example.jpg';
 const initialUrl = 'https://cdn-images-1.medium.com/max/1024/1*SzapuwhysObdfvnB2Es4rw.png';
 const resolvedUrl = 'https://cdn-images-1.medium.com/v2/resize:fit:1024/1*SzapuwhysObdfvnB2Es4rw.png';
 
@@ -66,20 +67,20 @@ for (const location of [
 ]) await redirectFailure(location);
 
 const unrelatedRequests: string[] = [];
-const unrelated = await fetchRemotePreviewImage('https://www.bbc.co.uk/image.png', bbc,
+const unrelated = await fetchRemotePreviewImage(bbcImageUrl, bbc,
   new AbortController().signal, sequentialFetcher([
     new Response(null, { status: 301, headers: { Location: '/new-image.png' } }),
   ], unrelatedRequests));
 assert.equal(unrelated.response, null);
 assert.equal(unrelated.failure, 'redirect');
-assert.deepEqual(unrelatedRequests, ['https://www.bbc.co.uk/image.png']);
+assert.deepEqual(unrelatedRequests, [bbcImageUrl]);
 
 const directRequests: string[] = [];
-const direct = await fetchRemotePreviewImage('https://www.bbc.co.uk/image.png', bbc,
+const direct = await fetchRemotePreviewImage(bbcImageUrl, bbc,
   new AbortController().signal, sequentialFetcher([
     new Response(new Uint8Array([1]), { status: 200, headers: { 'Content-Type': 'image/png' } }),
   ], directRequests));
 assert.equal(direct.response?.status, 200);
 assert.equal(direct.failure, null);
-assert.deepEqual(directRequests, ['https://www.bbc.co.uk/image.png']);
+assert.deepEqual(directRequests, [bbcImageUrl]);
 console.log('Remote preview image checks passed');

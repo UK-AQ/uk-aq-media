@@ -78,6 +78,7 @@ export function publisherHttpsUrl(raw: unknown, source: PublisherDomainInput): s
 }
 
 const sourcePreviewImageHostnames: Readonly<Record<string, readonly string[]>> = {
+  'bbc-news': ['ichef.bbci.co.uk'],
   'the-guardian': ['i.guim.co.uk'],
   openaq: ['cdn-images-1.medium.com'],
   'phys-org': ['scx2.b-cdn.net'],
