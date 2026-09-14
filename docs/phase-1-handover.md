@@ -82,8 +82,10 @@ describes this behavior.
 
 ## Display-title AI accounting addendum — 11 September 2026
 
-The current local implementation adds advisory display-title suggestions and a
-request-level neuron ledger. Migration `0007_media_ai_neuron_ledger.sql` is forward-only:
+The current local implementation adds provenance-retaining display-title generation and a
+request-level neuron ledger. Successful routine generation is accepted automatically; explicit
+editorial generation and historical Pending suggestions retain the manual Accept/Reject path.
+Migration `0007_media_ai_neuron_ledger.sql` is forward-only:
 `0006` had already reached `main` and the normal deployment workflow can apply migrations
 before Workers, so its possibly-applied call-counter history was not rewritten without a
 remote D1 query. A non-zero legacy day is carried forward with its request/title counts

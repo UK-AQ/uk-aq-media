@@ -3,8 +3,8 @@ import {
   reconcileHomepageLatestSix, type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
-  D1DisplayTitleNeuronLedger, LocalRequestBudget, WorkersAiDisplayTitleProvider,
-  displayTitleNeuronRates,
+  D1DisplayTitleNeuronLedger, DISPLAY_TITLE_AI_THRESHOLD, LocalRequestBudget,
+  WorkersAiDisplayTitleProvider, displayTitleNeuronRates,
   suggestDisplayTitlePermitted,
 } from '@uk-aq-media/enrichment';
 import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
@@ -138,8 +138,9 @@ async function claimEligibleTitleArticle(db: D1Database, sourceKey: string,
       AND ai_title_suggestion IS NULL
       AND ai_title_suggestion_state IS NULL
       AND ai_title_attempted_at IS NULL
-      AND length(title) > 64
-    RETURNING id, title, author`).bind(claimedAt, article.canonical_url_hash, sourceKey)
+      AND length(title) > ?
+    RETURNING id, title, author`).bind(claimedAt, article.canonical_url_hash, sourceKey,
+      DISPLAY_TITLE_AI_THRESHOLD)
     .first<ClaimedTitleArticle>();
 }
 
@@ -151,15 +152,16 @@ async function releaseUnusedTitleClaim(db: D1Database, id: number,
 }
 
 async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
-  articles: DiscoveredArticle[], runtime: DisplayTitleAiRuntime): Promise<void> {
+  articles: DiscoveredArticle[], runtime: DisplayTitleAiRuntime): Promise<boolean> {
   // Automatic inference remains explicitly limited to the two already-authorised sources.
   // Other metadata-only sources may use the authenticated editorial generation path, but a
   // routine discovery observation must not itself spend AI budget.
   if (!['air-quality-news', 'the-guardian'].includes(source.source_key) ||
-      !permitsAi(source, 'metadata')) return;
+      !permitsAi(source, 'metadata')) return false;
   const localBudget = new LocalRequestBudget(runtime.maximum_requests_per_run);
   const ledger = new D1DisplayTitleNeuronLedger(db, runtime.maximum_titles_per_request);
   const provider = new WorkersAiDisplayTitleProvider(runtime.binding, runtime.model);
+  let displayTitleChanged = false;
 
   for (const article of articles) {
     const claimedAt = new Date().toISOString();
@@ -169,7 +171,7 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
     } catch {
       console.warn(JSON.stringify({ event: 'display_title_ai_claim_failed',
         article_hash: article.canonical_url_hash }));
-      return;
+      return displayTitleChanged;
     }
     if (!claimed) continue;
 
@@ -194,7 +196,9 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
       }
       console.info(JSON.stringify({ event: 'display_title_ai_skipped', article_id: claimed.id,
         reason: outcome.reason }));
-      if (outcome.reason === 'local_budget' || outcome.reason === 'storage_failure') return;
+      if (outcome.reason === 'local_budget' || outcome.reason === 'storage_failure') {
+        return displayTitleChanged;
+      }
       continue;
     }
     if (outcome.status === 'failed') {
@@ -204,17 +208,21 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
     }
 
     try {
+      const acceptedAt = new Date().toISOString();
       const stored = await db.prepare(`UPDATE media_articles SET
-        ai_title_suggestion = ?, ai_title_suggestion_state = 'pending',
+        display_title = ?, display_title_origin = 'ai',
+        ai_title_suggestion = ?, ai_title_suggestion_state = 'accepted',
         ai_title_model = ?, ai_title_prompt_version = ?, ai_title_generated_at = ?,
-        ai_title_decided_at = NULL, updated_at = ?
+        ai_title_decided_at = ?, updated_at = ?
         WHERE id = ? AND ai_title_attempted_at = ?
           AND status IN ('pending', 'approved')
           AND display_title IS NULL AND ai_title_suggestion IS NULL
-        RETURNING id`).bind(outcome.title, outcome.provenance.model,
-          outcome.provenance.version, outcome.provenance.generated_at,
-          outcome.provenance.generated_at, claimed.id, claimedAt).first<{ id: number }>();
-      if (!stored) {
+          AND ai_title_suggestion_state IS NULL
+        RETURNING id`).bind(outcome.title, outcome.title, outcome.provenance.model,
+          outcome.provenance.version, outcome.provenance.generated_at, acceptedAt,
+          acceptedAt, claimed.id, claimedAt).first<{ id: number }>();
+      if (stored) displayTitleChanged = true;
+      else {
         console.warn(JSON.stringify({ event: 'display_title_ai_store_skipped',
           article_id: claimed.id }));
       }
@@ -223,6 +231,7 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
         article_id: claimed.id }));
     }
   }
+  return displayTitleChanged;
 }
 
 async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
@@ -347,11 +356,22 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     await reconcileHomepageLatestSixAfterSourceCommit(() => reconcileHomepageLatestSix(db), {
       run_id: runId, source_key: sourceKey, route_key: routeKey,
     });
-    // Discovery is already committed and authoritative. Title AI is best-effort advisory work;
+    // Discovery is already committed and authoritative. Title AI is best-effort enrichment;
     // its context remains only in these in-memory feed items and no failure escapes this helper.
     if (displayTitleAi) {
-      try { await generateDisplayTitleSuggestions(db, source, acceptedArticles, displayTitleAi); }
-      catch { console.warn(JSON.stringify({ event: 'display_title_ai_run_failed', run_id: runId })); }
+      let displayTitleChanged = false;
+      try {
+        displayTitleChanged = await generateDisplayTitleSuggestions(
+          db, source, acceptedArticles, displayTitleAi,
+        );
+      } catch {
+        console.warn(JSON.stringify({ event: 'display_title_ai_run_failed', run_id: runId }));
+      }
+      if (displayTitleChanged) {
+        await reconcileHomepageLatestSixAfterSourceCommit(() => reconcileHomepageLatestSix(db), {
+          run_id: runId, source_key: sourceKey, route_key: routeKey,
+        });
+      }
     }
   } catch (error) {
     const code = error instanceof ScanError ? error.code : 'source_scan_failed';

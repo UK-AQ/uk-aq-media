@@ -80,7 +80,8 @@ export class WorkersAiSkeleton implements EnrichmentProvider {
   }
 }
 
-export const DISPLAY_TITLE_PROMPT_VERSION = 'media-display-title-v2';
+
+export const DISPLAY_TITLE_PROMPT_VERSION = 'media-display-title-v3';
 export const DISPLAY_TITLE_AI_THRESHOLD = 66;
 export const DISPLAY_TITLE_AI_MAXIMUM = 66;
 export const DISPLAY_TITLE_AI_MAX_OUTPUT_TOKENS = 64;

@@ -374,7 +374,7 @@ catalogue.
 Source-level and article-level image blocks are both checked on public reads.
 
 Automatic display-title AI runs only for accepted AQN/Guardian feed items whose stored
-publisher title exceeds 64 Unicode characters, whose current status is Pending or
+publisher title exceeds 66 Unicode characters, whose current status is Pending or
 Approved, and which have neither a display title nor a previous automatic attempt/current
 suggestion. It uses only publisher name, original title, the bounded source-specific RSS
 context, author and bounded RSS categories. Discovery commits before inference; title
@@ -382,10 +382,12 @@ AI never participates in relevance, approval or article-state decisions.
 
 Workers AI uses configured model `MEDIA_AI_MODEL` (initially
 `@cf/meta/llama-3.3-70b-instruct-fp8-fast`), prompt version
-`media-display-title-v2`, temperature 0, JSON-schema output and a 64-token response
+`media-display-title-v3`, temperature 0, JSON-schema output and a 64-token response
 bound, with each inference aborted after 20 seconds. Local validation rejects empty, malformed, multiline, control-character or
-over-64-character output. Suggestions remain Pending/internal until accepted, while
-public responses continue exposing only `display_title` plus the original `title`.
+over-66-character output. Successful routine suggestions are accepted immediately as AI-origin display titles while
+retaining the accepted suggestion and full model, prompt and timestamp provenance. Historical
+or explicitly generated Pending suggestions remain available to the manual Accept/Reject controls.
+Public responses continue exposing only `display_title` plus the original `title`.
 `MEDIA_AI_MAX_REQUESTS_PER_RUN=10` is only a per-scan runaway safeguard. Before each
 single-title inference, one atomic D1 statement reserves a conservative estimate against
 `MEDIA_AI_DAILY_NEURON_BUDGET=8000`; the request shape, 64-token output allowance and
