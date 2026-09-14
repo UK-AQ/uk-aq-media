@@ -1,8 +1,18 @@
 # UK AQ Media
 
+## DSAWSP publisher source
+
+Doctors and Scientists Against Wood Smoke Pollution is an enabled, manual-review publisher
+source. Scheduled discovery reads at most 20 newest `/blog/...` links from its first-party
+"Wood smoke news and extras" index. Each candidate receives one bounded, publisher-domain-only
+HTML metadata read for its title, `.blog-date`, `.category-link`, and head preview image; no body
+copy is retained or sent to AI. DSAWSP Webflow previews may use only the exact
+`cdn.prod.website-files.com` hostname and continue through the normal remote-preview proxy.
+
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
-Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, and a
+Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, a bounded
+DSAWSP publisher-index adapter, and a
 separate global GDELT Web NGrams batch that retains English AQ candidates globally but
 promotes only relevant UK-publisher candidates into the existing Media system.
 The public website reaches the approved homepage feed only through the sibling

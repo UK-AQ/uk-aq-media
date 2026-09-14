@@ -82,6 +82,7 @@ const sourcePreviewImageHostnames: Readonly<Record<string, readonly string[]>> =
   'the-guardian': ['i.guim.co.uk'],
   openaq: ['cdn-images-1.medium.com'],
   'phys-org': ['scx2.b-cdn.net'],
+  dsawsp: ['cdn.prod.website-files.com'],
 };
 
 const publisherDomainPreviewImageHostnames: Readonly<Record<string, readonly string[]>> = {

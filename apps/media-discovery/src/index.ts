@@ -1,6 +1,7 @@
 import {
   DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
-  configuredPublisherRssRouteKeys, scheduledGuardianRouteKeys,
+  configuredDsawspIndex, configuredPublisherRssRouteKeys, DSAWSP_INDEX_ROUTE_KEY,
+  scheduledGuardianRouteKeys,
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
 import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
@@ -121,7 +122,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
   try {
     // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
     // Request data never participates in this internally selected, bounded work list.
-    const [aqn, guardian, bbc, sky, independent, carbonBrief, openaq, physOrg] = await Promise.all([
+    const [aqn, guardian, bbc, sky, independent, carbonBrief, openaq, physOrg, dsawsp] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
       loadSource(env.MEDIA_DB, 'bbc-news'),
@@ -130,6 +131,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       loadSource(env.MEDIA_DB, 'carbon-brief'),
       loadSource(env.MEDIA_DB, 'openaq'),
       loadSource(env.MEDIA_DB, 'phys-org'),
+      loadSource(env.MEDIA_DB, 'dsawsp'),
     ]);
     const messages: DiscoveryMessage[] = [];
     if (aqn?.enabled) messages.push({ type: 'source_scan', source_key: 'air-quality-news' });
@@ -144,6 +146,10 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       for (const routeKey of configuredPublisherRssRouteKeys(source)) {
         messages.push({ type: 'source_scan', source_key: source.source_key, route_key: routeKey });
       }
+    }
+    if (dsawsp?.enabled && configuredDsawspIndex(dsawsp)) {
+      messages.push({ type: 'source_scan', source_key: 'dsawsp',
+        route_key: DSAWSP_INDEX_ROUTE_KEY });
     }
     if (messages.length === 0) return 0;
     await env.MEDIA_DISCOVERY_QUEUE.sendBatch(messages.map(body => ({ body })));

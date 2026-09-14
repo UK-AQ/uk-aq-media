@@ -287,6 +287,30 @@
     "image_policy": "remote_preview"
   },
   {
+    "source_key": "dsawsp",
+    "name": "Doctors and Scientists Against Wood Smoke Pollution",
+    "canonical_domain": "dsawsp.org",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "sitemap",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "dsawsp-news-extras",
+          "url": "https://www.dsawsp.org/resources/blog",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "article_head_allowed",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview"
+  },
+  {
     "source_key": "the-times",
     "name": "The Times",
     "canonical_domain": "thetimes.com",
