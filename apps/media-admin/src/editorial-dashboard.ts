@@ -51,6 +51,7 @@ const AddAuthorRuleBody = z.object({
   byline_aliases: z.array(z.string().min(1).max(200)).min(1).max(10),
 }).strict();
 const LookupBody = z.object({ url: z.url().max(2048) }).strict();
+const ArticleAuthorBody = z.object({ author: z.string().max(500).nullable() }).strict();
 const ManualArticleBody = z.object({
   url: z.url().max(2048),
   title: z.string().min(1).max(1000),
@@ -196,6 +197,16 @@ function cleanText(value: unknown, max: number): string | null {
     try { return Number.isSafeInteger(point) ? String.fromCodePoint(point) : ' '; } catch { return ' '; }
   }).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   return result ? result.slice(0, max) : null;
+}
+
+function normaliseArticleAuthor(value: string | null): string | null {
+  if (value === null) return null;
+  if (/[\r\n\u2028\u2029]/u.test(value) || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new HttpError(400, 'invalid_article_author');
+  }
+  const author = value.trim();
+  if ([...author].length > 500) throw new HttpError(400, 'invalid_article_author');
+  return author || null;
 }
 
 function safeHostname(raw: string): string {
@@ -372,6 +383,58 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
   ]);
   return json({ article: { ...article, admin_preview_image_path: article.og_image_url
     ? `/admin/articles/${id}/image` : null }, events: events.results, discovery_evidence: evidence.results });
+}
+
+async function setArticleAuthor(request: Request, db: D1Database, id: number): Promise<Response> {
+  const eventKey = `admin:author:${requireIdempotencyKey(request)}`;
+  const parsed = ArticleAuthorBody.safeParse(await readJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_article_author_body');
+  const author = normaliseArticleAuthor(parsed.data.author);
+  const replay = await db.prepare(`SELECT article_id, event_type, to_status, revision, metadata_json
+    FROM media_article_events WHERE event_key = ?`).bind(eventKey).first<{
+      article_id: number; event_type: string; to_status: string; revision: number;
+      metadata_json: string;
+    }>();
+  if (replay) {
+    let metadata: Record<string, unknown>;
+    try { metadata = JSON.parse(replay.metadata_json) as Record<string, unknown>; }
+    catch { throw new HttpError(409, 'idempotency_key_conflict'); }
+    if (replay.article_id !== id || replay.event_type !== 'edited' ||
+        metadata.field !== 'author' || metadata.after !== author) {
+      throw new HttpError(409, 'idempotency_key_conflict');
+    }
+    return json({ article: { id, status: replay.to_status, author, revision: replay.revision },
+      replayed: true, changed: true });
+  }
+  const current = await db.prepare(`SELECT id, status, author, revision
+    FROM media_articles WHERE id = ?`).bind(id).first<{
+      id: number; status: string; author: string | null; revision: number;
+    }>();
+  if (!current) throw new HttpError(404, 'article_not_found');
+  if (current.author === author) {
+    return json({ article: current, replayed: false, changed: false });
+  }
+  const now = new Date().toISOString();
+  const nextRevision = current.revision + 1;
+  const metadata = JSON.stringify({ field: 'author', before: current.author, after: author });
+  await db.batch([
+    db.prepare(`UPDATE media_articles SET author = ?, mutation_key = ?, revision = ?, updated_at = ?
+      WHERE id = ? AND revision = ? AND author IS ?`)
+      .bind(author, eventKey, nextRevision, now, id, current.revision, current.author),
+    db.prepare(`INSERT INTO media_article_events
+      (article_id, event_key, event_type, actor_type, from_status, to_status, revision,
+       created_at, metadata_json)
+      SELECT id, ?, 'edited', 'admin', status, status, revision, ?, ?
+      FROM media_articles WHERE id = ? AND revision = ? AND mutation_key = ?`)
+      .bind(eventKey, now, metadata, id, nextRevision, eventKey),
+  ]);
+  const event = await db.prepare(`SELECT article_id, to_status, revision
+    FROM media_article_events WHERE event_key = ?`).bind(eventKey).first<{
+      article_id: number; to_status: string; revision: number;
+    }>();
+  if (!event || event.article_id !== id) throw new HttpError(409, 'article_changed');
+  return json({ article: { id, status: event.to_status, author, revision: event.revision },
+    replayed: false, changed: true });
 }
 
 async function listArticles(db: D1Database, search: URLSearchParams): Promise<Response> {
@@ -889,6 +952,11 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
   if (articleMatch) {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     return articleDetail(env.MEDIA_DB, Number(articleMatch[1]));
+  }
+  const articleAuthorMatch = /^\/admin\/articles\/([1-9]\d*)\/author$/.exec(url.pathname);
+  if (articleAuthorMatch) {
+    if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
+    return setArticleAuthor(request, env.MEDIA_DB, Number(articleAuthorMatch[1]));
   }
   const imageMatch = /^\/admin\/articles\/([1-9]\d*)\/image$/.exec(url.pathname);
   if (imageMatch) {
