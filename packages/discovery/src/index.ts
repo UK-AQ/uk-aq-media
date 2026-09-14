@@ -3,8 +3,8 @@ import {
   reconcileHomepageLatestSix, type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
-  D1DisplayTitleNeuronLedger, LocalRequestBudget, WorkersAiDisplayTitleProvider,
-  displayTitleNeuronRates,
+  D1DisplayTitleNeuronLedger, DISPLAY_TITLE_AI_THRESHOLD, LocalRequestBudget,
+  WorkersAiDisplayTitleProvider, displayTitleNeuronRates,
   suggestDisplayTitlePermitted,
 } from '@uk-aq-media/enrichment';
 import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
@@ -138,8 +138,9 @@ async function claimEligibleTitleArticle(db: D1Database, sourceKey: string,
       AND ai_title_suggestion IS NULL
       AND ai_title_suggestion_state IS NULL
       AND ai_title_attempted_at IS NULL
-      AND length(title) > 64
-    RETURNING id, title, author`).bind(claimedAt, article.canonical_url_hash, sourceKey)
+      AND length(title) > ?
+    RETURNING id, title, author`).bind(claimedAt, article.canonical_url_hash, sourceKey,
+      DISPLAY_TITLE_AI_THRESHOLD)
     .first<ClaimedTitleArticle>();
 }
 
