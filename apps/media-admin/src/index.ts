@@ -18,7 +18,7 @@ type Action = 'approve' | 'reject' | 'hide' | 'unhide';
 const transitions: Record<Action, { from: Status[]; to: Status; event: string }> = {
   approve: { from: ['pending', 'rejected'], to: 'approved', event: 'approved' },
   reject: { from: ['pending', 'approved', 'hidden'], to: 'rejected', event: 'rejected' },
-  hide: { from: ['pending', 'approved', 'rejected'], to: 'hidden', event: 'hidden' },
+  hide: { from: ['approved'], to: 'hidden', event: 'hidden' },
   unhide: { from: ['hidden'], to: 'approved', event: 'unhidden' },
 };
 
@@ -527,9 +527,9 @@ async function mutate(request: Request, db: D1Database, id: number, action: Acti
   // One UPDATE plus its trigger is atomic, including the unique idempotency event key.
   const changed = await db.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
     revision = revision + 1, updated_at = ?,
-    approval_method = CASE WHEN ? = 'approve' THEN 'manual' ELSE approval_method END,
-    approval_author_rule_key = CASE WHEN ? = 'approve' THEN NULL ELSE approval_author_rule_key END,
-    approved_at = CASE WHEN ? = 'approve' THEN ? ELSE approved_at END,
+    approval_method = CASE WHEN ? IN ('approve', 'unhide') THEN 'manual' ELSE approval_method END,
+    approval_author_rule_key = CASE WHEN ? IN ('approve', 'unhide') THEN NULL ELSE approval_author_rule_key END,
+    approved_at = CASE WHEN ? IN ('approve', 'unhide') THEN ? ELSE approved_at END,
     rejected_at = CASE WHEN ? = 'reject' THEN ? ELSE rejected_at END,
     hidden_at = CASE WHEN ? = 'hide' THEN ? WHEN ? = 'unhide' THEN NULL ELSE hidden_at END
     WHERE id = ? AND status IN (${placeholders})
