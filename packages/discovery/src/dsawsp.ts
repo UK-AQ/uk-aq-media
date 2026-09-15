@@ -37,8 +37,7 @@ function attribute(attributes: string, name: string): string | null {
 
 export function configuredDsawspIndex(source: Source): boolean {
   const route = source.discovery_config.routes?.[0];
-  return source.source_key === 'dsawsp' && source.name ===
-      'Doctors and Scientists Against Wood Smoke Pollution' &&
+  return source.source_key === 'dsawsp' && source.name === 'DSAWSP' &&
     source.canonical_domain === 'dsawsp.org' && source.source_type === 'publisher' &&
     source.enabled && source.publication_policy === 'manual' && source.review_level === 'standard' &&
     source.priority === 50 && source.discovery_method === 'sitemap' &&
