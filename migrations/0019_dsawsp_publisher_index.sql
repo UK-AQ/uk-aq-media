@@ -33,32 +33,32 @@ SET source_key = 'dsawsp', publisher =
   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE source_key IN (
   SELECT source_key FROM media_sources
-  WHERE source_key != 'dsawsp' AND lower(replace(canonical_domain, 'www.', '')) = 'dsawsp.org'
+  WHERE source_key != 'dsawsp' AND lower(canonical_domain) IN ('dsawsp.org', 'www.dsawsp.org')
 );
 
 UPDATE media_article_discovery_evidence
 SET source_key = 'dsawsp'
 WHERE source_key IN (
   SELECT source_key FROM media_sources
-  WHERE source_key != 'dsawsp' AND lower(replace(canonical_domain, 'www.', '')) = 'dsawsp.org'
+  WHERE source_key != 'dsawsp' AND lower(canonical_domain) IN ('dsawsp.org', 'www.dsawsp.org')
 );
 
 UPDATE media_discovery_runs
 SET source_key = 'dsawsp', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE source_key IN (
   SELECT source_key FROM media_sources
-  WHERE source_key != 'dsawsp' AND lower(replace(canonical_domain, 'www.', '')) = 'dsawsp.org'
+  WHERE source_key != 'dsawsp' AND lower(canonical_domain) IN ('dsawsp.org', 'www.dsawsp.org')
 );
 
 UPDATE media_author_rules
 SET source_key = 'dsawsp', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE source_key IN (
   SELECT source_key FROM media_sources
-  WHERE source_key != 'dsawsp' AND lower(replace(canonical_domain, 'www.', '')) = 'dsawsp.org'
+  WHERE source_key != 'dsawsp' AND lower(canonical_domain) IN ('dsawsp.org', 'www.dsawsp.org')
 );
 
 DELETE FROM media_sources
-WHERE source_key != 'dsawsp' AND lower(replace(canonical_domain, 'www.', '')) = 'dsawsp.org'
+WHERE source_key != 'dsawsp' AND lower(canonical_domain) IN ('dsawsp.org', 'www.dsawsp.org')
   AND NOT EXISTS (SELECT 1 FROM media_articles a WHERE a.source_key = media_sources.source_key)
   AND NOT EXISTS (SELECT 1 FROM media_article_discovery_evidence e
     WHERE e.source_key = media_sources.source_key)

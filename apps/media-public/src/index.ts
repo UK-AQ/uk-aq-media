@@ -27,13 +27,15 @@ type HomepageRow = {
   og_image_url: string | null;
 };
 
-function cursor(raw: string | null): [string, number] | null {
+export function decodeArticleCursor(raw: string | null): [string, number] | null {
   if (!raw) return null;
   try {
     if (raw.length > 200) throw new Error();
     const value: unknown = JSON.parse(atob(raw));
     if (!Array.isArray(value) || value.length !== 2 ||
-        typeof value[0] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value[0]) ||
+        typeof value[0] !== 'string' ||
+        !(/^\d{4}-\d{2}-\d{2}$/.test(value[0]) ||
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value[0])) ||
         typeof value[1] !== 'number' || !Number.isSafeInteger(value[1]) || value[1] < 1) throw new Error();
     return [value[0], value[1]];
   } catch { throw new HttpError(400, 'invalid_before_cursor'); }
@@ -265,7 +267,7 @@ export default {
       if (url.pathname !== '/articles') return json({ error: 'not_found' }, 404);
       if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
       const limit = boundedLimit(url);
-      const before = cursor(url.searchParams.get('before'));
+      const before = decodeArticleCursor(url.searchParams.get('before'));
       const statement = env.MEDIA_DB.prepare(`SELECT a.id, a.source_key, a.canonical_url,
         a.title, a.display_title, a.display_title_origin, a.publisher, a.author,
         a.published_at, a.discovered_at, a.feed_sort_at,

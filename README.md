@@ -216,10 +216,10 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 28 }`
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 29 }`
   when all current routes and all three Guardian author rules are enabled: one AQN scan,
   eleven Guardian routes, four BBC routes, four Sky routes, five Independent routes and
-  one route for each specialist publisher.
+  one route for each RSS specialist publisher, and one DSAWSP publisher-index route.
   Disabled or structurally mismatched author rules omit only their profile route, so
   `queued` reports the actual bounded message count. The
   count reflects only enabled, internally configured supported work and may be zero.
@@ -255,7 +255,7 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
 helper that selects only allowlisted AQN, Guardian, BBC News, Sky News and Independent
-work, plus Carbon Brief, OpenAQ and Phys.org, when each D1 source is current and enabled.
+work, plus Carbon Brief, OpenAQ, Phys.org and DSAWSP, when each D1 source is current and enabled.
 The caller cannot supply source or
 route selection. AQN retains its route-less `source_scan`; every Guardian and generic
 publisher RSS route receives its own `source_scan`. The consumer reloads and validates

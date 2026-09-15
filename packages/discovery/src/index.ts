@@ -36,7 +36,8 @@ export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
 export {
   configuredDsawspIndex, discoverDsawsp, extractDsawspArticleMetadata,
-  extractDsawspIndexUrls, DSAWSP_INDEX_ROUTE_KEY, DSAWSP_INDEX_URL, DSAWSP_MAX_ITEMS,
+  extractDsawspIndexUrls, extractDsawspNextIndexUrl, DSAWSP_INDEX_ROUTE_KEY,
+  DSAWSP_INDEX_URL, DSAWSP_MAX_INDEX_PAGES, DSAWSP_MAX_ITEMS,
 } from './dsawsp';
 export {
   configuredPublisherRssRouteKeys, discoverPublisherRss, parsePublisherRssFeed,

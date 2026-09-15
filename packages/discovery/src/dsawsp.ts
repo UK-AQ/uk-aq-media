@@ -7,6 +7,7 @@ import { ScanError } from './rss';
 export const DSAWSP_INDEX_ROUTE_KEY = 'dsawsp-news-extras';
 export const DSAWSP_INDEX_URL = 'https://www.dsawsp.org/resources/blog';
 export const DSAWSP_MAX_ITEMS = 20;
+export const DSAWSP_MAX_INDEX_PAGES = 4;
 const INDEX_MAX_BYTES = 512 * 1024;
 const ARTICLE_MAX_BYTES = 256 * 1024;
 const TIMEOUT_MS = 15_000;
@@ -60,6 +61,35 @@ export function extractDsawspIndexUrls(html: string, source: Source): string[] {
     if (urls.size >= DSAWSP_MAX_ITEMS) break;
   }
   return [...urls];
+}
+
+export function extractDsawspNextIndexUrl(html: string, currentUrl: string,
+  source: Source): string | null {
+  for (const match of html.matchAll(/<a\b([^>]*)>/gi)) {
+    const attrs = match[1] ?? '';
+    const classes = attribute(attrs, 'class')?.split(/\s+/) ?? [];
+    if (!classes.includes('w-pagination-next')) continue;
+    const raw = attribute(attrs, 'href');
+    if (!raw) return null;
+    let candidate: URL;
+    let current: URL;
+    try {
+      candidate = new URL(raw, currentUrl);
+      current = new URL(currentUrl);
+    } catch { return null; }
+    if (!publisherHttpsUrl(candidate.href, source) ||
+        candidate.origin !== new URL(DSAWSP_INDEX_URL).origin ||
+        candidate.pathname !== new URL(DSAWSP_INDEX_URL).pathname || candidate.hash ||
+        candidate.searchParams.size !== 1) return null;
+    const entry = [...candidate.searchParams.entries()][0];
+    if (!entry) return null;
+    const [key, value] = entry;
+    const currentPage = [...current.searchParams.values()][0] ?? '1';
+    if (!/^[a-z0-9]+_page$/.test(key ?? '') || !/^\d+$/.test(value ?? '') ||
+        Number(value) !== Number(currentPage) + 1) return null;
+    return candidate.href;
+  }
+  return null;
 }
 
 function dsawspDate(value: string): string | null {
@@ -156,9 +186,25 @@ export async function discoverDsawsp(source: Source, fetcher: typeof fetch = fet
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   if (!configuredDsawspIndex(source)) throw new ScanError('dsawsp_config_mismatch');
-  const index = await fetchBoundedHtml(DSAWSP_INDEX_URL, source, INDEX_MAX_BYTES,
-    value => extractDsawspIndexUrls(value, source).length >= DSAWSP_MAX_ITEMS, fetcher);
-  const urls = extractDsawspIndexUrls(index, source);
+  const urls: string[] = [];
+  const seenUrls = new Set<string>();
+  const fetchedPages = new Set<string>();
+  let indexUrl: string | null = DSAWSP_INDEX_URL;
+  for (let page = 0; indexUrl && page < DSAWSP_MAX_INDEX_PAGES &&
+      urls.length < DSAWSP_MAX_ITEMS; page++) {
+    if (fetchedPages.has(indexUrl)) break;
+    fetchedPages.add(indexUrl);
+    const currentUrl = indexUrl;
+    const index = await fetchBoundedHtml(currentUrl, source, INDEX_MAX_BYTES,
+      value => extractDsawspIndexUrls(value, source).length >= DSAWSP_MAX_ITEMS, fetcher);
+    for (const articleUrl of extractDsawspIndexUrls(index, source)) {
+      if (seenUrls.has(articleUrl)) continue;
+      seenUrls.add(articleUrl);
+      urls.push(articleUrl);
+      if (urls.length >= DSAWSP_MAX_ITEMS) break;
+    }
+    indexUrl = extractDsawspNextIndexUrl(index, currentUrl, source);
+  }
   const articles: DiscoveredArticle[] = [];
   let invalid = 0;
   for (const canonical of urls) {
