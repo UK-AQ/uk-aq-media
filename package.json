@@ -18,13 +18,15 @@
     "guardian-image:check": "tsx scripts/guardian-image-quality-check.ts",
     "article-head:check": "tsx scripts/article-head-metadata-check.ts",
     "publisher-rss:check": "tsx scripts/publisher-rss-discovery-check.ts",
+    "dsawsp:check": "tsx scripts/dsawsp-discovery-check.ts",
     "remote-preview-image:check": "tsx scripts/remote-preview-image-check.ts",
     "admin-metadata-provider:check": "tsx scripts/admin-metadata-provider-check.ts",
     "homepage-latest-six:check": "tsx scripts/homepage-latest-six-check.ts",
+    "public-feed-cursor:check": "tsx scripts/public-feed-cursor-check.ts",
     "gdelt:check": "tsx scripts/gdelt-web-ngrams-check.ts",
     "gdelt:run": "tsx scripts/gdelt-web-ngrams-batch.ts",
     "seed:generate": "tsx scripts/source-seed.ts",
-    "check": "npm run seed:check && npm run ai:check && npm run guardian-image:check && npm run article-head:check && npm run publisher-rss:check && npm run remote-preview-image:check && npm run admin-metadata-provider:check && npm run homepage-latest-six:check && npm run gdelt:check && npm run typecheck && npm run build"
+    "check": "npm run seed:check && npm run ai:check && npm run guardian-image:check && npm run article-head:check && npm run publisher-rss:check && npm run dsawsp:check && npm run remote-preview-image:check && npm run admin-metadata-provider:check && npm run homepage-latest-six:check && npm run public-feed-cursor:check && npm run gdelt:check && npm run typecheck && npm run build"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260907.1",

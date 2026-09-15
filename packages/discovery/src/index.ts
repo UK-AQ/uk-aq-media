@@ -9,6 +9,7 @@ import {
 } from '@uk-aq-media/enrichment';
 import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
 import { discoverAqn } from './aqn';
+import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
 import {
   configuredPublisherRssRouteKeys, discoverPublisherRss,
 } from './publisher-rss';
@@ -33,6 +34,11 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
+export {
+  configuredDsawspIndex, discoverDsawsp, extractDsawspArticleMetadata,
+  extractDsawspIndexUrls, extractDsawspNextIndexUrl, DSAWSP_INDEX_ROUTE_KEY,
+  DSAWSP_INDEX_URL, DSAWSP_MAX_INDEX_PAGES, DSAWSP_MAX_ITEMS,
+} from './dsawsp';
 export {
   configuredPublisherRssRouteKeys, discoverPublisherRss, parsePublisherRssFeed,
   PUBLISHER_RSS_ROUTES,
@@ -295,6 +301,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         return;
       }
       result = await discoverGuardian(source, routeKey);
+    } else if (sourceKey === 'dsawsp' && routeKey && configuredDsawspIndex(source)) {
+      result = await discoverDsawsp(source);
     } else if (routeKey && configuredPublisherRssRouteKeys(source).includes(routeKey)) {
       result = await discoverPublisherRss(source, routeKey);
     } else {
@@ -316,7 +324,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
-      const publisherRelevant = sourceKey !== 'air-quality-news' && sourceKey !== 'the-guardian'
+      const publisherRelevant = !['air-quality-news', 'the-guardian', 'dsawsp'].includes(sourceKey)
         ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
           canonical_url: article.canonical_url, categories: article.categories }).relevant : true;
       if ((guardianEvaluation && !guardianEvaluation.accepted) || !publisherRelevant) {
@@ -342,7 +350,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const approvalObservationKey = selectedAutoRule
         ? `author-auto:${runId}:${article.canonical_url_hash}` : null;
       statements.push(persistArticle(db, source, article, matchedRules, approvalObservationKey, now));
-      statements.push(persistDiscoveryEvidence(db, source, 'publisher_rss', routeKey ?? sourceKey,
+      const providerKey = sourceKey === 'dsawsp' ? 'publisher_web_index' : 'publisher_rss';
+      statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
         article, matchedRules, approvalObservationKey, now));
     }
     statements.push(db.prepare(`UPDATE media_discovery_runs SET status = 'succeeded',

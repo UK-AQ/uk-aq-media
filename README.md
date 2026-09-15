@@ -1,8 +1,18 @@
 # UK AQ Media
 
+## DSAWSP publisher source
+
+Doctors and Scientists Against Wood Smoke Pollution is an enabled, manual-review publisher
+source. Scheduled discovery reads at most 20 newest `/blog/...` links from its first-party
+"Wood smoke news and extras" index. Each candidate receives one bounded, publisher-domain-only
+HTML metadata read for its title, `.blog-date`, `.category-link`, and head preview image; no body
+copy is retained or sent to AI. DSAWSP Webflow previews may use only the exact
+`cdn.prod.website-files.com` hostname and continue through the normal remote-preview proxy.
+
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
-Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, and a
+Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, a bounded
+DSAWSP publisher-index adapter, and a
 separate global GDELT Web NGrams batch that retains English AQ candidates globally but
 promotes only relevant UK-publisher candidates into the existing Media system.
 The public website reaches the approved homepage feed only through the sibling
@@ -206,10 +216,10 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 28 }`
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 29 }`
   when all current routes and all three Guardian author rules are enabled: one AQN scan,
   eleven Guardian routes, four BBC routes, four Sky routes, five Independent routes and
-  one route for each specialist publisher.
+  one route for each RSS specialist publisher, and one DSAWSP publisher-index route.
   Disabled or structurally mismatched author rules omit only their profile route, so
   `queued` reports the actual bounded message count. The
   count reflects only enabled, internally configured supported work and may be zero.
@@ -245,7 +255,7 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
 helper that selects only allowlisted AQN, Guardian, BBC News, Sky News and Independent
-work, plus Carbon Brief, OpenAQ and Phys.org, when each D1 source is current and enabled.
+work, plus Carbon Brief, OpenAQ, Phys.org and DSAWSP, when each D1 source is current and enabled.
 The caller cannot supply source or
 route selection. AQN retains its route-less `source_scan`; every Guardian and generic
 publisher RSS route receives its own `source_scan`. The consumer reloads and validates

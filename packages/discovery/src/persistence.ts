@@ -16,28 +16,32 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
     ) AND NOT EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id AND e.provider_key = 'publisher_rss'
+      WHERE e.article_id = media_articles.id
+        AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
     ) THEN excluded.source_key ELSE media_articles.source_key END,
     original_url = CASE WHEN EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
     ) AND NOT EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id AND e.provider_key = 'publisher_rss'
+      WHERE e.article_id = media_articles.id
+        AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
     ) THEN excluded.original_url ELSE media_articles.original_url END,
     title = CASE WHEN EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
     ) AND NOT EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id AND e.provider_key = 'publisher_rss'
+      WHERE e.article_id = media_articles.id
+        AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
     ) THEN excluded.title ELSE media_articles.title END,
     publisher = CASE WHEN EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
     ) AND NOT EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id AND e.provider_key = 'publisher_rss'
+      WHERE e.article_id = media_articles.id
+        AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
     ) THEN excluded.publisher ELSE media_articles.publisher END,
     published_at = coalesce(media_articles.published_at, excluded.published_at),
     author = coalesce(media_articles.author, excluded.author),
@@ -48,7 +52,8 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `
           WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
         ) AND NOT EXISTS (
           SELECT 1 FROM media_article_discovery_evidence e
-          WHERE e.article_id = media_articles.id AND e.provider_key = 'publisher_rss'
+          WHERE e.article_id = media_articles.id
+            AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
         )))
         THEN excluded.og_image_url ELSE media_articles.og_image_url END,
     image_policy = CASE WHEN EXISTS (
@@ -56,8 +61,11 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
     ) AND NOT EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id AND e.provider_key = 'publisher_rss'
+      WHERE e.article_id = media_articles.id
+        AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
     ) THEN excluded.image_policy ELSE media_articles.image_policy END,
+    topics_json = CASE WHEN media_articles.topics_json = '[]' AND excluded.topics_json != '[]'
+      THEN excluded.topics_json ELSE media_articles.topics_json END,
     display_title = coalesce(media_articles.display_title, excluded.display_title),
     display_title_origin = CASE
       WHEN media_articles.display_title IS NULL AND excluded.display_title IS NOT NULL
