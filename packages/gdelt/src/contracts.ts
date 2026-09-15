@@ -14,7 +14,11 @@ export const GDELT_INGEST_CHUNK_SIZE = 2;
 export const GDELT_MAX_NGRAM_COMPRESSED_BYTES = 96 * 1024 * 1024;
 export const GDELT_MAX_TOC_COMPRESSED_BYTES = 64 * 1024 * 1024;
 export const GDELT_MAX_DECOMPRESSED_BYTES = 768 * 1024 * 1024;
-export const GDELT_MAX_LINE_BYTES = 64 * 1024;
+export const GDELT_MAX_NGRAM_LINE_BYTES = 64 * 1024;
+// TOC rows contain provider metadata beyond the five fields retained below and can
+// legitimately be much larger than the deliberately small three-column NGram rows.
+// Keep this independent bound well below the whole decompressed-file allowance.
+export const GDELT_MAX_TOC_LINE_BYTES = 1024 * 1024;
 export const GDELT_HEAD_TIMEOUT_MS = 15_000;
 export const GDELT_FILE_TIMEOUT_MS = 120_000;
 export const GDELT_INGEST_TIMEOUT_MS = 30_000;
