@@ -203,7 +203,7 @@ function byteGuard(maximum: number, code: string): Transform {
   } });
 }
 
-async function* boundedLines(stream: Readable, fileStamp: string, fileKind: GdeltFileKind,
+export async function* boundedLines(stream: Readable, fileStamp: string, fileKind: GdeltFileKind,
   lineLimit: number): AsyncGenerator<string> {
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
   let pending = '';
