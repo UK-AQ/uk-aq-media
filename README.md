@@ -96,7 +96,9 @@ Exact bounds are a five-minute safety lag, 120-minute initial lookback, 15-minut
 at most 240 new catch-up minutes and six new complete pairs per run. Limits are 200 matched
 candidates/file, 600/run and two candidates per 128 KiB ingestion request. HEAD, file and
 ingestion timeouts are 15, 120 and 30 seconds. Compressed caps are 96 MiB for NGram and
-64 MiB for TOC; each decompressed stream is capped at 768 MiB and each line at 64 KiB.
+64 MiB for TOC; each decompressed stream is capped at 768 MiB. Raw decompressed-line framing
+ceilings are 128 KiB for NGram and 1 MiB for TOC. The larger NGram framing allowance does not
+make 128 KiB quadgrams valid: accepted quadgrams remain capped semantically at 4,096 characters.
 Article URLs are HTTPS-only and capped at 2,048 characters; titles at 1,000 characters.
 Both objects missing is normal. Partial pairs and structurally broken files fail without
 advancing past undurable work.

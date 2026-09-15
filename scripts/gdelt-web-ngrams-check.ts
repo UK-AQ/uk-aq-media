@@ -1,20 +1,22 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { Readable } from 'node:stream';
 import {
   canonicalUrlHash, canonicalizeUrl, type DiscoveredArticle, SourceSchema,
 } from '@uk-aq-media/core';
 import { persistArticle, persistDiscoveryEvidence } from '@uk-aq-media/discovery/persistence';
 import {
-  domainMatchesBoundary, gdeltArticleIdentityUrl, gdeltWindow, matchGdeltFamilies,
+  domainMatchesBoundary, GDELT_MAX_NGRAM_LINE_BYTES, gdeltArticleIdentityUrl, gdeltWindow,
+  matchGdeltFamilies,
   registrablePublisherDomain, type GdeltCandidateInput,
 } from '@uk-aq-media/gdelt';
 import {
   completeGdeltFile, ingestGdeltChunk, startGdeltFile, startGdeltRun,
 } from '@uk-aq-media/gdelt/ingest';
 import {
-  fixtureLines, gdeltIngestResponseErrorCode, parseNgramLine, parseTocLine, resolveTocLines,
-  scanNgramLines,
+  boundedLines, fixtureLines, gdeltIngestResponseErrorCode, parseNgramLine, parseTocLine,
+  resolveTocLines, scanNgramLines,
 } from '@uk-aq-media/gdelt/scanner';
 import mediaDiscoveryWorker, { assertEmptyGdeltStartBody } from '../apps/media-discovery/src/index';
 import { reconcileHomepageLatestSixAfterSourceCommit } from '@uk-aq-media/discovery';
@@ -128,6 +130,28 @@ assert.throws(() => parseNgramLine('broken\trow'), /gdelt_ngram_tsv_invalid/);
 const overlongNgram = `doc-overlong\t${'x'.repeat(4097)}\t1`;
 assert.throws(() => parseNgramLine(overlongNgram), /gdelt_ngram_tsv_invalid/,
   'the 4,096-character QUADGRAM bound must remain strict');
+const observedSize = 67_673;
+const moderatelyOversizedNgram = `doc-observed\t${'x'.repeat(observedSize - 15)}\t1`;
+assert.equal(Buffer.byteLength(moderatelyOversizedNgram), observedSize);
+const framedNgrams = boundedLines(Readable.from([Buffer.from(
+  `${moderatelyOversizedNgram}\ndoc-after\tair quality after malformed row\t1\n`,
+)]), '20260915054600', 'ngrams', GDELT_MAX_NGRAM_LINE_BYTES);
+const framedScan = await scanNgramLines(framedNgrams);
+assert.equal(framedScan.malformed_ngram_rows, 1,
+  'a 67 KiB semantically invalid row must be counted after passing framing');
+assert.equal(framedScan.ngram_rows, 1, 'a valid row following the malformed row must be processed');
+assert.equal(framedScan.matched_docs.has('doc-after'), true);
+const fatalRawNgram = 'x'.repeat(GDELT_MAX_NGRAM_LINE_BYTES + 1);
+await assert.rejects(async () => {
+  for await (const _line of boundedLines(Readable.from([Buffer.from(fatalRawNgram)]),
+    '20260915054600', 'ngrams', GDELT_MAX_NGRAM_LINE_BYTES)) { /* consume */ }
+}, error => {
+  assert.equal((error as { code?: unknown }).code, 'gdelt_line_too_large');
+  assert.equal((error as { file_kind?: unknown }).file_kind, 'ngrams');
+  assert.equal((error as { configured_limit_bytes?: unknown }).configured_limit_bytes,
+    GDELT_MAX_NGRAM_LINE_BYTES);
+  return true;
+});
 const tolerantNgrams = await scanNgramLines(fixtureLines([
   'doc-valid-1\tair quality in London\t1', overlongNgram,
   'doc-valid-2\twildfires affect the region\t1',

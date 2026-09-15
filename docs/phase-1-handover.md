@@ -33,9 +33,11 @@ mutations; candidate-only writes do not reconcile.
 Exact bounds are five minutes safety lag, 120 minutes initial lookback, 15 minutes overlap,
 240 new catch-up minutes and six new complete pairs per run. Limits are 200 candidates/file,
 600 candidates/run, two candidates/request, 128 KiB/request, 96 MiB compressed NGram, 64 MiB
-compressed TOC, 768 MiB decompressed/file stream, 64 KiB/NGram line, 1 MiB/TOC line, 2,048
-characters/URL and 1,000 characters/title. The larger TOC line allowance accommodates provider
-metadata that is parsed but not retained; it does not change the whole-file bound. HEAD/file/ingestion
+compressed TOC, 768 MiB decompressed/file stream, 128 KiB/NGram raw line framing, 1 MiB/TOC line,
+2,048 characters/URL and 1,000 characters/title. The NGram framing ceiling permits moderately
+oversized malformed provider rows to reach semantic validation; it does not change the accepted
+quadgram maximum of 4,096 characters. The larger TOC line allowance accommodates provider metadata
+that is parsed but not retained; neither line allowance changes the whole-file bound. HEAD/file/ingestion
 timeouts are 15/120/30 seconds. Both objects missing is
 harmless; a partial pair, invalid TSV/gzip, unresolved matched DOCID or exceeded bound fails
 without advancing beyond durable work. A malformed individual TOC row is counted and skipped
