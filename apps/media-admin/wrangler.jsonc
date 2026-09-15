@@ -21,6 +21,14 @@
       "migrations_dir": "../../migrations"
     }
   ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "MEDIA_BLUESKY_QUEUE",
+        "queue": "uk-aq-media-bluesky"
+      }
+    ]
+  },
   "ai": {
     "binding": "AI"
   },

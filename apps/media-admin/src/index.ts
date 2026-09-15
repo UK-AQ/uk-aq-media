@@ -1,4 +1,5 @@
 import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, reconcileHomepageLatestSix, z,
+  validateBlueskyTemplate,
   loadSource, type Status } from '@uk-aq-media/core';
 import {
   discoverGuardianPreviewForArticle, GUARDIAN_ROUTES,
@@ -36,6 +37,12 @@ const GuardianBulkImageApplyBody = z.object({
   confirm_bulk_replace: z.literal(true),
   repair_token: z.string().regex(/^guardian-image-repair-v1:[a-f0-9]{64}$/),
 }).strict();
+const BlueskySettingsBody = z.object({
+  publishing_enabled: z.boolean(),
+  default_message_template: z.string().min(1).max(2000),
+  cooldown_minutes: z.number().int().min(1).max(1440),
+}).strict();
+const StatusMutationBody = z.object({ post_to_bluesky: z.boolean().optional() }).strict();
 const MAX_ADMIN_BODY_BYTES = 4096;
 const MAX_HUMAN_DISPLAY_TITLE_CHARACTERS = 500;
 const NEURON_MICRO_UNITS = 1_000_000;
@@ -229,6 +236,11 @@ async function boundedJson(request: Request): Promise<unknown> {
   }
   try { return JSON.parse(body) as unknown; }
   catch { throw new HttpError(400, 'invalid_json'); }
+}
+
+async function boundedOptionalJson(request: Request): Promise<unknown> {
+  if (request.body === null || request.headers.get('content-length') === '0') return {};
+  return boundedJson(request);
 }
 
 function normaliseHumanDisplayTitle(value: string | null): string | null {
@@ -517,15 +529,85 @@ async function applyBulkGuardianImageRefresh(request: Request,
   } });
 }
 
-async function mutate(request: Request, db: D1Database, id: number, action: Action): Promise<Response> {
+async function blueskySettings(request: Request, env: MediaAdminEnv): Promise<Response> {
+  if (request.method === 'GET') {
+    const settings = await env.MEDIA_DB.prepare(`SELECT publishing_enabled, cooldown_seconds,
+      default_message_template, activation_event_id, last_successful_post_at, updated_at
+      FROM media_bluesky_settings WHERE id = 1`).first();
+    return json({ account: '@ukaq.co.uk', settings });
+  }
+  if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
+  const key = request.headers.get('Idempotency-Key');
+  if (!key || !/^[A-Za-z0-9_-]{16,100}$/.test(key)) throw new HttpError(400, 'idempotency_key_required');
+  const parsed = BlueskySettingsBody.safeParse(await boundedJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_bluesky_settings');
+  try { validateBlueskyTemplate(parsed.data.default_message_template); }
+  catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'message_template_invalid'); }
+  const requestJson = JSON.stringify(parsed.data);
+  const replay = await env.MEDIA_DB.prepare(`SELECT request_json FROM media_bluesky_settings_requests
+    WHERE request_key = ?`).bind(key).first<{ request_json: string }>();
+  if (replay && replay.request_json !== requestJson) throw new HttpError(409, 'idempotency_key_conflict');
+  const now = new Date().toISOString();
+  // COALESCE captures the high watermark once only, in the same D1 statement that enables.
+  if (!replay) await env.MEDIA_DB.batch([
+    env.MEDIA_DB.prepare(`UPDATE media_bluesky_settings SET publishing_enabled = ?,
+      cooldown_seconds = ?, default_message_template = ?,
+      activation_event_id = CASE WHEN ? = 1 THEN coalesce(activation_event_id,
+        (SELECT coalesce(max(id), 0) FROM media_article_events)) ELSE activation_event_id END,
+      updated_at = ? WHERE id = 1`).bind(Number(parsed.data.publishing_enabled),
+        parsed.data.cooldown_minutes * 60, parsed.data.default_message_template,
+        Number(parsed.data.publishing_enabled), now),
+    env.MEDIA_DB.prepare(`INSERT INTO media_bluesky_settings_requests
+      (request_key, request_json, created_at) VALUES (?, ?, ?)`).bind(key, requestJson, now),
+  ]);
+  if (!replay && parsed.data.publishing_enabled) {
+    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+  }
+  const settings = await env.MEDIA_DB.prepare(`SELECT publishing_enabled, cooldown_seconds,
+    default_message_template, activation_event_id, last_successful_post_at, updated_at
+    FROM media_bluesky_settings WHERE id = 1`).first();
+  return json({ account: '@ukaq.co.uk', settings, replayed: Boolean(replay) });
+}
+
+async function mutate(request: Request, env: MediaAdminEnv, id: number, action: Action): Promise<Response> {
+  const db = env.MEDIA_DB;
   const key = request.headers.get('Idempotency-Key');
   if (!key || !/^[A-Za-z0-9_-]{16,100}$/.test(key)) throw new HttpError(400, 'idempotency_key_required');
   const eventKey = `admin:${key}`;
   const transition = transitions[action];
+  const parsedBody = StatusMutationBody.safeParse(await boundedOptionalJson(request));
+  if (!parsedBody.success) throw new HttpError(400, 'invalid_status_mutation_body');
+  const requestedPost = parsedBody.data.post_to_bluesky === true;
+  const replay = await db.prepare(`SELECT article_id, event_type, to_status, revision
+    FROM media_article_events WHERE event_key = ?`).bind(eventKey)
+    .first<{ article_id: number; event_type: string; to_status: Status; revision: number }>();
+  if (replay) {
+    if (replay.article_id !== id || replay.event_type !== transition.event) {
+      throw new HttpError(409, 'idempotency_key_conflict');
+    }
+    const publication = await db.prepare(`SELECT id, status FROM media_bluesky_publications
+      WHERE publication_key = ?`).bind(`admin-request:${key}`).first();
+    if (requestedPost !== Boolean(publication)) throw new HttpError(409, 'idempotency_key_conflict');
+    await reconcileHomepageLatestSix(db);
+    return json({ article: { id, status: replay.to_status, revision: replay.revision },
+      bluesky_publication: publication, replayed: true });
+  }
+  const before = await db.prepare(`SELECT status, og_image_url, image_policy,
+    (SELECT image_policy FROM media_sources WHERE source_key = a.source_key) AS source_image_policy
+    FROM media_articles a WHERE id = ?`).bind(id).first<{
+      status: Status; og_image_url: string | null; image_policy: string; source_image_policy: string }>();
+  if (!before) throw new HttpError(404, 'article_not_found');
+  const manualReason = action === 'approve' && before.status === 'rejected' ? 'rejected_repost'
+    : action === 'unhide' && before.status === 'hidden' ? 'unhidden_repost' : null;
+  if (requestedPost && !manualReason) throw new HttpError(400, 'post_to_bluesky_not_available');
+  if (requestedPost && (!before.og_image_url || before.image_policy !== 'remote_preview' ||
+      before.source_image_policy !== 'remote_preview')) throw new HttpError(409, 'thumbnail_missing');
   const now = new Date().toISOString();
   const placeholders = transition.from.map(() => '?').join(', ');
-  // One UPDATE plus its trigger is atomic, including the unique idempotency event key.
-  const changed = await db.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
+  // D1 batch is transactional: the status trigger's event and optional manual
+  // outbox row commit together or neither does.
+  const statements = [db.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
     revision = revision + 1, updated_at = ?,
     approval_method = CASE WHEN ? IN ('approve', 'unhide') THEN 'manual' ELSE approval_method END,
     approval_author_rule_key = CASE WHEN ? IN ('approve', 'unhide') THEN NULL ELSE approval_author_rule_key END,
@@ -534,22 +616,28 @@ async function mutate(request: Request, db: D1Database, id: number, action: Acti
     hidden_at = CASE WHEN ? = 'hide' THEN ? WHEN ? = 'unhide' THEN NULL ELSE hidden_at END
     WHERE id = ? AND status IN (${placeholders})
       AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)
-    RETURNING id, status, revision`).bind(transition.to, eventKey, now,
+    `).bind(transition.to, eventKey, now,
       action, action, action, now, action, now, action, now, action, id,
-      ...transition.from, eventKey)
-    .first<{ id: number; status: Status; revision: number }>();
-  if (changed) {
-    await reconcileHomepageLatestSix(db);
-    return json({ article: changed, replayed: false });
+      ...transition.from, eventKey)];
+  if (requestedPost && manualReason) {
+    statements.push(db.prepare(`INSERT INTO media_bluesky_publications
+        (article_id, approval_event_id, publication_key, publication_reason, status, created_at, updated_at)
+        SELECT ?, NULL, ?, ?, 'queued', ?, ?
+        WHERE EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ? AND article_id = ?)`)
+      .bind(id, `admin-request:${key}`, manualReason, now, now, eventKey, id));
   }
+  await db.batch(statements);
   const event = await db.prepare(`SELECT article_id, event_type, to_status, revision
     FROM media_article_events WHERE event_key = ?`).bind(eventKey)
     .first<{ article_id: number; event_type: string; to_status: Status; revision: number }>();
   if (event) {
-    if (event.article_id !== id || event.event_type !== transition.event) throw new HttpError(409, 'idempotency_key_conflict');
-    // Return the original mutation receipt; it need not be the article's current state.
     await reconcileHomepageLatestSix(db);
-    return json({ article: { id, status: event.to_status, revision: event.revision }, replayed: true });
+    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
+    const publication = await db.prepare(`SELECT id, status FROM media_bluesky_publications
+      WHERE publication_key = ?`).bind(`admin-request:${key}`).first();
+    return json({ article: { id, status: event.to_status, revision: event.revision },
+      bluesky_publication: publication, replayed: false });
   }
   const exists = await db.prepare('SELECT id FROM media_articles WHERE id = ?').bind(id).first();
   throw new HttpError(exists ? 409 : 404, exists ? 'invalid_state_transition' : 'article_not_found');
@@ -561,6 +649,7 @@ export default {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       const url = new URL(request.url);
+      if (url.pathname === '/admin/bluesky/settings') return await blueskySettings(request, env);
       const editorialResponse = await handleEditorialDashboard(request, env, url);
       if (editorialResponse) return editorialResponse;
       const bulkImageRefresh = /^\/admin\/guardian-image-refresh\/(preview|apply)$/.exec(url.pathname);
@@ -610,7 +699,7 @@ export default {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
         const id = Number(match[1]);
         if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
-        return await mutate(request, env.MEDIA_DB, id, match[2] as Action);
+        return await mutate(request, env, id, match[2] as Action);
       }
       if (!['/admin/articles', '/admin/sources', '/admin/runs', '/admin/runs/gdelt'].includes(url.pathname)) {
         return json({ error: 'not_found' }, 404);

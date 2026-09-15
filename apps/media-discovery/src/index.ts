@@ -10,6 +10,7 @@ import {
   startGdeltFile, startGdeltRun,
 } from '@uk-aq-media/gdelt/ingest';
 import { GDELT_MAX_INGEST_BODY_BYTES } from '@uk-aq-media/gdelt';
+import { consumeBluesky, reconcileBlueskyQueue } from './bluesky';
 
 const NEURON_MICRO_UNITS = 1_000_000;
 const MAX_EMPTY_GDELT_START_BODY_READS = 8;
@@ -185,9 +186,18 @@ export default {
     }
   },
   async scheduled(_controller, env): Promise<void> {
-    await enqueueScheduledDiscovery(env);
+    await Promise.all([enqueueScheduledDiscovery(env), reconcileBlueskyQueue(env)]);
   },
   async queue(batch, env): Promise<void> {
+    if (batch.queue === 'uk-aq-media-bluesky') {
+      for (const message of batch.messages) await consumeBluesky(message, env);
+      return;
+    }
+    if (batch.queue !== 'uk-aq-media-discovery') {
+      for (const message of batch.messages) message.ack();
+      console.error(JSON.stringify({ event: 'unknown_queue', queue: batch.queue.slice(0, 100) }));
+      return;
+    }
     for (const message of batch.messages) {
       const parsed = DiscoveryMessageSchema.safeParse(message.body);
       if (!parsed.success || parsed.data.type === 'article_enrich') {
@@ -200,6 +210,8 @@ export default {
       try {
         await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
           message.id, message.attempts, configuredDisplayTitleAi(env));
+        try { await reconcileBlueskyQueue(env); }
+        catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
         message.ack();
       } catch {
         console.error(JSON.stringify({ event: 'discovery_message_failed', message_id: message.id }));

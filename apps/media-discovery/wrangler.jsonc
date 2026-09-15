@@ -26,6 +26,10 @@
       {
         "binding": "MEDIA_DISCOVERY_QUEUE",
         "queue": "uk-aq-media-discovery"
+      },
+      {
+        "binding": "MEDIA_BLUESKY_QUEUE",
+        "queue": "uk-aq-media-bluesky"
       }
     ],
     "consumers": [
@@ -36,6 +40,14 @@
         "max_retries": 3,
         "max_concurrency": 1,
         "retry_delay": 300
+      },
+      {
+        "queue": "uk-aq-media-bluesky",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "max_concurrency": 1,
+        "retry_delay": 30
       }
     ]
   },
@@ -45,7 +57,8 @@
   "secrets": {
     "required": [
       "UK_AQ_MEDIA_WORKER_HTTP_SECRET",
-      "UK_AQ_MEDIA_GDELT_INGEST_SECRET"
+      "UK_AQ_MEDIA_GDELT_INGEST_SECRET",
+      "UK_AQ_MEDIA_BLUESKY_APP_PSWD"
     ]
   },
   "vars": {

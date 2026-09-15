@@ -416,3 +416,72 @@ pre-existing generic summary/`why_it_matters` path remains unsupported and disab
 
 See the [phase handover](docs/phase-1-handover.md) for manual resource wiring,
 real-operation validation, known limits and rollback.
+
+## Bluesky article publishing
+
+Bluesky publication is a downstream, durable outbox operation and never changes an
+article's Media approval result. Migration `0021_bluesky_publications.sql` adds the
+singleton `media_bluesky_settings`, the audited `media_bluesky_publications` outbox,
+and explicit `media_source_social_accounts` identities. It installs an approval-event
+trigger but seeds publishing disabled with no activation watermark, so installation
+does not backfill or publish historical approvals.
+
+The authenticated admin API exposes `GET` and `PUT /admin/bluesky/settings`. `PUT`
+requires the normal bearer credential and an `Idempotency-Key`, and accepts only
+`publishing_enabled`, `default_message_template`, and `cooldown_minutes` (1–1,440).
+The first deliberate enable atomically captures the highest article-event id; later
+disable/re-enable operations retain that watermark. Disabling is the publishing kill
+switch and leaves the durable backlog intact.
+
+Future approval events create an automatic outbox row only for `auto_approved`, or
+`approved` from `pending`, and only when the article and source both permit the stored
+remote-preview thumbnail. Rejected-to-approved and hidden-to-approved remain ordinary
+Media transitions unless their existing status endpoint receives
+`{"post_to_bluesky":true}`. That option defaults false, is rejected without an eligible
+thumbnail, and uses the admin request identity for replay-safe but repeatable deliberate
+reposts. Article detail and list responses include bounded publication history/count and
+latest status fields for dashboard presentation.
+
+Post text is the accepted display title (otherwise publisher title), one blank line,
+then the global template. Supported placeholders are `{publisher}` and
+`{publisher_mention}`; mentions come only from explicit source identities. Unknown
+placeholders are rejected. Template literals are limited to 120 Unicode graphemes;
+the complete expanded post is limited to 300 graphemes and 3,000 UTF-8 bytes, with only
+the rendered title deterministically shortened. The seeded template is:
+
+```text
+From {publisher} {publisher_mention}
+
+Live and historical UK air quality data:
+https://ukaq.co.uk/
+```
+
+`uk-aq-media-bluesky` is a dedicated serialized Queue, produced by admin and discovery
+as `MEDIA_BLUESKY_QUEUE` and consumed by `media-discovery`. Queue messages are bounded
+wake-ups only; D1 selects the oldest queued id. The default ten-minute cooldown is
+computed from `last_successful_post_at`. Delayed Queue wakes enforce it, while the normal
+two-hour scheduler and post-discovery reconciliation recover lost wake-ups. A stale
+`posting` claim is recovered after ten minutes and transient work has bounded attempts.
+
+The consumer reuses the existing source-scoped remote-preview validator/fetcher, accepts
+only a bounded current image type/size, uploads a blob, and always creates an explicit
+`app.bsky.embed.external` card for the canonical publisher URL. It calls the AT Protocol
+XRPC endpoints directly (session, blob upload, and `com.atproto.repo.createRecord`) to
+avoid a larger runtime SDK. Each publication persists a valid deterministic TID record
+key before the remote write; retries read that same record after an existing-record
+response, closing the remote-write/D1 crash duplicate window. Bounded failure codes are
+stored; no raw upstream body or credential is persisted or logged.
+
+Deployment requires the operator to create `uk-aq-media-bluesky`, add GitHub repository
+secret `UK_AQ_MEDIA_BLUESKY_APP_PSWD`, apply the forward D1 migration, and deploy through
+the existing workflow. The workflow adds this secret to the existing in-memory `jq` /
+`wrangler secret bulk` discovery Worker step. Publishing remains disabled after deploy;
+the operator must deliberately perform first activation. Roll back outbound publishing
+by disabling the setting first; do not delete audit rows. Existing posts are not deleted.
+
+After TEST deployment, validate settings presentation with fixed dummy preview data,
+template counters, one thumbnail-backed Pending approval, one auto-approval, no-image
+exclusion, checked and unchecked rejected/hidden restores, idempotent request replay,
+oldest-first cooldown, deterministic title shortening, external cards, URI/CID retention,
+bounded failures, and scheduler reconciliation. Do not validate by posting before the
+operator has deliberately activated TEST.

@@ -372,7 +372,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.id = ?`).bind(id).first<Record<string, unknown>>();
   if (!article) throw new HttpError(404, 'article_not_found');
-  const [events, evidence] = await Promise.all([
+  const [events, evidence, bluesky] = await Promise.all([
     db.prepare(`SELECT id, event_type, actor_type, from_status, to_status, revision,
       created_at, metadata_json FROM media_article_events WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
@@ -380,9 +380,17 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       always_include_applied, author_auto_approval_applied, first_seen_at, last_seen_at,
       observation_count FROM media_article_discovery_evidence WHERE article_id = ?
       ORDER BY last_seen_at DESC LIMIT 25`).bind(id).all(),
+    db.prepare(`SELECT id, publication_reason, status, post_uri, posted_at, last_error_code,
+      created_at FROM media_bluesky_publications WHERE article_id = ?
+      ORDER BY id DESC LIMIT 25`).bind(id).all(),
   ]);
+  const blueskyPublications = bluesky.results.map(row => ({ ...row,
+    post_url: typeof row.post_uri === 'string' && row.post_uri.startsWith('at://')
+      ? `https://bsky.app/profile/ukaq.co.uk/post/${row.post_uri.split('/').at(-1)}` : null }));
   return json({ article: { ...article, admin_preview_image_path: article.og_image_url
-    ? `/admin/articles/${id}/image` : null }, events: events.results, discovery_evidence: evidence.results });
+    ? `/admin/articles/${id}/image` : null }, events: events.results,
+    discovery_evidence: evidence.results,
+    bluesky: { post_count: blueskyPublications.length, publications: blueskyPublications } });
 }
 
 async function setArticleAuthor(request: Request, db: D1Database, id: number): Promise<Response> {
@@ -499,7 +507,12 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
       a.ai_title_decided_at, a.publisher, a.author,
       a.published_at, a.discovered_at, a.approved_at, a.updated_at, a.status,
       a.revision, a.approval_method, a.approval_author_rule_key, a.og_image_url,
-      a.image_policy, ${spec.expression} AS cursor_value
+      a.image_policy,
+      (SELECT count(*) FROM media_bluesky_publications bp WHERE bp.article_id = a.id)
+        AS bluesky_post_count,
+      (SELECT status FROM media_bluesky_publications bp WHERE bp.article_id = a.id
+        ORDER BY bp.id DESC LIMIT 1) AS bluesky_latest_status,
+      ${spec.expression} AS cursor_value
     FROM media_articles a ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY ${spec.expression} ${spec.direction}, a.id ${spec.direction} LIMIT ?`;
   const { results } = await db.prepare(sql).bind(...binds, limit + 1).all<Record<string, unknown>>();
