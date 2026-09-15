@@ -4,15 +4,28 @@ import { canonicalizeUrl } from '@uk-aq-media/core';
 import {
   GDELT_FILE_TIMEOUT_MS, GDELT_HEAD_TIMEOUT_MS, GDELT_INGEST_CHUNK_SIZE,
   GDELT_INGEST_TIMEOUT_MS, GDELT_MAX_DECOMPRESSED_BYTES,
-  GDELT_MAX_INGEST_BODY_BYTES, GDELT_MAX_LINE_BYTES,
+  GDELT_MAX_INGEST_BODY_BYTES, GDELT_MAX_NGRAM_LINE_BYTES,
   GDELT_MAX_MATCHED_CANDIDATES_PER_FILE, GDELT_MAX_MATCHED_CANDIDATES_PER_RUN,
   GDELT_MAX_NEW_FILE_PAIRS, GDELT_MAX_NGRAM_COMPRESSED_BYTES,
-  GDELT_MAX_TOC_COMPRESSED_BYTES, GDELT_MAX_TITLE_LENGTH, GdeltCandidateInputSchema,
+  GDELT_MAX_TOC_COMPRESSED_BYTES, GDELT_MAX_TOC_LINE_BYTES, GDELT_MAX_TITLE_LENGTH,
+  GdeltCandidateInputSchema,
   enumerateFileStamps, gdeltArticleIdentityUrl, gdeltFileUrls,
   matchGdeltFamilies, type GdeltCandidateInput, type GdeltFamilyKey,
 } from './contracts';
 
 type NgramMatch = Map<GdeltFamilyKey, Set<string>>;
+export type GdeltFileKind = 'ngrams' | 'toc';
+
+export class GdeltLineTooLargeError extends Error {
+  readonly code = 'gdelt_line_too_large';
+
+  constructor(readonly file_stamp: string, readonly file_kind: GdeltFileKind,
+    readonly configured_limit_bytes: number, readonly observed_bytes: number) {
+    super('gdelt_line_too_large');
+    this.name = 'GdeltLineTooLargeError';
+  }
+}
+
 export type GdeltFileScan = {
   candidates: GdeltCandidateInput[];
   ngram_rows: number;
@@ -190,9 +203,16 @@ function byteGuard(maximum: number, code: string): Transform {
   } });
 }
 
-async function* boundedLines(stream: Readable): AsyncGenerator<string> {
+async function* boundedLines(stream: Readable, fileStamp: string, fileKind: GdeltFileKind,
+  lineLimit: number): AsyncGenerator<string> {
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
   let pending = '';
+  const assertBounded = (value: string): void => {
+    const observedBytes = Buffer.byteLength(value);
+    if (observedBytes > lineLimit) {
+      throw new GdeltLineTooLargeError(fileStamp, fileKind, lineLimit, observedBytes);
+    }
+  };
   for await (const chunk of stream) {
     pending += decoder.decode(chunk as Uint8Array, { stream: true });
     let newline: number;
@@ -200,16 +220,20 @@ async function* boundedLines(stream: Readable): AsyncGenerator<string> {
       let line = pending.slice(0, newline);
       pending = pending.slice(newline + 1);
       if (line.endsWith('\r')) line = line.slice(0, -1);
-      if (Buffer.byteLength(line) > GDELT_MAX_LINE_BYTES) throw new Error('gdelt_line_too_large');
+      assertBounded(line);
       yield line;
     }
-    if (Buffer.byteLength(pending) > GDELT_MAX_LINE_BYTES) throw new Error('gdelt_line_too_large');
+    assertBounded(pending);
   }
   pending += decoder.decode();
-  if (pending) yield pending;
+  if (pending) {
+    assertBounded(pending);
+    yield pending;
+  }
 }
 
-async function gzipLines(url: string, compressedLimit: number): Promise<AsyncGenerator<string>> {
+async function gzipLines(url: string, compressedLimit: number, fileStamp: string,
+  fileKind: GdeltFileKind, lineLimit: number): Promise<AsyncGenerator<string>> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GDELT_FILE_TIMEOUT_MS);
   try {
@@ -225,7 +249,7 @@ async function gzipLines(url: string, compressedLimit: number): Promise<AsyncGen
       .pipe(createGunzip()).pipe(byteGuard(GDELT_MAX_DECOMPRESSED_BYTES, 'gdelt_decompressed_too_large'));
     return (async function* () {
       try {
-        yield* boundedLines(output);
+        yield* boundedLines(output, fileStamp, fileKind, lineLimit);
       } catch (error) {
         if (controller.signal.aborted) throw new Error('gdelt_file_timeout');
         throw error;
@@ -243,9 +267,11 @@ async function gzipLines(url: string, compressedLimit: number): Promise<AsyncGen
 
 async function scanFilePair(stamp: string): Promise<GdeltFileScan> {
   const urls = gdeltFileUrls(stamp);
-  const ngrams = await gzipLines(urls.ngrams, GDELT_MAX_NGRAM_COMPRESSED_BYTES);
+  const ngrams = await gzipLines(urls.ngrams, GDELT_MAX_NGRAM_COMPRESSED_BYTES,
+    stamp, 'ngrams', GDELT_MAX_NGRAM_LINE_BYTES);
   const matched = await scanNgramLines(ngrams);
-  const toc = await gzipLines(urls.toc, GDELT_MAX_TOC_COMPRESSED_BYTES);
+  const toc = await gzipLines(urls.toc, GDELT_MAX_TOC_COMPRESSED_BYTES,
+    stamp, 'toc', GDELT_MAX_TOC_LINE_BYTES);
   const resolved = await resolveTocLines(toc, matched.matched_docs);
   return { candidates: resolved.candidates, ngram_rows: matched.ngram_rows,
     matches_seen: matched.matches_seen, malformed_ngram_rows: matched.malformed_ngram_rows,
