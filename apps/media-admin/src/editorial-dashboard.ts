@@ -383,8 +383,10 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     db.prepare(`SELECT id, publication_reason, status, post_uri, posted_at, last_error_code,
       next_attempt_at, created_at FROM media_bluesky_publications WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
-    db.prepare(`SELECT count(*) AS count FROM media_bluesky_publications WHERE article_id = ?`)
-      .bind(id).first<{ count: number }>(),
+    db.prepare(`SELECT count(*) AS publication_count,
+      count(*) FILTER (WHERE status = 'posted') AS post_count
+      FROM media_bluesky_publications WHERE article_id = ?`)
+      .bind(id).first<{ publication_count: number; post_count: number }>(),
   ]);
   const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
     post_url: typeof row.post_uri === 'string' && row.post_uri.startsWith('at://')
@@ -396,7 +398,8 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
   return json({ article: { ...article, admin_preview_image_path: article.og_image_url
     ? `/admin/articles/${id}/image` : null }, events: events.results,
     discovery_evidence: evidence.results,
-    bluesky: { post_count: blueskyCount?.count ?? 0,
+    bluesky: { post_count: blueskyCount?.post_count ?? 0,
+      publication_count: blueskyCount?.publication_count ?? 0,
       latest_status: blueskyPublications[0]?.status ?? null,
       manual_post_available: manualPostReason !== null && thumbnailEligible,
       manual_post_reason: manualPostReason,
@@ -519,8 +522,11 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
       a.published_at, a.discovered_at, a.approved_at, a.updated_at, a.status,
       a.revision, a.approval_method, a.approval_author_rule_key, a.og_image_url,
       a.image_policy,
-      (SELECT count(*) FROM media_bluesky_publications bp WHERE bp.article_id = a.id)
+      (SELECT count(*) FROM media_bluesky_publications bp
+        WHERE bp.article_id = a.id AND bp.status = 'posted')
         AS bluesky_post_count,
+      (SELECT count(*) FROM media_bluesky_publications bp WHERE bp.article_id = a.id)
+        AS bluesky_publication_count,
       (SELECT status FROM media_bluesky_publications bp WHERE bp.article_id = a.id
         ORDER BY bp.id DESC LIMIT 1) AS bluesky_latest_status,
       ${spec.expression} AS cursor_value

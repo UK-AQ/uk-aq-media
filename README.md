@@ -443,9 +443,11 @@ remote-preview thumbnail. Rejected-to-approved and hidden-to-approved remain ord
 Media transitions unless their existing status endpoint receives
 `{"post_to_bluesky":true}`. That option defaults false, is rejected without an eligible
 thumbnail, and uses the admin request identity for replay-safe but repeatable deliberate
-reposts. Article detail returns an exact publication count, bounded history, latest
+reposts. Article detail returns exact successful-post and publication counts, bounded history, latest
 status, thumbnail eligibility, and current-state manual-repost availability/reason so
-Ops does not duplicate Media eligibility policy; list responses retain count/latest status.
+Ops does not duplicate Media eligibility policy; list responses retain both counts and
+latest status. `post_count`/`bluesky_post_count` count only `posted` records that exist on
+Bluesky; `publication_count`/`bluesky_publication_count` count every durable outbox row.
 
 Post text is the accepted display title (otherwise publisher title), one blank line,
 then the global template. Supported placeholders are `{publisher}` and
@@ -470,16 +472,22 @@ and post-discovery reconciliation recover lost wake-ups. A stale `posting` claim
 recovered after ten minutes. Transient retry eligibility is persisted as `next_attempt_at`,
 so an early duplicate wake cannot bypass bounded exponential backoff. Success and terminal
 failure both schedule the next eligible backlog wake; only successful posts start cooldown.
+A live `posting` claim also schedules a wake for its ten-minute stale threshold, so a
+crashed claim normally recovers then rather than waiting for two-hour reconciliation.
 
 The consumer reuses the existing source-scoped remote-preview validator/fetcher, accepts
 only a bounded current image type/size, uploads a blob, and always creates an explicit
 `app.bsky.embed.external` card for the canonical publisher URL. It calls the AT Protocol
 XRPC endpoints directly (session, blob upload, and `com.atproto.repo.createRecord`) with
-a common 15-second timeout to
+a common 15-second timeout covering both the request and bounded JSON body consumption to
 avoid a larger runtime SDK. Each publication persists a valid deterministic TID record
 key before the remote write; retries read that same record after an existing-record
 response, closing the remote-write/D1 crash duplicate window. Bounded failure codes are
 stored; no raw upstream body or credential is persisted or logged.
+Authentication rate limiting (`429`), provider `5xx`, network failures and timeouts are
+transient; definite invalid credentials remain the permanent `bluesky_auth_failed` code.
+The existing ten-second thumbnail timeout likewise remains active through image-body
+consumption, with the source policy and one-megabyte bound unchanged.
 
 Deployment requires the operator to create `uk-aq-media-bluesky`, add GitHub repository
 secret `UK_AQ_MEDIA_BLUESKY_APP_PSWD`, apply the forward D1 migration, and deploy through

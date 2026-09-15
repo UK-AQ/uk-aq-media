@@ -16,27 +16,86 @@ const XRPC = 'https://bsky.social/xrpc/';
 const MAX_ATTEMPTS = 5;
 const XRPC_TIMEOUT_MS = 15_000;
 const MAX_QUEUE_DELAY_SECONDS = 43_200;
+const MAX_XRPC_JSON_BYTES = 256 * 1024;
+const STALE_CLAIM_MS = 10 * 60 * 1000;
 
-class PublicationError extends Error {
+export class PublicationError extends Error {
   constructor(readonly code: string, readonly transient = false) { super(code); }
 }
 
-async function xrpc(path: string, init: RequestInit): Promise<Response> {
+type XrpcResult = { status: number; ok: boolean; body: unknown };
+
+async function boundedJson(response: Response): Promise<unknown> {
+  const declared = Number(response.headers.get('content-length') ?? 0);
+  if (declared > MAX_XRPC_JSON_BYTES) throw new Error('xrpc_response_too_large');
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_XRPC_JSON_BYTES) throw new Error('xrpc_response_too_large');
+      chunks.push(value);
+    }
+  } finally {
+    try { await reader.cancel(); } catch { /* body already completed or aborted */ }
+    reader.releaseLock();
+  }
+  if (!length) return null;
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)) as unknown;
+}
+
+async function boundedBytes(response: Response, limit: number): Promise<ArrayBuffer> {
+  if (!response.body) return new ArrayBuffer(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > limit) throw new PublicationError('thumbnail_too_large');
+      chunks.push(value);
+    }
+  } finally {
+    try { await reader.cancel(); } catch { /* body already completed or aborted */ }
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes.buffer;
+}
+
+export async function xrpc(path: string, init: RequestInit,
+  timeoutMs = XRPC_TIMEOUT_MS): Promise<XrpcResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), XRPC_TIMEOUT_MS);
-  try { return await fetch(`${XRPC}${path}`, { ...init, signal: controller.signal }); }
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${XRPC}${path}`, { ...init, signal: controller.signal });
+    return { status: response.status, ok: response.ok, body: await boundedJson(response) };
+  }
   catch { throw new PublicationError('bluesky_api_transient', true); }
   finally { clearTimeout(timeout); }
 }
 
-async function authenticate(password: string): Promise<{ accessJwt: string; did: string }> {
+export async function authenticate(password: string): Promise<{ accessJwt: string; did: string }> {
   const response = await xrpc('com.atproto.server.createSession', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier: BLUESKY_HANDLE, password }) });
-  if (!response.ok) throw new PublicationError(response.status >= 500
-    ? 'bluesky_api_transient' : 'bluesky_auth_failed', response.status >= 500);
-  const body = await response.json() as { accessJwt?: unknown; did?: unknown; handle?: unknown };
-  if (typeof body.accessJwt !== 'string' || typeof body.did !== 'string' ||
+  if (!response.ok) {
+    const transient = response.status === 429 || response.status >= 500;
+    throw new PublicationError(transient ? 'bluesky_api_transient' : 'bluesky_auth_failed', transient);
+  }
+  const body = response.body as { accessJwt?: unknown; did?: unknown; handle?: unknown } | null;
+  if (!body || typeof body.accessJwt !== 'string' || typeof body.did !== 'string' ||
       typeof body.handle !== 'string') throw new PublicationError('bluesky_auth_failed');
   if (body.handle.toLowerCase() !== BLUESKY_HANDLE) {
     throw new PublicationError('bluesky_identity_mismatch');
@@ -50,27 +109,33 @@ async function loadThumbnail(article: Article): Promise<{ bytes: ArrayBuffer; ty
       !remotePreviewUrl(article.og_image_url, article)) throw new PublicationError('thumbnail_missing');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
-  const fetched = await fetchRemotePreviewImage(article.og_image_url, article, controller.signal);
-  clearTimeout(timeout);
-  if (!fetched.response || fetched.failure || !fetched.response.ok) {
-    await fetched.response?.body?.cancel();
-    throw new PublicationError('thumbnail_fetch_failed', fetched.failure !== 'redirect');
+  try {
+    const fetched = await fetchRemotePreviewImage(article.og_image_url, article, controller.signal);
+    if (!fetched.response || fetched.failure || !fetched.response.ok) {
+      await fetched.response?.body?.cancel();
+      throw new PublicationError('thumbnail_fetch_failed', fetched.failure !== 'redirect');
+    }
+    const type = fetched.response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() ?? '';
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) {
+      await fetched.response.body?.cancel();
+      throw new PublicationError('thumbnail_invalid');
+    }
+    const declared = Number(fetched.response.headers.get('content-length') ?? 0);
+    if (declared > BLUESKY_THUMBNAIL_BYTES) {
+      await fetched.response.body?.cancel();
+      throw new PublicationError('thumbnail_too_large');
+    }
+    const bytes = await boundedBytes(fetched.response, BLUESKY_THUMBNAIL_BYTES);
+    if (!bytes.byteLength || bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
+      throw new PublicationError(bytes.byteLength ? 'thumbnail_too_large' : 'thumbnail_invalid');
+    }
+    return { bytes, type };
+  } catch (error) {
+    if (controller.signal.aborted) throw new PublicationError('thumbnail_fetch_failed', true);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  const type = fetched.response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() ?? '';
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) {
-    await fetched.response.body?.cancel();
-    throw new PublicationError('thumbnail_invalid');
-  }
-  const declared = Number(fetched.response.headers.get('content-length') ?? 0);
-  if (declared > BLUESKY_THUMBNAIL_BYTES) {
-    await fetched.response.body?.cancel();
-    throw new PublicationError('thumbnail_too_large');
-  }
-  const bytes = await fetched.response.arrayBuffer();
-  if (!bytes.byteLength || bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
-    throw new PublicationError(bytes.byteLength ? 'thumbnail_too_large' : 'thumbnail_invalid');
-  }
-  return { bytes, type };
 }
 
 async function uploadBlob(auth: { accessJwt: string }, thumbnail: { bytes: ArrayBuffer; type: string }) {
@@ -79,8 +144,8 @@ async function uploadBlob(auth: { accessJwt: string }, thumbnail: { bytes: Array
     body: thumbnail.bytes });
   if (!response.ok) throw new PublicationError(response.status >= 500 || response.status === 429
     ? 'bluesky_api_transient' : 'bluesky_post_rejected', response.status >= 500 || response.status === 429);
-  const body = await response.json() as { blob?: unknown };
-  if (!body.blob) throw new PublicationError('bluesky_post_rejected');
+  const body = response.body as { blob?: unknown } | null;
+  if (!body?.blob) throw new PublicationError('bluesky_post_rejected');
   return body.blob;
 }
 
@@ -89,7 +154,7 @@ async function createOrReadPost(auth: { accessJwt: string; did: string }, rkey: 
   const response = await xrpc('com.atproto.repo.createRecord', { method: 'POST',
     headers: { Authorization: `Bearer ${auth.accessJwt}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ repo: auth.did, collection: 'app.bsky.feed.post', rkey, record }) });
-  if (response.ok) return response.json() as Promise<{ uri: string; cid: string }>;
+  if (response.ok) return response.body as { uri: string; cid: string };
   if (response.status >= 500 || response.status === 429) {
     throw new PublicationError('bluesky_api_transient', true);
   }
@@ -100,7 +165,7 @@ async function createOrReadPost(auth: { accessJwt: string; did: string }, rkey: 
     const existing = await xrpc(`com.atproto.repo.getRecord?${query}`, {
       headers: { Authorization: `Bearer ${auth.accessJwt}` },
     });
-    if (existing.ok) return existing.json() as Promise<{ uri: string; cid: string }>;
+    if (existing.ok) return existing.body as { uri: string; cid: string };
     if (existing.status === 429 || existing.status >= 500) {
       throw new PublicationError('bluesky_api_transient', true);
     }
@@ -126,17 +191,27 @@ export async function reconcileBlueskyQueue(env: MediaDiscoveryEnv): Promise<voi
   if (queued) await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' } satisfies BlueskyWakeup);
 }
 
-async function scheduleNextBacklogWake(env: MediaDiscoveryEnv, settings: Settings): Promise<boolean> {
-  const next = await env.MEDIA_DB.prepare(`SELECT next_attempt_at
-    FROM media_bluesky_publications WHERE status = 'queued'
-    ORDER BY CASE WHEN next_attempt_at IS NULL THEN 0 ELSE 1 END, next_attempt_at, id LIMIT 1`)
-    .first<{ next_attempt_at: string | null }>();
-  if (!next) return false;
+export async function scheduleNextBacklogWake(env: MediaDiscoveryEnv,
+  settings: Settings): Promise<boolean> {
+  const [nextQueued, nextPosting] = await Promise.all([
+    env.MEDIA_DB.prepare(`SELECT next_attempt_at FROM media_bluesky_publications
+      WHERE status = 'queued'
+      ORDER BY CASE WHEN next_attempt_at IS NULL THEN 0 ELSE 1 END, next_attempt_at, id LIMIT 1`)
+      .first<{ next_attempt_at: string | null }>(),
+    env.MEDIA_DB.prepare(`SELECT last_attempted_at FROM media_bluesky_publications
+      WHERE status = 'posting' AND last_attempted_at IS NOT NULL
+      ORDER BY last_attempted_at, id LIMIT 1`).first<{ last_attempted_at: string }>(),
+  ]);
+  if (!nextQueued && !nextPosting) return false;
   const now = Date.now();
-  const retryAt = next.next_attempt_at ? Date.parse(next.next_attempt_at) : now;
+  const queuedAt = nextQueued ? nextQueued.next_attempt_at
+    ? Date.parse(nextQueued.next_attempt_at) : now : Number.POSITIVE_INFINITY;
+  const postingAt = nextPosting
+    ? Date.parse(nextPosting.last_attempted_at) + STALE_CLAIM_MS : Number.POSITIVE_INFINITY;
+  const workAt = Math.min(queuedAt, postingAt);
   const cooldownAt = settings.last_successful_post_at
     ? Date.parse(settings.last_successful_post_at) + settings.cooldown_seconds * 1000 : now;
-  const delaySeconds = Math.max(0, Math.ceil((Math.max(retryAt, cooldownAt) - now) / 1000));
+  const delaySeconds = Math.max(0, Math.ceil((Math.max(workAt, cooldownAt) - now) / 1000));
   await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' } satisfies BlueskyWakeup,
     delaySeconds ? { delaySeconds: Math.min(delaySeconds, MAX_QUEUE_DELAY_SECONDS) } : undefined);
   return true;
@@ -162,7 +237,7 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
   await env.MEDIA_DB.prepare(`UPDATE media_bluesky_publications SET status = 'queued',
     last_error_code = 'publication_state_conflict', next_attempt_at = NULL, updated_at = ?
     WHERE status = 'posting' AND last_attempted_at < ?`).bind(new Date(now).toISOString(),
-      new Date(now - 600_000).toISOString()).run();
+      new Date(now - STALE_CLAIM_MS).toISOString()).run();
   const publication = await env.MEDIA_DB.prepare(`SELECT id, article_id, publication_key, status,
     attempt_count, record_key, created_at FROM media_bluesky_publications
     WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
