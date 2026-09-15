@@ -39,6 +39,7 @@ CREATE TABLE media_bluesky_publications (
   post_uri TEXT,
   post_cid TEXT,
   last_error_code TEXT,
+  next_attempt_at TEXT,
   created_at TEXT NOT NULL,
   last_attempted_at TEXT,
   posted_at TEXT,
@@ -49,7 +50,7 @@ CREATE TABLE media_bluesky_publications (
 CREATE UNIQUE INDEX media_bluesky_publications_approval_event
   ON media_bluesky_publications(approval_event_id) WHERE approval_event_id IS NOT NULL;
 CREATE INDEX media_bluesky_publications_oldest_queued
-  ON media_bluesky_publications(status, id);
+  ON media_bluesky_publications(status, next_attempt_at, id);
 CREATE INDEX media_bluesky_publications_article_history
   ON media_bluesky_publications(article_id, id DESC);
 

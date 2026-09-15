@@ -180,6 +180,8 @@ export default {
     }
     try {
       const queued = await enqueueScheduledDiscovery(env);
+      try { await reconcileBlueskyQueue(env); }
+      catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
       return json({ ok: true, queued }, 202);
     } catch {
       return json({ error: 'discovery_schedule_failed' }, 503);

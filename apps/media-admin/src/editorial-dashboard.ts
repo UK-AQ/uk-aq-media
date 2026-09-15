@@ -372,7 +372,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.id = ?`).bind(id).first<Record<string, unknown>>();
   if (!article) throw new HttpError(404, 'article_not_found');
-  const [events, evidence, bluesky] = await Promise.all([
+  const [events, evidence, bluesky, blueskyCount] = await Promise.all([
     db.prepare(`SELECT id, event_type, actor_type, from_status, to_status, revision,
       created_at, metadata_json FROM media_article_events WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
@@ -381,16 +381,27 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       observation_count FROM media_article_discovery_evidence WHERE article_id = ?
       ORDER BY last_seen_at DESC LIMIT 25`).bind(id).all(),
     db.prepare(`SELECT id, publication_reason, status, post_uri, posted_at, last_error_code,
-      created_at FROM media_bluesky_publications WHERE article_id = ?
+      next_attempt_at, created_at FROM media_bluesky_publications WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
+    db.prepare(`SELECT count(*) AS count FROM media_bluesky_publications WHERE article_id = ?`)
+      .bind(id).first<{ count: number }>(),
   ]);
-  const blueskyPublications = bluesky.results.map(row => ({ ...row,
+  const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
     post_url: typeof row.post_uri === 'string' && row.post_uri.startsWith('at://')
       ? `https://bsky.app/profile/ukaq.co.uk/post/${row.post_uri.split('/').at(-1)}` : null }));
+  const thumbnailEligible = article.og_image_url !== null && article.image_policy === 'remote_preview' &&
+    article.source_image_policy === 'remote_preview';
+  const manualPostReason = article.status === 'rejected' ? 'rejected_repost'
+    : article.status === 'hidden' ? 'unhidden_repost' : null;
   return json({ article: { ...article, admin_preview_image_path: article.og_image_url
     ? `/admin/articles/${id}/image` : null }, events: events.results,
     discovery_evidence: evidence.results,
-    bluesky: { post_count: blueskyPublications.length, publications: blueskyPublications } });
+    bluesky: { post_count: blueskyCount?.count ?? 0,
+      latest_status: blueskyPublications[0]?.status ?? null,
+      manual_post_available: manualPostReason !== null && thumbnailEligible,
+      manual_post_reason: manualPostReason,
+      manual_post_unavailable_reason: manualPostReason && !thumbnailEligible ? 'thumbnail_missing' : null,
+      thumbnail_eligible: thumbnailEligible, publications: blueskyPublications } });
 }
 
 async function setArticleAuthor(request: Request, db: D1Database, id: number): Promise<Response> {

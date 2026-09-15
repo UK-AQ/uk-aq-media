@@ -426,7 +426,11 @@ and explicit `media_source_social_accounts` identities. It installs an approval-
 trigger but seeds publishing disabled with no activation watermark, so installation
 does not backfill or publish historical approvals.
 
-The authenticated admin API exposes `GET` and `PUT /admin/bluesky/settings`. `PUT`
+Media owns Bluesky policy, state, and the authenticated API; the separate Ops
+repository owns the visible Articles dashboard and modal presentation. The Media API
+exposes `GET` and `PUT /admin/bluesky/settings`. `GET` returns safe saved state,
+template/post/cooldown constraints, the saved template's literal grapheme count, and
+fixed example values for the Ops preview. `PUT`
 requires the normal bearer credential and an `Idempotency-Key`, and accepts only
 `publishing_enabled`, `default_message_template`, and `cooldown_minutes` (1–1,440).
 The first deliberate enable atomically captures the highest article-event id; later
@@ -439,8 +443,9 @@ remote-preview thumbnail. Rejected-to-approved and hidden-to-approved remain ord
 Media transitions unless their existing status endpoint receives
 `{"post_to_bluesky":true}`. That option defaults false, is rejected without an eligible
 thumbnail, and uses the admin request identity for replay-safe but repeatable deliberate
-reposts. Article detail and list responses include bounded publication history/count and
-latest status fields for dashboard presentation.
+reposts. Article detail returns an exact publication count, bounded history, latest
+status, thumbnail eligibility, and current-state manual-repost availability/reason so
+Ops does not duplicate Media eligibility policy; list responses retain count/latest status.
 
 Post text is the accepted display title (otherwise publisher title), one blank line,
 then the global template. Supported placeholders are `{publisher}` and
@@ -460,13 +465,17 @@ https://ukaq.co.uk/
 as `MEDIA_BLUESKY_QUEUE` and consumed by `media-discovery`. Queue messages are bounded
 wake-ups only; D1 selects the oldest queued id. The default ten-minute cooldown is
 computed from `last_successful_post_at`. Delayed Queue wakes enforce it, while the normal
-two-hour scheduler and post-discovery reconciliation recover lost wake-ups. A stale
-`posting` claim is recovered after ten minutes and transient work has bounded attempts.
+active central `POST /scheduler/run` two-hour path, the dormant native scheduler fallback,
+and post-discovery reconciliation recover lost wake-ups. A stale `posting` claim is
+recovered after ten minutes. Transient retry eligibility is persisted as `next_attempt_at`,
+so an early duplicate wake cannot bypass bounded exponential backoff. Success and terminal
+failure both schedule the next eligible backlog wake; only successful posts start cooldown.
 
 The consumer reuses the existing source-scoped remote-preview validator/fetcher, accepts
 only a bounded current image type/size, uploads a blob, and always creates an explicit
 `app.bsky.embed.external` card for the canonical publisher URL. It calls the AT Protocol
-XRPC endpoints directly (session, blob upload, and `com.atproto.repo.createRecord`) to
+XRPC endpoints directly (session, blob upload, and `com.atproto.repo.createRecord`) with
+a common 15-second timeout to
 avoid a larger runtime SDK. Each publication persists a valid deterministic TID record
 key before the remote write; retries read that same record after an existing-record
 response, closing the remote-write/D1 crash duplicate window. Bounded failure codes are

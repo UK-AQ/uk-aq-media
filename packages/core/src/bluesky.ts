@@ -19,6 +19,9 @@ export function validateBlueskyTemplate(template: string): { literalGraphemes: n
   if (/\{[^{}]*\}/.test(withoutKnown) || withoutKnown.includes('{') || withoutKnown.includes('}')) {
     throw new Error('message_template_unknown_placeholder');
   }
+  if ((template.match(/\{publisher_mention\}/g) ?? []).length > 1) {
+    throw new Error('message_template_multiple_mentions');
+  }
   const literalGraphemes = graphemes(withoutKnown).length;
   if (literalGraphemes > BLUESKY_TEMPLATE_LITERAL_GRAPHEMES) {
     throw new Error('message_template_too_long');
@@ -41,8 +44,10 @@ export function renderBlueskyPost(input: { title: string; publisher: string;
   { text: string; facets: BlueskyFacet[] } {
   validateBlueskyTemplate(input.template);
   const mention = input.publisherMention?.handle ? `@${input.publisherMention.handle}` : '';
-  let expanded = input.template.replaceAll('{publisher}', input.publisher)
-    .replaceAll('{publisher_mention}', mention);
+  let expanded = input.template.replaceAll('{publisher}', input.publisher);
+  const mentionToken = '{publisher_mention}';
+  const mentionTemplateIndex = expanded.indexOf(mentionToken);
+  expanded = expanded.replace(mentionToken, mention);
   if (!mention) expanded = expanded.split('\n').map(line => line.replace(/[ \t]+$/g, '')).join('\n');
   const separator = '\n\n';
   const remaining = BLUESKY_POST_GRAPHEMES - graphemes(separator + expanded).length;
@@ -64,9 +69,9 @@ export function renderBlueskyPost(input: { title: string; publisher: string;
   for (const match of text.matchAll(/https:\/\/[^\s]+/g)) {
     add(match.index, match[0], { $type: 'app.bsky.richtext.facet#link', uri: match[0] });
   }
-  if (mention && input.publisherMention) {
-    const start = text.indexOf(mention);
-    if (start >= 0) add(start, mention,
+  if (mention && input.publisherMention && mentionTemplateIndex >= 0) {
+    const start = title.length + separator.length + mentionTemplateIndex;
+    if (text.slice(start, start + mention.length) === mention) add(start, mention,
       { $type: 'app.bsky.richtext.facet#mention', did: input.publisherMention.did });
   }
   return { text, facets: facets.sort((a, b) => a.index.byteStart - b.index.byteStart) };

@@ -1,5 +1,6 @@
 import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, reconcileHomepageLatestSix, z,
-  validateBlueskyTemplate,
+  BLUESKY_PLACEHOLDERS, BLUESKY_POST_BYTES, BLUESKY_POST_GRAPHEMES,
+  BLUESKY_TEMPLATE_LITERAL_GRAPHEMES, validateBlueskyTemplate,
   loadSource, type Status } from '@uk-aq-media/core';
 import {
   discoverGuardianPreviewForArticle, GUARDIAN_ROUTES,
@@ -530,11 +531,27 @@ async function applyBulkGuardianImageRefresh(request: Request,
 }
 
 async function blueskySettings(request: Request, env: MediaAdminEnv): Promise<Response> {
+  const present = (settings: Record<string, unknown> | null, replayed?: boolean) => {
+    const template = typeof settings?.default_message_template === 'string'
+      ? settings.default_message_template : '';
+    let literalGraphemes: number | null = null;
+    try { literalGraphemes = validateBlueskyTemplate(template).literalGraphemes; } catch { /* invalid D1 state */ }
+    return { account: '@ukaq.co.uk', settings: settings ? { ...settings,
+      publishing_enabled: Boolean(settings.publishing_enabled),
+      default_message_literal_graphemes: literalGraphemes } : null,
+    constraints: { default_message_literal_graphemes: BLUESKY_TEMPLATE_LITERAL_GRAPHEMES,
+      post_graphemes: BLUESKY_POST_GRAPHEMES, post_bytes: BLUESKY_POST_BYTES,
+      cooldown_minutes_min: 1, cooldown_minutes_max: 1440,
+      placeholders: [...BLUESKY_PLACEHOLDERS] },
+    example: { title: 'Example display title for an air-quality article',
+      publisher: 'Example Publisher', publisher_mention: '@example.bsky.social' },
+    ...(replayed === undefined ? {} : { replayed }) };
+  };
   if (request.method === 'GET') {
     const settings = await env.MEDIA_DB.prepare(`SELECT publishing_enabled, cooldown_seconds,
       default_message_template, activation_event_id, last_successful_post_at, updated_at
       FROM media_bluesky_settings WHERE id = 1`).first();
-    return json({ account: '@ukaq.co.uk', settings });
+    return json(present(settings));
   }
   if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
   const key = request.headers.get('Idempotency-Key');
@@ -567,7 +584,7 @@ async function blueskySettings(request: Request, env: MediaAdminEnv): Promise<Re
   const settings = await env.MEDIA_DB.prepare(`SELECT publishing_enabled, cooldown_seconds,
     default_message_template, activation_event_id, last_successful_post_at, updated_at
     FROM media_bluesky_settings WHERE id = 1`).first();
-  return json({ account: '@ukaq.co.uk', settings, replayed: Boolean(replay) });
+  return json(present(settings, Boolean(replay)));
 }
 
 async function mutate(request: Request, env: MediaAdminEnv, id: number, action: Action): Promise<Response> {
