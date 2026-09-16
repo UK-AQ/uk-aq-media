@@ -32,7 +32,8 @@ export function validateBlueskyTemplate(template: string): { literalGraphemes: n
 export type BlueskyFacet = {
   index: { byteStart: number; byteEnd: number };
   features: Array<{ $type: 'app.bsky.richtext.facet#link'; uri: string } |
-    { $type: 'app.bsky.richtext.facet#mention'; did: string }>;
+    { $type: 'app.bsky.richtext.facet#mention'; did: string } |
+    { $type: 'app.bsky.richtext.facet#tag'; tag: string }>;
 };
 
 function utf8Length(value: string): number {
@@ -100,7 +101,9 @@ export function renderBlueskyPost(input: { title: string; publisher: string;
   }
 
   const facets: BlueskyFacet[] = [];
+  const ranges: Array<{ start: number; end: number }> = [];
   const add = (start: number, raw: string, feature: BlueskyFacet['features'][number]) => {
+    ranges.push({ start, end: start + raw.length });
     facets.push({ index: { byteStart: utf8Length(text.slice(0, start)),
       byteEnd: utf8Length(text.slice(0, start + raw.length)) }, features: [feature] });
   };
@@ -111,6 +114,16 @@ export function renderBlueskyPost(input: { title: string; publisher: string;
     const start = title.length + separator.length + expanded.mentionIndex;
     if (text.slice(start, start + mention.length) === mention) add(start, mention,
       { $type: 'app.bsky.richtext.facet#mention', did: input.publisherMention.did });
+  }
+  for (const match of text.matchAll(/#[\p{L}\p{N}\p{M}_]+/gu)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const before = text.slice(0, start).match(/[\s\S]$/u)?.[0];
+    if (before && /[\p{L}\p{N}\p{M}_#]/u.test(before)) continue;
+    if (ranges.some(range => start < range.end && end > range.start)) continue;
+    const tag = match[0].slice(1);
+    if (graphemes(tag).length > 64 || utf8Length(tag) > 640) continue;
+    add(start, match[0], { $type: 'app.bsky.richtext.facet#tag', tag });
   }
   return { text, facets: facets.sort((a, b) => a.index.byteStart - b.index.byteStart) };
 }

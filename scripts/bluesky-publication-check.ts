@@ -488,6 +488,37 @@ try {
   assert.ok(byteHeavy.text.split('\n\n', 1)[0]?.endsWith('…'),
     'only the rendered byte-heavy title should be shortened');
 
+  const hashtags = renderBlueskyPost({
+    title: 'Air quality title', publisher: 'Publisher',
+    template: '🌍 clean air #InvestInCleanAir #AirQuality', publisherMention: null,
+  });
+  const tagFacets = hashtags.facets.filter(facet => facet.features[0]?.$type ===
+    'app.bsky.richtext.facet#tag');
+  assert.deepEqual(tagFacets.map(facet => facet.features[0]), [
+    { $type: 'app.bsky.richtext.facet#tag', tag: 'InvestInCleanAir' },
+    { $type: 'app.bsky.richtext.facet#tag', tag: 'AirQuality' },
+  ], 'each hashtag must produce its own tag facet');
+  assert.deepEqual(tagFacets.map(facet => new TextDecoder().decode(
+    new TextEncoder().encode(hashtags.text).slice(facet.index.byteStart, facet.index.byteEnd))),
+  ['#InvestInCleanAir', '#AirQuality'],
+  'tag facets must select the visible hashtags using UTF-8 byte offsets');
+  assert.ok(tagFacets[0]!.index.byteStart > hashtags.text.indexOf('#InvestInCleanAir'),
+    'multibyte text before a hashtag must increase its byte offset');
+  assert.ok(tagFacets[0]!.index.byteStart < tagFacets[1]!.index.byteStart,
+    'multiple tag facets must remain ordered');
+
+  const exclusions = renderBlueskyPost({
+    title: 'Air quality title', publisher: 'Publisher',
+    template: `https://example.com/a#fragment # ${'#' + 'a'.repeat(65)}`,
+    publisherMention: null,
+  });
+  assert.equal(exclusions.facets.filter(facet => facet.features[0]?.$type ===
+    'app.bsky.richtext.facet#link').length, 1,
+  'a URL containing a fragment must remain one URL facet');
+  assert.equal(exclusions.facets.filter(facet => facet.features[0]?.$type ===
+    'app.bsky.richtext.facet#tag').length, 0,
+  'URL fragments, bare hashes and over-limit tags must not produce tag facets');
+
   console.log('Bluesky admin idempotency, backlog barrier and post-builder checks passed.');
 } finally {
   Date.now = originalNow;
