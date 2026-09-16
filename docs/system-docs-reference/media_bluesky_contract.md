@@ -165,6 +165,14 @@ The external card MUST therefore continue to use the canonical article URL even 
 
 Publisher Bluesky handles MUST be explicit configuration. They MUST NOT be guessed from publisher names.
 
+Every newly created UK AQ `app.bsky.feed.post` record MUST include explicit UK English language metadata:
+
+```ts
+langs: ['en-GB']
+```
+
+This is a fixed UK AQ publication value. The publisher MUST NOT use `en` instead, dynamically detect the language, infer it from the source article, publisher or article metadata, or omit `langs` when an optional publisher mention is absent. Existing Bluesky posts MUST NOT be backfilled or edited solely to add this metadata. The metadata describes the UK AQ-generated post text; it does not guarantee that Bluesky clients will suppress or display any particular translation control.
+
 ### 6.1 Default-message product limit
 
 The editable non-variable portion of the default message MUST be limited to:
