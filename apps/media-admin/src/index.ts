@@ -577,7 +577,9 @@ async function blueskySettings(request: Request, env: MediaAdminEnv): Promise<Re
     env.MEDIA_DB.prepare(`INSERT INTO media_bluesky_settings_requests
       (request_key, request_json, created_at) VALUES (?, ?, ?)`).bind(key, requestJson, now),
   ]);
-  if (!replay && parsed.data.publishing_enabled) {
+  // Replays also reissue the harmless generic wake so a lost post-commit Queue
+  // send is repaired without waiting for the two-hour scheduler reconciliation.
+  if (parsed.data.publishing_enabled) {
     try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
     catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
   }
@@ -607,6 +609,8 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
       WHERE publication_key = ?`).bind(`admin-request:${key}`).first();
     if (requestedPost !== Boolean(publication)) throw new HttpError(409, 'idempotency_key_conflict');
     await reconcileHomepageLatestSix(db);
+    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
     return json({ article: { id, status: replay.to_status, revision: replay.revision },
       bluesky_publication: publication, replayed: true });
   }

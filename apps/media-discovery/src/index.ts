@@ -188,7 +188,9 @@ export default {
     }
   },
   async scheduled(_controller, env): Promise<void> {
-    await Promise.all([enqueueScheduledDiscovery(env), reconcileBlueskyQueue(env)]);
+    await enqueueScheduledDiscovery(env);
+    try { await reconcileBlueskyQueue(env); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
   },
   async queue(batch, env): Promise<void> {
     if (batch.queue === 'uk-aq-media-bluesky') {

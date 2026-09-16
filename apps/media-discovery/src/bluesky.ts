@@ -156,11 +156,28 @@ async function uploadBlob(auth: { accessJwt: string }, thumbnail: { bytes: Array
 }
 
 async function createOrReadPost(auth: { accessJwt: string; did: string }, rkey: string,
-  record: Record<string, unknown>): Promise<{ uri: string; cid: string }> {
+  record: Record<string, unknown>): Promise<{ uri: string; cid: string; createdAt: string }> {
+  const expectedUri = `at://${auth.did}/app.bsky.feed.post/${rkey}`;
+  const reference = (body: unknown): { uri: string; cid: string } => {
+    const value = body as { uri?: unknown; cid?: unknown } | null;
+    if (!value || value.uri !== expectedUri || typeof value.cid !== 'string' ||
+        !value.cid || value.cid.length > 200) {
+      // A successful write with an unusable response must retry the same rkey so
+      // the existing-record reconciliation path can close the crash window.
+      throw new PublicationError('bluesky_api_transient', true);
+    }
+    return { uri: value.uri, cid: value.cid };
+  };
   const response = await xrpc('com.atproto.repo.createRecord', { method: 'POST',
     headers: { Authorization: `Bearer ${auth.accessJwt}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ repo: auth.did, collection: 'app.bsky.feed.post', rkey, record }) });
-  if (response.ok) return response.body as { uri: string; cid: string };
+  if (response.ok) {
+    const createdAt = record.createdAt;
+    if (typeof createdAt !== 'string' || Number.isNaN(Date.parse(createdAt))) {
+      throw new PublicationError('publication_state_conflict');
+    }
+    return { ...reference(response.body), createdAt: new Date(createdAt).toISOString() };
+  }
   if (isTransientXrpcStatus(response.status)) {
     throw new PublicationError('bluesky_api_transient', true);
   }
@@ -171,7 +188,14 @@ async function createOrReadPost(auth: { accessJwt: string; did: string }, rkey: 
     const existing = await xrpc(`com.atproto.repo.getRecord?${query}`, {
       headers: { Authorization: `Bearer ${auth.accessJwt}` },
     });
-    if (existing.ok) return existing.body as { uri: string; cid: string };
+    if (existing.ok) {
+      const body = existing.body as { value?: unknown } | null;
+      const value = body?.value as { createdAt?: unknown } | null;
+      if (!value || typeof value.createdAt !== 'string' || Number.isNaN(Date.parse(value.createdAt))) {
+        throw new PublicationError('bluesky_api_transient', true);
+      }
+      return { ...reference(existing.body), createdAt: new Date(value.createdAt).toISOString() };
+    }
     if (isTransientXrpcStatus(existing.status)) {
       throw new PublicationError('bluesky_api_transient', true);
     }
@@ -205,16 +229,20 @@ export async function scheduleNextBacklogWake(env: MediaDiscoveryEnv,
       ORDER BY CASE WHEN next_attempt_at IS NULL THEN 0 ELSE 1 END, next_attempt_at, id LIMIT 1`)
       .first<{ next_attempt_at: string | null }>(),
     env.MEDIA_DB.prepare(`SELECT last_attempted_at FROM media_bluesky_publications
-      WHERE status = 'posting' AND last_attempted_at IS NOT NULL
-      ORDER BY last_attempted_at, id LIMIT 1`).first<{ last_attempted_at: string }>(),
+      WHERE status = 'posting'
+      ORDER BY CASE WHEN last_attempted_at IS NULL THEN 0 ELSE 1 END,
+        last_attempted_at, id LIMIT 1`).first<{ last_attempted_at: string | null }>(),
   ]);
   if (!nextQueued && !nextPosting) return false;
   const now = Date.now();
   const queuedAt = nextQueued ? nextQueued.next_attempt_at
     ? Date.parse(nextQueued.next_attempt_at) : now : Number.POSITIVE_INFINITY;
-  const postingAt = nextPosting
-    ? Date.parse(nextPosting.last_attempted_at) + STALE_CLAIM_MS : Number.POSITIVE_INFINITY;
-  const workAt = Math.min(queuedAt, postingAt);
+  const parsedPostingAt = nextPosting?.last_attempted_at
+    ? Date.parse(nextPosting.last_attempted_at) + STALE_CLAIM_MS : now;
+  const postingAt = Number.isFinite(parsedPostingAt) ? parsedPostingAt : now;
+  // A live claim is a global barrier. Queued eligibility cannot outrank the
+  // earliest claim-recovery threshold in the remote-success/D1-crash window.
+  const workAt = nextPosting ? postingAt : queuedAt;
   const cooldownAt = settings.last_successful_post_at
     ? Date.parse(settings.last_successful_post_at) + settings.cooldown_seconds * 1000 : now;
   const delaySeconds = Math.max(0, Math.ceil((Math.max(workAt, cooldownAt) - now) / 1000));
@@ -239,11 +267,19 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
       message.ack(); return;
     }
   }
-  // Recover claims older than ten minutes, then atomically claim the oldest row.
+  // Recover claims older than ten minutes. Any claim still posting is a global
+  // barrier: do not let later queued work bypass its remote reconciliation.
   await env.MEDIA_DB.prepare(`UPDATE media_bluesky_publications SET status = 'queued',
     last_error_code = 'publication_state_conflict', next_attempt_at = NULL, updated_at = ?
-    WHERE status = 'posting' AND last_attempted_at < ?`).bind(new Date(now).toISOString(),
+    WHERE status = 'posting' AND (last_attempted_at IS NULL OR last_attempted_at <= ?)`)
+    .bind(new Date(now).toISOString(),
       new Date(now - STALE_CLAIM_MS).toISOString()).run();
+  const livePosting = await env.MEDIA_DB.prepare(`SELECT id FROM media_bluesky_publications
+    WHERE status = 'posting' ORDER BY last_attempted_at, id LIMIT 1`).first();
+  if (livePosting) {
+    await scheduleNextBacklogWake(env, settings);
+    message.ack(); return;
+  }
   const publication = await env.MEDIA_DB.prepare(`SELECT id, article_id, publication_key, status,
     attempt_count, record_key, created_at FROM media_bluesky_publications
     WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
@@ -256,9 +292,15 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
   const claimed = await env.MEDIA_DB.prepare(`UPDATE media_bluesky_publications
     SET status = 'posting', record_key = ?, next_attempt_at = NULL,
       last_attempted_at = ?, updated_at = ?
-    WHERE id = ? AND status = 'queued'`).bind(recordKey, new Date(now).toISOString(),
+    WHERE id = ? AND status = 'queued'
+      AND NOT EXISTS (SELECT 1 FROM media_bluesky_publications WHERE status = 'posting')`)
+    .bind(recordKey, new Date(now).toISOString(),
       new Date(now).toISOString(), publication.id).run();
-  if (!claimed.meta.changes) { message.retry({ delaySeconds: 5 }); return; }
+  if (!claimed.meta.changes) {
+    await scheduleNextBacklogWake(env, settings);
+    message.ack(); return;
+  }
+  let wakeSettings = settings;
   try {
     const article = await env.MEDIA_DB.prepare(`SELECT a.canonical_url, a.title, a.display_title,
       a.publisher, a.og_image_url, a.image_policy, a.source_key, s.canonical_domain,
@@ -276,25 +318,35 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
       publisher: article.publisher, template: settings.default_message_template,
       publisherMention: article.social_handle && article.social_did
         ? { handle: article.social_handle, did: article.social_did } : null });
+    const recordCreatedAt = new Date().toISOString();
     const result = await createOrReadPost(auth, recordKey, {
       $type: 'app.bsky.feed.post', text: rendered.text, facets: rendered.facets,
-      createdAt: new Date().toISOString(), embed: { $type: 'app.bsky.embed.external', external: {
+      createdAt: recordCreatedAt, embed: { $type: 'app.bsky.embed.external', external: {
         uri: article.canonical_url, title: article.display_title ?? article.title,
         description: `From ${article.publisher}`, thumb: blob,
       } },
     });
-    const postedAt = new Date().toISOString();
-    await env.MEDIA_DB.batch([
+    const postedAt = result.createdAt;
+    const reconciledAt = new Date().toISOString();
+    const [publicationUpdate] = await env.MEDIA_DB.batch([
       env.MEDIA_DB.prepare(`UPDATE media_bluesky_publications SET status = 'posted',
         attempt_count = attempt_count + 1, post_uri = ?, post_cid = ?, last_error_code = NULL,
         next_attempt_at = NULL, posted_at = ?, updated_at = ?
         WHERE id = ? AND status = 'posting'`)
-        .bind(result.uri, result.cid, postedAt, postedAt, publication.id),
-      env.MEDIA_DB.prepare(`UPDATE media_bluesky_settings SET last_successful_post_at = ?,
-        updated_at = ? WHERE id = 1`).bind(postedAt, postedAt),
+        .bind(result.uri, result.cid, postedAt, reconciledAt, publication.id),
+      env.MEDIA_DB.prepare(`UPDATE media_bluesky_settings SET last_successful_post_at = CASE
+          WHEN last_successful_post_at IS NULL OR last_successful_post_at < ? THEN ?
+          ELSE last_successful_post_at END,
+        updated_at = ? WHERE id = 1 AND EXISTS (
+          SELECT 1 FROM media_bluesky_publications
+          WHERE id = ? AND status = 'posted' AND posted_at = ?
+        )`).bind(postedAt, postedAt, reconciledAt, publication.id, postedAt),
     ]);
-    await scheduleNextBacklogWake(env, { ...settings, last_successful_post_at: postedAt });
-    message.ack();
+    if (!publicationUpdate?.meta.changes) throw new PublicationError('publication_state_conflict');
+    const priorSuccessful = settings.last_successful_post_at
+      && Date.parse(settings.last_successful_post_at) > Date.parse(postedAt)
+      ? settings.last_successful_post_at : postedAt;
+    wakeSettings = { ...settings, last_successful_post_at: priorSuccessful };
   } catch (caught) {
     const error = caught instanceof PublicationError ? caught
       : new PublicationError(caught instanceof Error && /^(post_text_too_long|message_template_)/.test(caught.message)
@@ -302,7 +354,12 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
     await fail(env.MEDIA_DB, publication, error);
     console.error(JSON.stringify({ event: 'bluesky_publication_failed', publication_id: publication.id,
       error_code: error.code }));
-    await scheduleNextBacklogWake(env, settings);
+  }
+  try {
+    await scheduleNextBacklogWake(env, wakeSettings);
     message.ack();
+  } catch {
+    console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', publication_id: publication.id }));
+    message.retry({ delaySeconds: 30 });
   }
 }

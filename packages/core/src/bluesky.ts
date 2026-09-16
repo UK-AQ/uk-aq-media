@@ -39,26 +39,64 @@ function utf8Length(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+function expandBlueskyTemplate(template: string, publisher: string, mention: string): {
+  text: string; mentionIndex: number | null;
+} {
+  const token = /\{publisher(?:_mention)?\}/g;
+  let text = '';
+  let cursor = 0;
+  let mentionIndex: number | null = null;
+  for (const match of template.matchAll(token)) {
+    text += template.slice(cursor, match.index);
+    cursor = match.index + match[0].length;
+    if (match[0] === '{publisher}') {
+      text += publisher;
+      continue;
+    }
+    if (mention) {
+      mentionIndex = text.length;
+      text += mention;
+      continue;
+    }
+
+    // Remove only horizontal whitespace adjacent to the empty optional token.
+    // If the token joined two pieces of text, retain one separating space.
+    text = text.replace(/[ \t]+$/u, '');
+    while (cursor < template.length && /[ \t]/u.test(template[cursor]!)) cursor++;
+    const left = text.at(-1);
+    const right = template[cursor];
+    if (left && left !== '\n' && right && right !== '\n') text += ' ';
+  }
+  text += template.slice(cursor);
+  return { text, mentionIndex };
+}
+
 export function renderBlueskyPost(input: { title: string; publisher: string;
   template: string; publisherMention?: { handle: string; did: string } | null }):
   { text: string; facets: BlueskyFacet[] } {
   validateBlueskyTemplate(input.template);
   const mention = input.publisherMention?.handle ? `@${input.publisherMention.handle}` : '';
-  let expanded = input.template.replaceAll('{publisher}', input.publisher);
-  const mentionToken = '{publisher_mention}';
-  const mentionTemplateIndex = expanded.indexOf(mentionToken);
-  expanded = expanded.replace(mentionToken, mention);
-  if (!mention) expanded = expanded.split('\n').map(line => line.replace(/[ \t]+$/g, '')).join('\n');
+  const expanded = expandBlueskyTemplate(input.template, input.publisher, mention);
   const separator = '\n\n';
-  const remaining = BLUESKY_POST_GRAPHEMES - graphemes(separator + expanded).length;
+  const remaining = BLUESKY_POST_GRAPHEMES - graphemes(separator + expanded.text).length;
   if (remaining < 1) throw new Error('post_text_too_long');
   const titleParts = graphemes(input.title.trim());
   if (!titleParts.length) throw new Error('post_text_too_long');
-  const title = titleParts.length <= remaining ? titleParts.join('')
-    : remaining === 1 ? '…' : `${titleParts.slice(0, remaining - 1).join('')}…`;
-  const text = `${title}${separator}${expanded}`;
-  if (graphemes(text).length > BLUESKY_POST_GRAPHEMES || utf8Length(text) > BLUESKY_POST_BYTES) {
-    throw new Error('post_text_too_long');
+  let truncated = titleParts.length > remaining;
+  let prefixLength = truncated ? Math.max(0, remaining - 1) : titleParts.length;
+  let title = truncated ? `${titleParts.slice(0, prefixLength).join('')}…` : titleParts.join('');
+  let text = `${title}${separator}${expanded.text}`;
+  while (utf8Length(text) > BLUESKY_POST_BYTES) {
+    if (!truncated) {
+      truncated = true;
+      prefixLength = Math.min(Math.max(0, remaining - 1), titleParts.length - 1);
+    } else if (prefixLength > 0) {
+      prefixLength--;
+    } else {
+      throw new Error('post_text_too_long');
+    }
+    title = `${titleParts.slice(0, prefixLength).join('')}…`;
+    text = `${title}${separator}${expanded.text}`;
   }
 
   const facets: BlueskyFacet[] = [];
@@ -69,8 +107,8 @@ export function renderBlueskyPost(input: { title: string; publisher: string;
   for (const match of text.matchAll(/https:\/\/[^\s]+/g)) {
     add(match.index, match[0], { $type: 'app.bsky.richtext.facet#link', uri: match[0] });
   }
-  if (mention && input.publisherMention && mentionTemplateIndex >= 0) {
-    const start = title.length + separator.length + mentionTemplateIndex;
+  if (mention && input.publisherMention && expanded.mentionIndex !== null) {
+    const start = title.length + separator.length + expanded.mentionIndex;
     if (text.slice(start, start + mention.length) === mention) add(start, mention,
       { $type: 'app.bsky.richtext.facet#mention', did: input.publisherMention.did });
   }

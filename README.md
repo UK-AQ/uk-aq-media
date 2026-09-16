@@ -472,8 +472,12 @@ and post-discovery reconciliation recover lost wake-ups. A stale `posting` claim
 recovered after ten minutes. Transient retry eligibility is persisted as `next_attempt_at`,
 so an early duplicate wake cannot bypass bounded exponential backoff. Success and terminal
 failure both schedule the next eligible backlog wake; only successful posts start cooldown.
-A live `posting` claim also schedules a wake for its ten-minute stale threshold, so a
-crashed claim normally recovers then rather than waiting for two-hour reconciliation.
+A non-stale `posting` claim is a global backlog barrier: no later queued publication is
+claimed until that claim resolves or reaches its ten-minute stale-recovery threshold.
+The earliest live claim schedules the next wake for that threshold (subject to any
+successful-post cooldown), rather than allowing an immediately eligible queued row to
+force an early wake. This preserves durable oldest-first processing and cooldown safety
+across the remote-success/D1-crash window, while avoiding a two-hour reconciliation wait.
 
 The consumer reuses the existing source-scoped remote-preview validator/fetcher, accepts
 only a bounded current image type/size, uploads a blob, and always creates an explicit
