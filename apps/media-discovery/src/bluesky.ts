@@ -25,6 +25,10 @@ export class PublicationError extends Error {
 
 type XrpcResult = { status: number; ok: boolean; body: unknown };
 
+export function isTransientXrpcStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
 async function boundedJson(response: Response): Promise<unknown> {
   const declared = Number(response.headers.get('content-length') ?? 0);
   if (declared > MAX_XRPC_JSON_BYTES) throw new Error('xrpc_response_too_large');
@@ -91,7 +95,7 @@ export async function authenticate(password: string): Promise<{ accessJwt: strin
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier: BLUESKY_HANDLE, password }) });
   if (!response.ok) {
-    const transient = response.status === 429 || response.status >= 500;
+    const transient = isTransientXrpcStatus(response.status);
     throw new PublicationError(transient ? 'bluesky_api_transient' : 'bluesky_auth_failed', transient);
   }
   const body = response.body as { accessJwt?: unknown; did?: unknown; handle?: unknown } | null;
@@ -142,8 +146,10 @@ async function uploadBlob(auth: { accessJwt: string }, thumbnail: { bytes: Array
   const response = await xrpc('com.atproto.repo.uploadBlob', { method: 'POST',
     headers: { Authorization: `Bearer ${auth.accessJwt}`, 'Content-Type': thumbnail.type },
     body: thumbnail.bytes });
-  if (!response.ok) throw new PublicationError(response.status >= 500 || response.status === 429
-    ? 'bluesky_api_transient' : 'bluesky_post_rejected', response.status >= 500 || response.status === 429);
+  if (!response.ok) {
+    const transient = isTransientXrpcStatus(response.status);
+    throw new PublicationError(transient ? 'bluesky_api_transient' : 'bluesky_post_rejected', transient);
+  }
   const body = response.body as { blob?: unknown } | null;
   if (!body?.blob) throw new PublicationError('bluesky_post_rejected');
   return body.blob;
@@ -155,7 +161,7 @@ async function createOrReadPost(auth: { accessJwt: string; did: string }, rkey: 
     headers: { Authorization: `Bearer ${auth.accessJwt}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ repo: auth.did, collection: 'app.bsky.feed.post', rkey, record }) });
   if (response.ok) return response.body as { uri: string; cid: string };
-  if (response.status >= 500 || response.status === 429) {
+  if (isTransientXrpcStatus(response.status)) {
     throw new PublicationError('bluesky_api_transient', true);
   }
   // A retry after the remote write/D1 crash window receives an existing-record
@@ -166,7 +172,7 @@ async function createOrReadPost(auth: { accessJwt: string; did: string }, rkey: 
       headers: { Authorization: `Bearer ${auth.accessJwt}` },
     });
     if (existing.ok) return existing.body as { uri: string; cid: string };
-    if (existing.status === 429 || existing.status >= 500) {
+    if (isTransientXrpcStatus(existing.status)) {
       throw new PublicationError('bluesky_api_transient', true);
     }
     if (existing.status === 404) throw new PublicationError('publication_state_conflict');

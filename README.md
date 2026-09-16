@@ -466,8 +466,8 @@ https://ukaq.co.uk/
 `uk-aq-media-bluesky` is a dedicated serialized Queue, produced by admin and discovery
 as `MEDIA_BLUESKY_QUEUE` and consumed by `media-discovery`. Queue messages are bounded
 wake-ups only; D1 selects the oldest queued id. The default ten-minute cooldown is
-computed from `last_successful_post_at`. Delayed Queue wakes enforce it, while the normal
-active central `POST /scheduler/run` two-hour path, the dormant native scheduler fallback,
+computed from `last_successful_post_at`. Delayed Queue wakes enforce it, while the active
+central `POST /scheduler/run` two-hour path, the dormant native scheduler fallback,
 and post-discovery reconciliation recover lost wake-ups. A stale `posting` claim is
 recovered after ten minutes. Transient retry eligibility is persisted as `next_attempt_at`,
 so an early duplicate wake cannot bypass bounded exponential backoff. Success and terminal
