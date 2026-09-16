@@ -26,6 +26,18 @@ CREATE TABLE media_bluesky_settings_requests (
   created_at TEXT NOT NULL
 );
 
+-- The article event key alone does not retain whether an admin request also
+-- asked for a manual Bluesky publication. Keep the complete logical request
+-- identity so concurrent replays cannot attach different social intent to the
+-- event that won the idempotency key.
+CREATE TABLE media_admin_status_requests (
+  request_key TEXT PRIMARY KEY,
+  article_id INTEGER NOT NULL REFERENCES media_articles(id),
+  action TEXT NOT NULL CHECK (action IN ('approve', 'reject', 'hide', 'unhide')),
+  post_to_bluesky INTEGER NOT NULL CHECK (post_to_bluesky IN (0, 1)),
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE media_bluesky_publications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   article_id INTEGER NOT NULL REFERENCES media_articles(id),

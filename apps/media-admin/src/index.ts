@@ -24,6 +24,27 @@ const transitions: Record<Action, { from: Status[]; to: Status; event: string }>
   unhide: { from: ['hidden'], to: 'approved', event: 'unhidden' },
 };
 
+type AdminStatusRequestRow = {
+  article_id: number;
+  action: Action;
+  post_to_bluesky: number;
+};
+
+type AdminStatusEventRow = {
+  article_id: number;
+  event_type: string;
+  from_status: Status | null;
+  to_status: Status;
+  revision: number;
+};
+
+type AdminBlueskyPublicationRow = {
+  id: number;
+  article_id: number;
+  publication_reason: string;
+  status: string;
+};
+
 const ManualDisplayTitleBody = z.object({ display_title: z.string().nullable() }).strict();
 const GuardianImagePreviewBody = z.object({
   route_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(100),
@@ -589,6 +610,60 @@ async function blueskySettings(request: Request, env: MediaAdminEnv): Promise<Re
   return json(present(settings, Boolean(replay)));
 }
 
+function manualPublicationReason(action: Action,
+  fromStatus: Status | null): 'rejected_repost' | 'unhidden_repost' | null {
+  if (action === 'approve' && fromStatus === 'rejected') return 'rejected_repost';
+  if (action === 'unhide' && fromStatus === 'hidden') return 'unhidden_repost';
+  return null;
+}
+
+async function statusMutationReceipt(db: D1Database, key: string, id: number,
+  action: Action, requestedPost: boolean): Promise<{
+    event: AdminStatusEventRow;
+    publication: Pick<AdminBlueskyPublicationRow, 'id' | 'status'> | null;
+  } | null> {
+  const requestIdentity = await db.prepare(`SELECT article_id, action, post_to_bluesky
+    FROM media_admin_status_requests WHERE request_key = ?`).bind(key)
+    .first<AdminStatusRequestRow>();
+  if (requestIdentity && (requestIdentity.article_id !== id ||
+      requestIdentity.action !== action ||
+      Boolean(requestIdentity.post_to_bluesky) !== requestedPost)) {
+    throw new HttpError(409, 'idempotency_key_conflict');
+  }
+
+  const event = await db.prepare(`SELECT article_id, event_type, from_status, to_status, revision
+    FROM media_article_events WHERE event_key = ?`).bind(`admin:${key}`)
+    .first<AdminStatusEventRow>();
+  if (!requestIdentity && !event) return null;
+  if (!event) throw new HttpError(409, 'publication_state_conflict');
+  if (event.article_id !== id || event.event_type !== transitions[action].event) {
+    throw new HttpError(409, 'idempotency_key_conflict');
+  }
+
+  const publication = await db.prepare(`SELECT id, article_id, publication_reason, status
+    FROM media_bluesky_publications WHERE publication_key = ?`).bind(`admin-request:${key}`)
+    .first<AdminBlueskyPublicationRow>();
+  if (!requestIdentity && requestedPost !== Boolean(publication)) {
+    // Events created before the durable request-identity table remain replayable.
+    throw new HttpError(409, 'idempotency_key_conflict');
+  }
+  const expectedReason = manualPublicationReason(action, event.from_status);
+  if (requestedPost !== Boolean(publication) || (publication &&
+      (publication.article_id !== id || publication.publication_reason !== expectedReason))) {
+    throw new HttpError(409, 'publication_state_conflict');
+  }
+  return { event, publication: publication ? { id: publication.id, status: publication.status } : null };
+}
+
+async function statusMutationResponse(env: MediaAdminEnv, id: number, receipt: NonNullable<
+  Awaited<ReturnType<typeof statusMutationReceipt>>>, replayed: boolean): Promise<Response> {
+  await reconcileHomepageLatestSix(env.MEDIA_DB);
+  try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+  catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
+  return json({ article: { id, status: receipt.event.to_status, revision: receipt.event.revision },
+    bluesky_publication: receipt.publication, replayed });
+}
+
 async function mutate(request: Request, env: MediaAdminEnv, id: number, action: Action): Promise<Response> {
   const db = env.MEDIA_DB;
   const key = request.headers.get('Idempotency-Key');
@@ -598,37 +673,41 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
   const parsedBody = StatusMutationBody.safeParse(await boundedOptionalJson(request));
   if (!parsedBody.success) throw new HttpError(400, 'invalid_status_mutation_body');
   const requestedPost = parsedBody.data.post_to_bluesky === true;
-  const replay = await db.prepare(`SELECT article_id, event_type, to_status, revision
-    FROM media_article_events WHERE event_key = ?`).bind(eventKey)
-    .first<{ article_id: number; event_type: string; to_status: Status; revision: number }>();
-  if (replay) {
-    if (replay.article_id !== id || replay.event_type !== transition.event) {
-      throw new HttpError(409, 'idempotency_key_conflict');
-    }
-    const publication = await db.prepare(`SELECT id, status FROM media_bluesky_publications
-      WHERE publication_key = ?`).bind(`admin-request:${key}`).first();
-    if (requestedPost !== Boolean(publication)) throw new HttpError(409, 'idempotency_key_conflict');
-    await reconcileHomepageLatestSix(db);
-    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
-    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
-    return json({ article: { id, status: replay.to_status, revision: replay.revision },
-      bluesky_publication: publication, replayed: true });
-  }
+  const replay = await statusMutationReceipt(db, key, id, action, requestedPost);
+  if (replay) return statusMutationResponse(env, id, replay, true);
   const before = await db.prepare(`SELECT status, og_image_url, image_policy,
     (SELECT image_policy FROM media_sources WHERE source_key = a.source_key) AS source_image_policy
     FROM media_articles a WHERE id = ?`).bind(id).first<{
       status: Status; og_image_url: string | null; image_policy: string; source_image_policy: string }>();
-  if (!before) throw new HttpError(404, 'article_not_found');
-  const manualReason = action === 'approve' && before.status === 'rejected' ? 'rejected_repost'
-    : action === 'unhide' && before.status === 'hidden' ? 'unhidden_repost' : null;
-  if (requestedPost && !manualReason) throw new HttpError(400, 'post_to_bluesky_not_available');
+  if (!before) {
+    const racedReplay = await statusMutationReceipt(db, key, id, action, requestedPost);
+    if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
+    throw new HttpError(404, 'article_not_found');
+  }
+  const manualReason = manualPublicationReason(action, before.status);
+  if (requestedPost && !manualReason) {
+    const racedReplay = await statusMutationReceipt(db, key, id, action, requestedPost);
+    if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
+    throw new HttpError(400, 'post_to_bluesky_not_available');
+  }
   if (requestedPost && (!before.og_image_url || before.image_policy !== 'remote_preview' ||
-      before.source_image_policy !== 'remote_preview')) throw new HttpError(409, 'thumbnail_missing');
+      before.source_image_policy !== 'remote_preview')) {
+    const racedReplay = await statusMutationReceipt(db, key, id, action, requestedPost);
+    if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
+    throw new HttpError(409, 'thumbnail_missing');
+  }
   const now = new Date().toISOString();
   const placeholders = transition.from.map(() => '?').join(', ');
-  // D1 batch is transactional: the status trigger's event and optional manual
-  // outbox row commit together or neither does.
-  const statements = [db.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
+  // D1 batch is transactional. The durable full request identity owns the key;
+  // every later statement is conditional on that exact identity.
+  const statements = [db.prepare(`INSERT INTO media_admin_status_requests
+      (request_key, article_id, action, post_to_bluesky, created_at)
+    SELECT ?, ?, ?, ?, ? FROM media_articles
+    WHERE id = ? AND status IN (${placeholders})
+      AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)
+    ON CONFLICT(request_key) DO NOTHING`)
+    .bind(key, id, action, Number(requestedPost), now, id, ...transition.from, eventKey),
+  db.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
     revision = revision + 1, updated_at = ?,
     approval_method = CASE WHEN ? IN ('approve', 'unhide') THEN 'manual' ELSE approval_method END,
     approval_author_rule_key = CASE WHEN ? IN ('approve', 'unhide') THEN NULL ELSE approval_author_rule_key END,
@@ -636,30 +715,29 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
     rejected_at = CASE WHEN ? = 'reject' THEN ? ELSE rejected_at END,
     hidden_at = CASE WHEN ? = 'hide' THEN ? WHEN ? = 'unhide' THEN NULL ELSE hidden_at END
     WHERE id = ? AND status IN (${placeholders})
+      AND EXISTS (SELECT 1 FROM media_admin_status_requests
+        WHERE request_key = ? AND article_id = ? AND action = ? AND post_to_bluesky = ?)
       AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)
     `).bind(transition.to, eventKey, now,
       action, action, action, now, action, now, action, now, action, id,
-      ...transition.from, eventKey)];
+      ...transition.from, key, id, action, Number(requestedPost), eventKey)];
   if (requestedPost && manualReason) {
     statements.push(db.prepare(`INSERT INTO media_bluesky_publications
         (article_id, approval_event_id, publication_key, publication_reason, status, created_at, updated_at)
-        SELECT ?, NULL, ?, ?, 'queued', ?, ?
-        WHERE EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ? AND article_id = ?)`)
-      .bind(id, `admin-request:${key}`, manualReason, now, now, eventKey, id));
+        SELECT e.article_id, NULL, ?, ?, 'queued', ?, ?
+        FROM media_article_events e JOIN media_admin_status_requests r
+          ON r.request_key = ? AND r.article_id = e.article_id
+          AND r.action = ? AND r.post_to_bluesky = 1
+        WHERE e.event_key = ? AND e.article_id = ? AND e.event_type = ?
+          AND e.from_status = ? AND e.to_status = 'approved'
+        ON CONFLICT(publication_key) DO NOTHING`)
+      .bind(`admin-request:${key}`, manualReason, now, now, key, action,
+        eventKey, id, transition.event, before.status));
   }
-  await db.batch(statements);
-  const event = await db.prepare(`SELECT article_id, event_type, to_status, revision
-    FROM media_article_events WHERE event_key = ?`).bind(eventKey)
-    .first<{ article_id: number; event_type: string; to_status: Status; revision: number }>();
-  if (event) {
-    await reconcileHomepageLatestSix(db);
-    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
-    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
-    const publication = await db.prepare(`SELECT id, status FROM media_bluesky_publications
-      WHERE publication_key = ?`).bind(`admin-request:${key}`).first();
-    return json({ article: { id, status: event.to_status, revision: event.revision },
-      bluesky_publication: publication, replayed: false });
-  }
+  const results = await db.batch(statements);
+  const changed = Number(results[1]?.meta.changes ?? 0) > 0;
+  const receipt = await statusMutationReceipt(db, key, id, action, requestedPost);
+  if (receipt) return statusMutationResponse(env, id, receipt, !changed);
   const exists = await db.prepare('SELECT id FROM media_articles WHERE id = ?').bind(id).first();
   throw new HttpError(exists ? 409 : 404, exists ? 'invalid_state_transition' : 'article_not_found');
 }

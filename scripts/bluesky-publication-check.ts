@@ -1,6 +1,120 @@
 import assert from 'node:assert/strict';
+import { timingSafeEqual } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { BLUESKY_POST_BYTES, graphemes, renderBlueskyPost } from '@uk-aq-media/core';
+import mediaAdminWorker from '../apps/media-admin/src/index';
 import { consumeBluesky } from '../apps/media-discovery/src/bluesky';
+
+type SqlValue = string | number | bigint | null | Uint8Array;
+
+class SqliteD1Statement {
+  private parameters: SqlValue[] = [];
+
+  constructor(private readonly owner: SqliteD1, readonly statement: StatementSync) {}
+
+  bind(...values: unknown[]): D1PreparedStatement {
+    this.parameters = values as SqlValue[];
+    return this as unknown as D1PreparedStatement;
+  }
+
+  values(): readonly SqlValue[] { return this.parameters; }
+
+  async first<T>(): Promise<T | null> {
+    const row = (this.statement.get(...this.parameters) as T | undefined) ?? null;
+    await this.owner.afterRead(this.statement.sourceSQL);
+    return row;
+  }
+
+  async all<T>(): Promise<D1Result<T>> {
+    return { success: true, results: this.statement.all(...this.parameters) as T[],
+      meta: {} as D1Meta & Record<string, unknown> };
+  }
+
+  runSync(): D1Result {
+    const result = /\bRETURNING\b/iu.test(this.statement.sourceSQL)
+      ? this.statement.all(...this.parameters)
+      : this.statement.run(...this.parameters);
+    return { success: true, results: [],
+      meta: result as unknown as D1Meta & Record<string, unknown> };
+  }
+
+  async run(): Promise<D1Result> { return this.runSync(); }
+}
+
+class SqliteD1 {
+  private preflightReadsRemaining = 0;
+  private holdFirstPreflightForWinner = false;
+  private releasePreflight: (() => void) | null = null;
+  private preflightBarrier: Promise<void> = Promise.resolve();
+  private preferredPost: boolean | null = null;
+  private preferredBatchCommitted = false;
+  private releaseLosingBatch: (() => void) | null = null;
+  private losingBatchBarrier: Promise<void> = Promise.resolve();
+
+  constructor(private readonly database: DatabaseSync) {}
+
+  armConcurrentStatusRace(preferredPost: boolean | null = null,
+    holdFirstPreflightForWinner = false): void {
+    this.preflightReadsRemaining = 2;
+    this.holdFirstPreflightForWinner = holdFirstPreflightForWinner;
+    this.preflightBarrier = new Promise(resolve => { this.releasePreflight = resolve; });
+    this.preferredPost = preferredPost;
+    this.preferredBatchCommitted = false;
+    this.losingBatchBarrier = new Promise(resolve => { this.releaseLosingBatch = resolve; });
+  }
+
+  async afterRead(sql: string): Promise<void> {
+    if (this.preflightReadsRemaining === 0 ||
+        !sql.includes('FROM media_article_events WHERE event_key = ?')) return;
+    const firstRead = this.preflightReadsRemaining === 2;
+    this.preflightReadsRemaining--;
+    if (this.holdFirstPreflightForWinner) {
+      if (firstRead) await this.losingBatchBarrier;
+      return;
+    }
+    if (this.preflightReadsRemaining === 0) this.releasePreflight?.();
+    await this.preflightBarrier;
+  }
+
+  prepare(sql: string): D1PreparedStatement {
+    return new SqliteD1Statement(this, this.database.prepare(sql)) as unknown as D1PreparedStatement;
+  }
+
+  async batch(statements: D1PreparedStatement[]): Promise<D1Result[]> {
+    const sqliteStatements = statements as unknown as SqliteD1Statement[];
+    const requestInsert = sqliteStatements[0];
+    const isStatusMutation = requestInsert?.statement.sourceSQL
+      .includes('INSERT INTO media_admin_status_requests');
+    const requestedPost = isStatusMutation && requestInsert
+      ? Boolean(requestInsert.values()[3]) : null;
+    if (this.preferredPost !== null && requestedPost !== null &&
+        requestedPost !== this.preferredPost && !this.preferredBatchCommitted) {
+      await this.losingBatchBarrier;
+    }
+
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const results = sqliteStatements.map(statement => statement.runSync());
+      this.database.exec('COMMIT');
+      if (requestedPost === this.preferredPost) {
+        this.preferredBatchCommitted = true;
+        this.releaseLosingBatch?.();
+      }
+      return results;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+}
+
+function applyMigrations(database: DatabaseSync): void {
+  database.exec('PRAGMA foreign_keys = ON');
+  for (const filename of readdirSync('migrations').filter(value => /^\d+.*\.sql$/u.test(value)).sort()) {
+    database.exec(readFileSync(`migrations/${filename}`, 'utf8'));
+  }
+}
 
 type PublicationRow = {
   id: number;
@@ -133,12 +247,168 @@ function environment(rows: PublicationRow[], now: () => number) {
   };
 }
 
+const FIXTURE_ADMIN_TOKEN = 'fixture-admin-token';
+
+function statusRaceDatabase(): { sqlite: DatabaseSync; facade: SqliteD1; env: MediaAdminEnv } {
+  const sqlite = new DatabaseSync(':memory:');
+  applyMigrations(sqlite);
+  const instant = '2026-09-16T12:00:00.000Z';
+  sqlite.prepare(`INSERT INTO media_sources
+      (source_key, name, canonical_domain, source_type, enabled, publication_policy,
+       review_level, priority, discovery_method, discovery_config_json,
+       content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
+    VALUES ('bluesky-race-fixture', 'Race fixture', 'fixture.example', 'publisher', 1,
+      'manual', 'standard', 50, 'deferred', '{}', 'discovery_metadata_only',
+      'disabled', 'remote_preview', ?, ?)`)
+    .run(instant, instant);
+  const facade = new SqliteD1(sqlite);
+  const queue = { async send() { /* durable state is asserted below */ } } as unknown as Queue;
+  return { sqlite, facade, env: {
+    MEDIA_DB: facade as unknown as D1Database,
+    MEDIA_BLUESKY_QUEUE: queue,
+    MEDIA_ADMIN_TOKEN: FIXTURE_ADMIN_TOKEN,
+  } as MediaAdminEnv };
+}
+
+function insertStatusFixture(sqlite: DatabaseSync, id: number,
+  status: 'rejected' | 'approved'): void {
+  const instant = '2026-09-16T12:00:00.000Z';
+  const url = `https://fixture.example/article-${id}`;
+  sqlite.prepare(`INSERT INTO media_articles
+      (id, source_key, canonical_url, canonical_url_hash, original_url, title, publisher,
+       discovered_at, last_seen_at, status, review_level, approval_method, og_image_url,
+       image_policy, approved_at, rejected_at, created_at, updated_at)
+    VALUES (?, 'bluesky-race-fixture', ?, ?, ?, ?, 'Race fixture', ?, ?, ?, 'standard',
+      ?, ?, 'remote_preview', ?, ?, ?, ?)`)
+    .run(id, url, id.toString(16).padStart(64, '0'), url, `Fixture article ${id}`,
+      instant, instant, status, status === 'approved' ? 'manual' : null,
+      `https://fixture.example/image-${id}.jpg`, status === 'approved' ? instant : null,
+      status === 'rejected' ? instant : null, instant, instant);
+}
+
+function statusRequest(id: number, action: 'approve' | 'reject' | 'hide', key: string,
+  postToBluesky: boolean): Request {
+  return new Request(`https://media.example/admin/articles/${id}/${action}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': key,
+    },
+    body: JSON.stringify({ post_to_bluesky: postToBluesky }),
+  });
+}
+
+async function invokeStatus(env: MediaAdminEnv, request: Request): Promise<{
+  status: number;
+  body: Record<string, unknown>;
+}> {
+  const response = await mediaAdminWorker.fetch(
+    request as Parameters<typeof mediaAdminWorker.fetch>[0], env);
+  return { status: response.status, body: await response.json() as Record<string, unknown> };
+}
+
+function scalar(sqlite: DatabaseSync, sql: string, ...values: SqlValue[]): number {
+  return Number((sqlite.prepare(sql).get(...values) as { value: number }).value);
+}
+
+async function checkConcurrentAdminIdempotency(): Promise<void> {
+  {
+    const { sqlite, facade, env } = statusRaceDatabase();
+    insertStatusFixture(sqlite, 101, 'rejected');
+    // The first caller captures an absent replay, then resumes only after the
+    // second caller has committed. This covers the replay-read/article-read gap.
+    facade.armConcurrentStatusRace(true, true);
+    const key = 'race_identical_0001';
+    const results = await Promise.all([
+      invokeStatus(env, statusRequest(101, 'approve', key, true)),
+      invokeStatus(env, statusRequest(101, 'approve', key, true)),
+    ]);
+    assert.deepEqual(results.map(result => result.status), [200, 200]);
+    assert.deepEqual(results.map(result => result.body.replayed).sort(), [false, true]);
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_article_events
+      WHERE event_key = ?`, `admin:${key}`), 1);
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+      WHERE publication_key = ?`, `admin-request:${key}`), 1);
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_admin_status_requests
+      WHERE request_key = ?`, key), 1);
+    sqlite.close();
+  }
+
+  for (const preferredPost of [false, true]) {
+    const { sqlite, facade, env } = statusRaceDatabase();
+    insertStatusFixture(sqlite, 102, 'rejected');
+    facade.armConcurrentStatusRace(preferredPost);
+    const key = `race_social_${preferredPost ? 'true' : 'false'}_01`;
+    const results = await Promise.all([
+      invokeStatus(env, statusRequest(102, 'approve', key, false)),
+      invokeStatus(env, statusRequest(102, 'approve', key, true)),
+    ]);
+    const winning = results[preferredPost ? 1 : 0];
+    const losing = results[preferredPost ? 0 : 1];
+    assert.equal(winning?.status, 200);
+    assert.equal(winning?.body.replayed, false);
+    assert.equal(losing?.status, 409);
+    assert.equal(losing?.body.error, 'idempotency_key_conflict');
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_article_events
+      WHERE event_key = ?`, `admin:${key}`), 1);
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+      WHERE publication_key = ?`, `admin-request:${key}`), preferredPost ? 1 : 0);
+    const identity = sqlite.prepare(`SELECT post_to_bluesky FROM media_admin_status_requests
+      WHERE request_key = ?`).get(key) as { post_to_bluesky: number };
+    assert.equal(Boolean(identity.post_to_bluesky), preferredPost);
+    sqlite.close();
+  }
+
+  {
+    const { sqlite, facade, env } = statusRaceDatabase();
+    insertStatusFixture(sqlite, 103, 'rejected');
+    insertStatusFixture(sqlite, 104, 'rejected');
+    facade.armConcurrentStatusRace();
+    const key = 'race_different_article_01';
+    const results = await Promise.all([
+      invokeStatus(env, statusRequest(103, 'approve', key, false)),
+      invokeStatus(env, statusRequest(104, 'approve', key, false)),
+    ]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+    assert.equal(results.find(result => result.status === 409)?.body.error,
+      'idempotency_key_conflict');
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_article_events
+      WHERE event_key = ?`, `admin:${key}`), 1);
+    sqlite.close();
+  }
+
+  {
+    const { sqlite, facade, env } = statusRaceDatabase();
+    insertStatusFixture(sqlite, 105, 'approved');
+    facade.armConcurrentStatusRace();
+    const key = 'race_different_action_001';
+    const results = await Promise.all([
+      invokeStatus(env, statusRequest(105, 'hide', key, false)),
+      invokeStatus(env, statusRequest(105, 'reject', key, false)),
+    ]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+    assert.equal(results.find(result => result.status === 409)?.body.error,
+      'idempotency_key_conflict');
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_article_events
+      WHERE event_key = ?`, `admin:${key}`), 1);
+    sqlite.close();
+  }
+}
+
 const originalNow = Date.now;
 const originalFetch = globalThis.fetch;
 const originalConsoleError = console.error;
+const workerSubtle = crypto.subtle as SubtleCrypto & {
+  timingSafeEqual?: (left: ArrayBuffer, right: ArrayBuffer) => boolean;
+};
+const originalTimingSafeEqual = workerSubtle.timingSafeEqual;
 let currentNow = Date.parse('2026-09-16T12:00:00.000Z');
 let networkCalls = 0;
 Date.now = () => currentNow;
+Object.defineProperty(workerSubtle, 'timingSafeEqual', { configurable: true,
+  value: (left: ArrayBuffer, right: ArrayBuffer) =>
+    timingSafeEqual(new Uint8Array(left), new Uint8Array(right)) });
 globalThis.fetch = (async () => {
   networkCalls++;
   throw new Error('network access forbidden in Bluesky structural check');
@@ -146,6 +416,8 @@ globalThis.fetch = (async () => {
 console.error = () => undefined;
 
 try {
+  await checkConcurrentAdminIdempotency();
+
   const rows: PublicationRow[] = [
     { id: 1, article_id: 1, publication_key: 'a', status: 'posting', attempt_count: 0,
       record_key: '3m3b2aaaaaaaa', created_at: '2026-09-16T11:55:00.000Z',
@@ -216,9 +488,15 @@ try {
   assert.ok(byteHeavy.text.split('\n\n', 1)[0]?.endsWith('…'),
     'only the rendered byte-heavy title should be shortened');
 
-  console.log('Bluesky backlog barrier and post-builder checks passed.');
+  console.log('Bluesky admin idempotency, backlog barrier and post-builder checks passed.');
 } finally {
   Date.now = originalNow;
   globalThis.fetch = originalFetch;
   console.error = originalConsoleError;
+  if (originalTimingSafeEqual) {
+    Object.defineProperty(workerSubtle, 'timingSafeEqual', { configurable: true,
+      value: originalTimingSafeEqual });
+  } else {
+    Reflect.deleteProperty(workerSubtle, 'timingSafeEqual');
+  }
 }

@@ -422,9 +422,10 @@ real-operation validation, known limits and rollback.
 Bluesky publication is a downstream, durable outbox operation and never changes an
 article's Media approval result. Migration `0021_bluesky_publications.sql` adds the
 singleton `media_bluesky_settings`, the audited `media_bluesky_publications` outbox,
-and explicit `media_source_social_accounts` identities. It installs an approval-event
-trigger but seeds publishing disabled with no activation watermark, so installation
-does not backfill or publish historical approvals.
+the full-identity `media_admin_status_requests` idempotency receipts, and explicit
+`media_source_social_accounts` identities. It installs an approval-event trigger but
+seeds publishing disabled with no activation watermark, so installation does not
+backfill or publish historical approvals.
 
 Media owns Bluesky policy, state, and the authenticated API; the separate Ops
 repository owns the visible Articles dashboard and modal presentation. The Media API
@@ -443,11 +444,14 @@ remote-preview thumbnail. Rejected-to-approved and hidden-to-approved remain ord
 Media transitions unless their existing status endpoint receives
 `{"post_to_bluesky":true}`. That option defaults false, is rejected without an eligible
 thumbnail, and uses the admin request identity for replay-safe but repeatable deliberate
-reposts. Article detail returns exact successful-post and publication counts, bounded history, latest
-status, thumbnail eligibility, and current-state manual-repost availability/reason so
-Ops does not duplicate Media eligibility policy; list responses retain both counts and
-latest status. `post_count`/`bluesky_post_count` count only `posted` records that exist on
-Bluesky; `publication_count`/`bluesky_publication_count` count every durable outbox row.
+reposts. The request receipt stores article, action, and `post_to_bluesky` together in the
+same transactional batch as the event/outbox change, so same-key conflicts fail without
+borrowing another request's event. Article detail returns exact successful-post and
+publication counts, bounded history, latest status, thumbnail eligibility, and
+current-state manual-repost availability/reason so Ops does not duplicate Media
+eligibility policy; list responses retain both counts and latest status.
+`post_count`/`bluesky_post_count` count only `posted` records that exist on Bluesky;
+`publication_count`/`bluesky_publication_count` count every durable outbox row.
 
 Post text is the accepted display title (otherwise publisher title), one blank line,
 then the global template. Supported placeholders are `{publisher}` and
