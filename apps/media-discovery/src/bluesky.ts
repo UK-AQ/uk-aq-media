@@ -321,7 +321,8 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
     const recordCreatedAt = new Date().toISOString();
     const result = await createOrReadPost(auth, recordKey, {
       $type: 'app.bsky.feed.post', text: rendered.text, facets: rendered.facets,
-      createdAt: recordCreatedAt, embed: { $type: 'app.bsky.embed.external', external: {
+      langs: ['en-GB'], createdAt: recordCreatedAt,
+      embed: { $type: 'app.bsky.embed.external', external: {
         uri: article.canonical_url, title: article.display_title ?? article.title,
         description: `From ${article.publisher}`, thumb: blob,
       } },

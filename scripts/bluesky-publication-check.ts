@@ -418,6 +418,11 @@ console.error = () => undefined;
 try {
   await checkConcurrentAdminIdempotency();
 
+  const publisherSource = readFileSync('apps/media-discovery/src/bluesky.ts', 'utf8');
+  assert.match(publisherSource,
+    /createOrReadPost\(auth, recordKey, \{[\s\S]*?\$type: 'app\.bsky\.feed\.post',[\s\S]*?langs: \['en-GB'\],/u,
+    'new Bluesky post records must declare exactly UK English language metadata');
+
   const rows: PublicationRow[] = [
     { id: 1, article_id: 1, publication_key: 'a', status: 'posting', attempt_count: 0,
       record_key: '3m3b2aaaaaaaa', created_at: '2026-09-16T11:55:00.000Z',
