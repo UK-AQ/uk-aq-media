@@ -4,7 +4,7 @@
 
 This area defines the agreed authoritative contract for the **UK AQ Media / AQ in the News subsystem**.
 
-The standalone Media backend was deployed on **8 September 2026** and completed real-operation validation for AQN, the initial Guardian adapter and the authenticated central-scheduler path. The implementation has since expanded to additional bounded direct publisher adapters and GDELT Web NGrams discovery. Communities Against Woodsmoke is now an approved next direct RSS source addition, but this documentation intentionally precedes its Media implementation and deployment. The subsystem is deliberately **not yet connected to the public/LIVE UK AQ website**. The deployed TEST website may consume the standalone public Media feed through the contracted same-origin bridge.
+The standalone Media backend was deployed on **8 September 2026** and completed real-operation validation for AQN, the initial Guardian adapter and the authenticated central-scheduler path. The implementation has since expanded to additional bounded direct publisher adapters and GDELT Web NGrams discovery. Communities Against Woodsmoke is now an approved next bounded publisher-index source addition, but this documentation intentionally precedes its Media implementation and deployment. The subsystem is deliberately **not yet connected to the public/LIVE UK AQ website**. The deployed TEST website may consume the standalone public Media feed through the contracted same-origin bridge.
 
 The implementation repository is the private `TEST-uk-aq/uk-aq-media` repository. Runtime implementation belongs there. Codex and other coding agents treat this `system_docs/` area as read-only.
 
@@ -58,23 +58,30 @@ source_key: communities-against-woodsmoke
 canonical_domain: communitiesagainstwoodsmoke.com
 publication_policy: manual
 review_level: standard
-discovery_method: rss
+discovery_method: sitemap
 content_fetch_policy: discovery_metadata_only
 ai_content_policy: metadata_only
 image_policy: remote_preview
 ```
 
-The only direct discovery route is its first-party WordPress feed:
+The only approved direct discovery route is its bounded public Blog index:
 
 ```text
-https://www.communitiesagainstwoodsmoke.com/feed/
+route_key: communities-against-woodsmoke-blog-index
+url: https://www.communitiesagainstwoodsmoke.com/blog/
+max_items: 20
+retain_excerpt: false
 ```
 
-This is a blog-only direct-discovery boundary. The adapter may process entries enumerated by that feed, but MUST NOT crawl the site's Home, Health, Climate, Action, Contact or other ordinary pages, MUST NOT add `/blog/` HTML/sitemap crawling, and MUST NOT treat arbitrary same-domain pages as candidates. Feed entries are specialist woodsmoke blog material and may enter the normal editorial queue without the generic broad-publisher AQ keyword gate, but the source remains `manual` / `standard`, so otherwise-new discoveries enter Pending and are not auto-approved.
+The earlier proposed WordPress `/feed/` route is not an approved Media dependency after repeated HTTP 403 results during source checking. The CAWS-specific authority is now [`media-caws-publisher-index-contract.md`](media-caws-publisher-index-contract.md), which supersedes any older CAWS RSS/feed wording in broader contracts or plans.
 
-The generic `remote_preview` contract may obtain bounded publisher presentation metadata for those articles, but CAWS initially has no special external image-host exception. Article-body content, feed body/excerpts and durable publisher-image copies remain outside the permission boundary.
+This is a blog-only direct-discovery boundary. The adapter may process only valid article cards from the Blog article-listing region. It MUST NOT treat the page's Home, Health, Climate, Action, Contact, Privacy, footer, other-groups or arbitrary same-domain links as articles, MUST NOT use a sitemap or `/feed/`, and MUST NOT recursively crawl article pages for discovery.
 
-The authoritative details and post-deployment validation requirements are in [`media_contract.md`](media_contract.md) and [`media-publication-policy-contract.md`](media-publication-policy-contract.md).
+The selected CAWS Blog index is specialist woodsmoke material, so valid article-card membership establishes direct-source relevance without the generic broad-publisher AQ keyword gate. The source remains `manual` / `standard`, so otherwise-new discoveries enter Pending and are not auto-approved.
+
+The generic `remote_preview` contract may obtain bounded publisher presentation metadata for accepted CAWS articles, but CAWS initially has no special external image-host exception. Article-body content, arbitrary Blog-index prose and durable publisher-image copies remain outside the permission boundary.
+
+The authoritative CAWS discovery details and post-deployment validation requirements are in [`media-caws-publisher-index-contract.md`](media-caws-publisher-index-contract.md). Publication-state semantics remain governed by [`media-publication-policy-contract.md`](media-publication-policy-contract.md).
 
 Workers AI is bound for policy-permitted enrichment. AI permissions remain source-specific and do not authorise article-body use merely because a source is discoverable.
 
@@ -89,7 +96,7 @@ Non-AQN discovery MUST explicitly cover four first-class UK-media query families
 
 This matters because relevant headlines may use terms such as `wood burner`, `log burner`, `wood-burning stove`, `Smoke Control Area`, `wildfire`, `moorland fire` or `wildfire smoke`, while other relevant coverage may use the broader phrases `air pollution` or `air quality`.
 
-Topic matching is a discovery/relevance signal only. It does not bypass the contracted manual Standard/Enhanced review policy for non-AQN sources except where a narrower source or author rule explicitly defines different inclusion behaviour. The Communities Against Woodsmoke direct blog feed is such a narrower inclusion boundary: feed membership establishes direct-source inclusion, but not automatic publication.
+Topic matching is a discovery/relevance signal only. It does not bypass the contracted manual Standard/Enhanced review policy for non-AQN sources except where a narrower source or author rule explicitly defines different inclusion behaviour. The Communities Against Woodsmoke bounded Blog index is such a narrower inclusion boundary: a valid article card in the selected article-listing region establishes direct-source inclusion, but not automatic publication.
 
 AQN is different: all AQN feed items are already in scope and auto-approved, so an AQN wood-burning, wildfire, air-pollution or air-quality story is already discovered without a separate keyword gate.
 
@@ -133,20 +140,20 @@ Media uses GDELT's downloadable Web NGrams + TOC file pairs as one global acquis
 
 The four provider-neutral topic families remain wood burning, wildfire, air pollution and air quality. High-recall NGram matching does not itself bypass deterministic second-stage relevance or publisher publication policy.
 
-Direct publisher feeds remain valuable alongside GDELT. They provide a more authoritative route for known publishers and richer publisher-native metadata, while GDELT provides breadth across UK outlets not explicitly configured.
+Direct publisher feeds and bounded publisher indexes remain valuable alongside GDELT. They provide a more authoritative route for known publishers and richer publisher-native metadata, while GDELT provides breadth across UK outlets not explicitly configured.
 
 #### Cross-provider duplicate handling
 
 All discovery routes MUST converge on the same canonical article identity before creating a new article.
 
-If GDELT and a direct publisher feed discover the same canonical URL:
+If GDELT and a direct publisher route discover the same canonical URL:
 
 - only one `media_articles` identity may exist;
 - the existing canonical URL hash remains the duplicate-prevention key;
 - rediscovery MUST NOT reset `pending`, `approved`, `rejected` or `hidden` editorial state;
 - rediscovery MUST NOT create a second auto-approval/editorial transition;
 - provider/query-family provenance SHOULD be retained separately from publisher identity;
-- publisher-native feed metadata SHOULD take precedence over less-direct GDELT metadata when both describe the same article;
+- publisher-native direct metadata SHOULD take precedence over less-direct GDELT metadata when both describe the same article;
 - repeated GDELT sightings MAY update first/last-seen or provenance evidence without creating a duplicate article.
 
 If GDELT discovers an article from one of the explicitly configured publishers, that publisher's configured review/publication policy applies, subject to any explicit matching author rule in `media-author-rules-contract.md`. An article from another UK publisher discovered only through blanket search defaults to **manual Enhanced review**, metadata-only discovery, no article-body AI and no automatic publication until a source-specific policy is explicitly added.
@@ -209,7 +216,9 @@ Deployment authentication and admin credentials retain their established encrypt
 
 ## Start here
 
-Read [`media_contract.md`](media_contract.md) for the broad authoritative implementation/runtime contract, including the approved Communities Against Woodsmoke direct RSS addition and its blog-only discovery boundary.
+Read [`media_contract.md`](media_contract.md) for the broad authoritative implementation/runtime contract. For Communities Against Woodsmoke specifically, [`media-caws-publisher-index-contract.md`](media-caws-publisher-index-contract.md) is the narrower and newer authority and supersedes older CAWS RSS/feed wording in the broad contract.
+
+For Communities Against Woodsmoke's bounded `/blog/` publisher-index route, article-listing extraction boundary, source-specific relevance inclusion, scheduling shape and post-deployment acceptance, read [`media-caws-publisher-index-contract.md`](media-caws-publisher-index-contract.md).
 
 For source-wide and author-specific publication-state semantics, including Communities Against Woodsmoke's contracted `manual` / `standard` policy, read [`media-publication-policy-contract.md`](media-publication-policy-contract.md).
 
@@ -229,7 +238,7 @@ The contracts define the load-bearing boundaries for:
 
 - editorial status and review policy;
 - the explicitly configured publisher/source catalogue and approved Communities Against Woodsmoke addition;
-- Communities Against Woodsmoke's first-party `/feed/` blog-only discovery boundary, manual review and no site crawling;
+- Communities Against Woodsmoke's bounded first-party `/blog/` article-listing discovery boundary, manual review and no site crawling;
 - AQN auto-approval;
 - author-specific always-include and publication rules;
 - the eleven current Guardian RSS routes and their direct/filtered/author-specific handling;

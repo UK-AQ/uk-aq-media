@@ -44,13 +44,15 @@ The current/default source configuration remains distinct from the general polic
 - Air Quality News is currently configured `auto_approve`, so its future otherwise-new eligible articles use `trusted_source_auto`.
 - The Guardian is currently configured `manual` / `standard`.
 - BBC News, Sky News, The Independent, Carbon Brief, OpenAQ, Phys.org and DSAWSP are configured `manual` / `standard` where their direct discovery adapters are enabled.
-- Communities Against Woodsmoke is an approved next direct source addition and MUST be configured `manual` / `standard` when implemented. Its direct-feed discoveries therefore enter Pending unless an explicit later policy change says otherwise.
+- Communities Against Woodsmoke is an approved next direct source addition and MUST be configured `manual` / `standard` when implemented. Its bounded Blog-index discoveries therefore enter Pending unless an explicit later policy change says otherwise. Its direct-discovery transport and inclusion boundary are governed by `media-caws-publisher-index-contract.md`.
 - Gary Fuller's explicit Guardian author rule remains `auto_approve` and records `trusted_author_auto`.
 - Damian Carrington and Fiona Harvey remain explicit `pending` author rules.
 
 If an operator deliberately changes The Guardian source to `auto_approve`, Gary Fuller still records `trusted_author_auto`, Damian Carrington and Fiona Harvey remain Pending, and other otherwise-eligible Guardian authors inherit source-wide `auto_approve` and record `trusted_source_auto`.
 
 The Communities Against Woodsmoke policy above is source-wide and prospective. Adding the source MUST NOT auto-approve its existing or newly discovered blog posts. A later deliberate change to `auto_approve`, if ever made, would apply only under the prospective-change rules in section 4.
+
+CAWS Blog-index membership is a source-specific **inclusion** decision, not a publication exception. The CAWS contract permits otherwise-valid article cards from the selected specialist Blog index to bypass the generic broad-publisher AQ relevance filter, but every otherwise-new article still follows this source's `manual` publication policy and therefore enters Pending.
 
 ## 4. Prospective-only changes
 
@@ -82,7 +84,7 @@ Changing a source to `auto_approve` MUST NOT broaden:
 - image permissions;
 - licensing assumptions.
 
-A deterministic relevance/topic match decides whether an article is in scope. It does not itself bypass the applicable source/author publication policy.
+A deterministic relevance/topic match decides whether an article is in scope. It does not itself bypass the applicable source/author publication policy. Likewise, a narrower source-specific inclusion boundary such as the CAWS Blog index does not itself change publication state.
 
 ## 6. Dashboard/admin behaviour
 
@@ -98,7 +100,8 @@ After deployment, real TEST operation SHOULD confirm that:
 
 - AQN remains source-auto-approved under its current configured policy;
 - Guardian remains manual until deliberately changed;
-- Communities Against Woodsmoke direct-feed discoveries enter Pending under `manual` / `standard` and do not receive trusted-source auto-approval provenance;
+- Communities Against Woodsmoke Blog-index discoveries enter Pending under `manual` / `standard` and do not receive trusted-source auto-approval provenance;
+- valid CAWS Blog-index membership may establish inclusion without turning that inclusion rule into automatic approval;
 - a supported source changed to `auto_approve` auto-approves a different future otherwise-new eligible article with `trusted_source_auto`;
 - an explicit author `pending` rule still produces Pending under a source-wide `auto_approve` policy;
 - an explicit author `auto_approve` rule still produces `trusted_author_auto` under either source policy;
