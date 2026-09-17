@@ -14,6 +14,9 @@ const metadata = extractArticleHeadMetadata(`<head>
   <meta name="twitter:image" content="https://publisher.example/twitter.jpg">
   <meta content="Short &amp; useful &#x2014; title" property="og:title">
   <meta name=twitter:title content='Fallback title'>
+  <meta property="og:description" content="Primary &amp; bounded description">
+  <meta name="twitter:description" content="Social fallback">
+  <meta name="description" content="HTML fallback">
 </head><body>not retained</body>`);
 assert.deepEqual(metadata, {
   ogImage: 'https://publisher.example/og.jpg',
@@ -21,6 +24,9 @@ assert.deepEqual(metadata, {
   ogTitle: 'Short & useful — title',
   twitterTitle: 'Fallback title',
   htmlTitle: null,
+  ogDescription: 'Primary & bounded description',
+  twitterDescription: 'Social fallback',
+  htmlDescription: 'HTML fallback',
   publisher: null,
   author: null,
   publishedAt: null,
