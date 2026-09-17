@@ -1,6 +1,6 @@
 # UK AQ Media Bluesky publication contract
 
-**Status:** Future implementation authority, agreed 15 September 2026  
+**Status:** Current TEST implementation authority, agreed 15 September 2026 and amended 17 September 2026  
 **Implementation repository:** private `TEST-uk-aq/uk-aq-media`  
 **Runtime owner:** UK AQ Media Cloudflare account  
 **Bluesky account:** `@ukaq.co.uk`
@@ -9,7 +9,7 @@
 
 This contract defines the load-bearing behaviour for publishing UK AQ Media articles to Bluesky.
 
-It is future implementation authority until the feature is deployed and accepted on TEST. It does not describe a currently deployed Bluesky publisher.
+It is current authority for the deployed TEST implementation. It does not by itself imply that Bluesky publishing is enabled, that every deployed path has completed operational acceptance, or that the public/LIVE UK AQ website depends on Media.
 
 Where this contract is narrower than the broad Media contract, this contract owns Bluesky-specific behaviour. Existing Media contracts continue to own article discovery, editorial state, preview-image permissions, public API behaviour, source policy and core Media availability.
 
@@ -19,6 +19,7 @@ The feature MUST preserve these boundaries:
 - Cloudflare Workers and Queues run the feature;
 - Codex Cloud is a development environment only and is not part of runtime;
 - article approval and Bluesky publication remain separate outcomes;
+- automatic Media approval and operator-selected manual approval are distinct Bluesky decision paths;
 - a Bluesky failure MUST NOT fail article approval, discovery, the public Media feed or the UK AQ website;
 - no public Worker or browser code receives Bluesky credentials;
 - no article body is required to publish a Bluesky post;
@@ -50,32 +51,40 @@ The required transition behaviour is:
 
 | Media transition | Bluesky behaviour |
 | --- | --- |
-| New article is auto-approved | Automatically create one Bluesky publication job if an eligible thumbnail exists |
-| Pending -> Approved | Automatically create one Bluesky publication job if an eligible thumbnail exists |
-| Rejected -> Approved | Do not post automatically; show an optional `Post to Bluesky @ukaq.co.uk` control |
-| Hidden -> Approved | Do not post automatically; show an optional `Post to Bluesky @ukaq.co.uk` control |
+| New article is auto-approved by source/author policy | Automatically create one Bluesky publication job if an eligible thumbnail exists |
+| Pending -> Approved by an operator | Do not post automatically; show an optional `Post to Bluesky @ukaq.co.uk` control |
+| Rejected -> Approved by an operator | Do not post automatically; show the same optional control |
+| Hidden -> Approved by an operator | Do not post automatically; show the same optional control |
 | Approved -> Hidden | No Bluesky action |
 | Any other transition | No Bluesky action unless a later contract explicitly adds one |
 
-The Rejected -> Approved and Hidden -> Approved checkbox MUST default to unchecked.
+Every operator-driven transition whose selected destination is **Approved** MUST expose the same Bluesky checkbox in both the individual article pop-up and any bulk approval surface.
 
-For Pending -> Approved, Bluesky publication is automatic when the thumbnail requirement is met. The dashboard MUST NOT require a second social-publication checkbox for that transition.
+The checkbox MUST default to unchecked. Leaving it unchecked means the editorial approval proceeds without creating a Bluesky publication job.
+
+The distinction is deliberate: automatic source/author approval may create a Bluesky job automatically, but manually choosing Approved never implies consent to post socially.
 
 An article approved without an eligible thumbnail remains a valid approved Media article. The missing thumbnail prevents Bluesky publication only.
 
 If an article had no eligible thumbnail at the approval decision point and receives one later through metadata/image repair, that later image change MUST NOT unexpectedly create a historical Bluesky post.
 
-## 4. Explicit repost semantics
+## 4. Explicit manual publication and repost semantics
 
-The optional checkbox on Rejected -> Approved and Hidden -> Approved is an explicit operator instruction to create a new Bluesky post.
+Selecting `Post to Bluesky @ukaq.co.uk` while manually moving an article to Approved is an explicit operator instruction to create a Bluesky publication job.
 
-An explicit repost MUST NOT be blocked merely because the same article has been posted to Bluesky before. Article-level uniqueness therefore MUST NOT be used for manual reposts.
+For Pending -> Approved this is normally the article's first explicit manual social publication. For Rejected -> Approved or Hidden -> Approved it may be a first publication or a deliberate repost depending on publication history.
+
+An explicit manual publication MUST NOT be blocked merely because the same article has been posted to Bluesky before. Article-level uniqueness therefore MUST NOT be used for manual publication requests.
 
 The same admin request MUST remain idempotent. Retrying an identical status-transition request with the same `Idempotency-Key` MUST NOT create multiple publication jobs or multiple remote posts.
 
 A later deliberate status transition with a different valid request identity MAY create another Bluesky post for the same article.
 
 If `post_to_bluesky=true` is requested but the article has no eligible thumbnail, the backend MUST reject that explicit social-publication request rather than silently accepting the checkbox and dropping the post. The dashboard SHOULD disable or otherwise make the checkbox unavailable when no eligible thumbnail exists.
+
+For a bulk manual approval with `post_to_bluesky=true`, eligibility MUST be all-or-nothing for the selected set. The backend MUST validate every target before applying the combined approval/social-publication request. If any selected article cannot create an eligible Bluesky publication job, the request MUST fail clearly rather than silently approving the set while posting only a subset.
+
+When a bulk manual approval is submitted with the checkbox unchecked, normal article approval does not depend on Bluesky eligibility and MUST create no Bluesky publication rows.
 
 ## 5. Thumbnail and external-card rule
 
@@ -235,7 +244,7 @@ media_bluesky_publications
 
 id
 article_id
-approval_event_id          # nullable for explicit reposts
+approval_event_id          # nullable for explicit manual publications/reposts
 publication_key            # unique request/publication identity
 publication_reason         # auto_approved, pending_approved, rejected_repost, unhidden_repost
 status                     # queued, posting, posted, failed/blocked as implemented
@@ -252,36 +261,41 @@ updated_at
 
 The exact physical schema may be refined during implementation, but these invariants are required:
 
-- each automatically eligible approval event can create at most one automatic publication row;
-- manual reposts are not unique by `article_id`;
-- manual reposts are unique by their admin request/publication identity;
+- each automatically eligible auto-approval event can create at most one automatic publication row;
+- manual publication/repost requests are not unique by `article_id`;
+- manual publication/repost requests are unique by their admin request/publication identity;
+- a `pending_approved` reason denotes the Pending -> Approved origin of the manual request and does not imply that such rows should be created automatically;
 - returned Bluesky URI and CID are stored after successful publication;
 - raw credentials, response bodies containing sensitive material and unbounded remote errors are never stored;
-- historical publication rows are retained as audit state and are not deleted merely because an article is later hidden.
+- historical publication rows are retained as audit state and are not deleted merely because an article is later hidden or an operator cancels an unposted request.
 
-## 8. Automatic outbox creation
+Internal reason/error codes SHOULD be rendered as human-readable labels in the dashboard rather than exposing raw snake_case values as the primary operator-facing wording.
 
-The existing append-only `media_article_events` stream is the durable source for automatic Bluesky eligibility.
+## 8. Automatic and explicit outbox creation
 
-Automatic outbox creation MUST distinguish:
+The existing append-only `media_article_events` stream remains the durable source for automatic Bluesky eligibility evidence, but automatic outbox creation is limited to genuine automatic approvals.
+
+Automatic outbox creation MUST recognise:
 
 ```text
 auto_approved
-approved where from_status = 'pending'
 ```
 
-from:
+An operator-driven approval event, including:
 
 ```text
+approved where from_status = 'pending'
 approved where from_status = 'rejected'
 unhidden where from_status = 'hidden'
 ```
 
-The first pair is automatic. The second pair is optional manual repost only.
+MUST NOT create a Bluesky publication row merely because the article became Approved.
 
-The preferred implementation is a forward-only D1 migration that creates the Bluesky publication row from the durable approval event in the same D1 state change path where structurally viable. It MUST NOT backfill old approval events merely because the trigger/migration is installed.
+For those manual transitions, a publication row may be created only when the authenticated admin mutation explicitly carries `post_to_bluesky=true` and the request satisfies the eligibility rules in sections 3 and 4.
 
-A new deployment MUST therefore start with future eligible approval events only unless a separate explicit historical-posting feature is later designed.
+The preferred implementation is a forward-only D1/runtime change that preserves durable approval-event provenance while moving manual Bluesky creation behind the explicit admin request. It MUST NOT backfill old approval events merely because the change is installed.
+
+Historical `pending_approved` rows created under the earlier automatic Pending -> Approved behaviour remain audit state. They MUST NOT be reactivated or recreated automatically.
 
 ## 9. Dedicated Cloudflare Queue
 
@@ -332,13 +346,13 @@ next_allowed_at = last_successful_post_at + current_cooldown
 
 Changing the configured cooldown changes the next eligibility calculation without rewriting already queued jobs.
 
-When the consumer wakes, it MUST select the oldest eligible queued D1 publication using durable monotonic ordering, normally the smallest publication id. This means sequential manual approvals are published in the same order in which their durable publication rows were created even though Cloudflare Queue delivery order is not guaranteed.
+When the consumer wakes, it MUST select the oldest eligible queued D1 publication using durable monotonic ordering, normally the smallest publication id. This means sequential manual publications are published in the same order in which their durable publication rows were created even though Cloudflare Queue delivery order is not guaranteed.
 
 General ordering among articles created in the same discovery burst is not a product requirement beyond this deterministic oldest-first backlog rule.
 
 If the cooldown has not elapsed, the consumer MUST leave the publication queued and arrange a delayed wake-up for the remaining interval rather than busy-looping or posting early.
 
-## 11. Publish enable/disable control
+## 11. Publish enable/disable and operator cancellation
 
 D1 MUST contain an operator-controlled Bluesky publishing enable/disable setting.
 
@@ -351,7 +365,17 @@ When publishing is disabled:
 - the dashboard MUST clearly show that publishing is disabled;
 - re-enabling publication resumes processing from the oldest queued eligible job, subject to the current cooldown.
 
-An implementation may provide an explicit administrative choice to clear/skip queued TEST jobs before first enablement, but it MUST NOT silently drop them.
+An operator MUST be able to cancel a queued, not-yet-posted publication without deleting its audit row. The canonical durable cancellation representation is:
+
+```text
+status = 'blocked'
+last_error_code = 'operator_cancelled'
+next_attempt_at = NULL
+```
+
+A cancelled publication MUST NOT be selected by reconciliation or automatically reactivated when publishing is re-enabled. The dashboard SHOULD present this state with a friendly `Cancelled`-style label while retaining the durable internal status/error code for audit.
+
+Cancellation MUST NOT change the Media article's editorial state and MUST NOT delete publication history.
 
 ## 12. Queue wake-up and reconciliation
 
@@ -366,7 +390,7 @@ Normal Bluesky publishing MUST NOT wait for the two-hour Media discovery cadence
 This gives the required behaviour:
 
 ```text
-approval -> durable D1 job -> near-immediate Queue wake-up
+eligible publication decision -> durable D1 job -> near-immediate Queue wake-up
 ```
 
 with the existing scheduler providing bounded recovery if a wake-up send is lost after the D1 commit.
@@ -434,27 +458,21 @@ The modal SHOULD display the available placeholders beside or beneath the editor
 
 Saving the modal MUST call bounded authenticated Media admin endpoints. Browser code MUST NOT talk directly to Bluesky or Cloudflare Queues.
 
-The authenticated Media dashboard/article pop-up MUST continue to expose article-specific Bluesky controls only where relevant.
+The authenticated Media dashboard MUST expose the article-specific Bluesky control whenever an operator chooses **Approved** as the destination state, both in the individual article pop-up and in bulk approval controls.
 
-For a Pending article:
-
-- approval remains the existing editorial action;
-- if an eligible thumbnail exists, the UI MAY state that approval will queue Bluesky automatically;
-- no optional repost checkbox is required.
-
-For a Rejected article being moved to Approved:
+For Pending -> Approved, Rejected -> Approved and Hidden -> Approved:
 
 - show `Post to Bluesky @ukaq.co.uk`;
-- default unchecked;
-- make it unavailable when no eligible thumbnail exists.
+- default it to unchecked;
+- make it unavailable when the requested social publication cannot satisfy the thumbnail rule;
+- with the checkbox unchecked, perform only the editorial state change and create no Bluesky publication job;
+- with the checkbox checked, create the explicit Bluesky publication job only after backend eligibility validation succeeds.
 
-For a Hidden article being restored to Approved:
+The individual pop-up and bulk controls MUST follow the same rule. Pending -> Approved is not a special automatic case.
 
-- show the same checkbox;
-- default unchecked;
-- make it unavailable when no eligible thumbnail exists.
+For bulk approval with the checkbox checked, the UI MUST make clear that the option applies to the whole selected set. If any selected article is ineligible for Bluesky publication, the backend MUST reject the combined request and return enough bounded information for the UI to explain which article(s) prevent the operation. It MUST NOT silently queue only an eligible subset.
 
-The dashboard SHOULD expose publication history/status for an article, including queued/posted/failed state, posted time, post link and multiple-post count where applicable.
+The dashboard SHOULD expose publication history/status for an article, including queued/posted/failed/cancelled state, posted time, post link and multiple-post count where applicable. Operator-facing wording SHOULD use friendly labels rather than raw internal reason/status/error codes.
 
 Changing global Bluesky settings MUST be a bounded authenticated admin mutation. The settings MUST include:
 
@@ -478,6 +496,7 @@ Failures MUST be isolated and observable:
 - a real expanded post that cannot fit within current provider limits fails with a bounded text-length error;
 - bounded retry/backoff is allowed;
 - repeated permanent failure remains visible in D1/dashboard rather than retrying forever without operator visibility;
+- an operator-cancelled queued row remains durable and non-runnable;
 - logs use bounded error codes and MUST NOT include secrets.
 
 Hiding or rejecting an article after it has already been posted does not automatically delete the Bluesky post in this version. Remote deletion requires a separate explicit product decision.
@@ -504,7 +523,22 @@ This contract does not add:
 
 Future banner/profile work is tracked separately in the existing Phase 2 plan and MUST NOT weaken this article-publication contract.
 
-## 18. External protocol references
+## 18. 17 September 2026 transition note
+
+The earlier contract automatically created Bluesky publication rows for manual Pending -> Approved transitions. Real TEST use showed that this coupled ordinary editorial approval to social publication too tightly, particularly during multi-article approval.
+
+The authoritative rule is now:
+
+```text
+automatic Media approval -> automatic Bluesky publication when eligible
+manual choice of Approved -> Bluesky publication only when the operator explicitly ticks the checkbox
+```
+
+Existing queued rows created under the superseded Pending -> Approved automatic rule are historical state. If they are not intended for publication, they should be cancelled durably rather than deleted. The `blocked` / `operator_cancelled` representation in section 11 is the agreed audit-preserving form.
+
+Implementation of this amendment MUST be forward-only. It MUST NOT create a speculative historical backfill or reinterpret prior posted records.
+
+## 19. External protocol references
 
 Implementation must verify current provider requirements at implementation time. Relevant current references include:
 

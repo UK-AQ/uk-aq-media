@@ -10,7 +10,7 @@ The implementation repository is the private `TEST-uk-aq/uk-aq-media` repository
 
 This area also contains [`media-homepage-latest-six-contract.md`](media-homepage-latest-six-contract.md), which is explicitly **future implementation authority** for the homepage-specific generation/versioned-cache design. It is not evidence that those endpoints, D1 state or long-lived cache entries are deployed. The current public `GET /articles` runtime remains authoritative until that future contract is implemented and accepted on TEST.
 
-This area also contains [`media_bluesky_contract.md`](media_bluesky_contract.md), which is explicitly **future implementation authority** for article publication to the UK AQ Bluesky account `@ukaq.co.uk`. It defines approval-event eligibility, thumbnail-backed external cards, durable D1 publication state, the dedicated Bluesky Queue, the configurable cooldown, intentional Rejected/Hidden repost controls, idempotency and dashboard controls. It is not evidence that the Bluesky publisher is already deployed or enabled.
+This area also contains [`media_bluesky_contract.md`](media_bluesky_contract.md), which is the **current TEST authority** for article publication to the UK AQ Bluesky account `@ukaq.co.uk`. It defines automatic publication for genuinely auto-approved articles, explicit opt-in Bluesky publication whenever an operator manually chooses Approved, thumbnail-backed external cards, durable D1 publication/audit state, the dedicated Bluesky Queue, configurable cooldown, idempotency, operator cancellation and dashboard controls. Its current-status wording does not by itself imply that public Bluesky publishing is enabled or that the public/LIVE UK AQ website depends on Media.
 
 ## Current standalone runtime
 
@@ -224,7 +224,7 @@ For source-wide and author-specific publication-state semantics, including Commu
 
 For current blanket discovery through GDELT Web NGrams, read [`media-gdelt-web-ngrams-contract.md`](media-gdelt-web-ngrams-contract.md). It is the narrow authority where older broad-contract GDELT transport wording differs.
 
-For future article publication to Bluesky, read [`media_bluesky_contract.md`](media_bluesky_contract.md). It is the narrow authority for automatic posting of newly auto-approved and Pending -> Approved articles, explicit Rejected/Hidden repost controls, the no-thumbnail/no-post rule, D1 outbox/idempotency, the dedicated Bluesky Queue, oldest-first backlog ordering, configurable cooldown and the `@ukaq.co.uk` publishing account. It is explicitly future implementation authority until deployed and accepted on TEST.
+For current TEST Bluesky article publication behaviour, read [`media_bluesky_contract.md`](media_bluesky_contract.md). It is the narrow authority for automatic Bluesky jobs from genuine source/author auto-approval, explicit opt-in social publication whenever an operator manually chooses Approved, the no-thumbnail/no-post rule, bulk all-or-nothing eligibility, durable cancellation/audit state, D1 outbox/idempotency, the dedicated Bluesky Queue, oldest-first backlog ordering, configurable cooldown and the `@ukaq.co.uk` publishing account.
 
 For the agreed future homepage latest-six generation, D1 state, versioned feed and 24-hour Cache API behaviour, read [`media-homepage-latest-six-contract.md`](media-homepage-latest-six-contract.md). It is explicitly **future implementation authority**, not current runtime. It owns homepage-specific cache invalidation semantics and is separate from any future full News-page generation/cache design.
 
@@ -254,7 +254,7 @@ The contracts define the load-bearing boundaries for:
 - the MacBook Pro/MySQL mirror boundary;
 - Open Graph/social-preview metadata, cached remote preview delivery and optional compact display titles;
 - future homepage latest-six generation/versioned-cache behaviour;
-- future event-driven Bluesky article publication, thumbnail-backed external cards, D1 publication history, Queue cooldown/order, explicit repost semantics and dashboard controls;
+- current TEST event-driven Bluesky article publication, automatic-only auto-approval posting, explicit manual-approval opt-in, thumbnail-backed external cards, D1 publication history, Queue cooldown/order, cancellation and dashboard controls;
 - the £0 V1 operating requirement;
 - public-site independence from Media failure.
 

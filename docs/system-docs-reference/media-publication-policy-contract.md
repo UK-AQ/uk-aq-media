@@ -1,6 +1,6 @@
 # UK AQ Media publication policy contract
 
-**Status:** Current narrow authority for source-wide and author-specific publication-state decisions. This contract supplements `media_contract.md` and `media-author-rules-contract.md` and supersedes any older wording that treats source-wide auto-approval as intrinsically limited to Air Quality News.
+**Status:** Current narrow authority for source-wide and author-specific publication-state decisions. This contract supplements `media_contract.md` and `media-author-rules-contract.md` and supersedes any older wording that treats source-wide auto-approval as intrinsically limited to Air Quality News. Amended 17 September 2026 to make manual article approval independent from optional Bluesky publication.
 
 ## 1. Source publication policy
 
@@ -65,6 +65,7 @@ A rule change MUST NOT by itself:
 - restore Rejected rows;
 - restore Hidden rows;
 - rewrite historical approval provenance;
+- create Bluesky publication jobs for existing articles;
 - reclassify an already-known article merely because it is rediscovered after the policy change.
 
 A deliberate later backfill/reclassification operation MAY be designed separately, but it must be explicit and preserve article/event provenance.
@@ -86,6 +87,17 @@ Changing a source to `auto_approve` MUST NOT broaden:
 
 A deterministic relevance/topic match decides whether an article is in scope. It does not itself bypass the applicable source/author publication policy. Likewise, a narrower source-specific inclusion boundary such as the CAWS Blog index does not itself change publication state.
 
+Article approval and Bluesky publication are separate decisions. This separation is governed in detail by `media_bluesky_contract.md`.
+
+The required cross-contract rule is:
+
+```text
+automatic source/author auto-approval -> may automatically create an eligible Bluesky publication job
+operator manually chooses Approved -> does not create a Bluesky publication job unless the operator explicitly selects Post to Bluesky
+```
+
+The optional Bluesky selection MUST NOT change the article's approval provenance. A manual Pending -> Approved action remains a manual approval whether or not the operator also requests a Bluesky post.
+
 ## 6. Dashboard/admin behaviour
 
 The Media dev dashboard MAY edit source-wide publication policy and explicit author rules through authenticated `media-admin` routes against authoritative D1/configuration state.
@@ -93,6 +105,12 @@ The Media dev dashboard MAY edit source-wide publication policy and explicit aut
 The dashboard MUST preserve the precedence in section 2 and MUST communicate that rule changes are prospective rather than silently rewriting existing articles.
 
 Source-wide and author-specific auto-approval provenance MUST remain distinguishable.
+
+Whenever an operator manually selects **Approved** as the destination state, the dashboard MUST treat optional Bluesky publication as a separate explicit choice. The `Post to Bluesky @ukaq.co.uk` control is therefore required for Pending -> Approved, Rejected -> Approved and Hidden -> Approved in both individual and bulk approval surfaces, subject to Bluesky eligibility. It defaults to unchecked.
+
+Leaving that control unchecked MUST NOT prevent the article from being approved and MUST NOT create a Bluesky publication row.
+
+If the operator explicitly requests Bluesky publication, the narrower Bluesky contract owns thumbnail eligibility, bulk all-or-nothing validation, idempotency, queueing, cancellation and social-publication audit state.
 
 ## 7. Validation
 
@@ -105,4 +123,7 @@ After deployment, real TEST operation SHOULD confirm that:
 - a supported source changed to `auto_approve` auto-approves a different future otherwise-new eligible article with `trusted_source_auto`;
 - an explicit author `pending` rule still produces Pending under a source-wide `auto_approve` policy;
 - an explicit author `auto_approve` rule still produces `trusted_author_auto` under either source policy;
-- existing Pending, Approved, Rejected and Hidden rows do not change merely because a source/author rule changes.
+- existing Pending, Approved, Rejected and Hidden rows do not change merely because a source/author rule changes;
+- a manual Pending -> Approved action with the Bluesky checkbox unchecked creates no Bluesky publication job;
+- a manual Pending -> Approved, Rejected -> Approved or Hidden -> Approved action with the checkbox checked creates an eligible explicit Bluesky publication job without altering approval provenance;
+- genuine source/author auto-approval retains its separate automatic Bluesky behaviour where the article meets the Bluesky eligibility contract.
