@@ -5,4 +5,5 @@ export * from './remote-preview-image';
 export * from './bluesky';
 export * from './db';
 export * from './http';
+export * from './article-author';
 export { z } from 'zod';

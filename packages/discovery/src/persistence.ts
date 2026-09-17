@@ -1,5 +1,6 @@
 import {
-  initialEditorialState, type AuthorRule, type DiscoveredArticle, type Source,
+  initialEditorialState, normaliseArticleAuthorForStorage,
+  type AuthorRule, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 
 export function publicationAuthorRule(rules: AuthorRule[]): AuthorRule | null {
@@ -96,6 +97,7 @@ export function persistArticle(db: D1Database, source: Source, article: Discover
   matchedRules: AuthorRule[], approvalObservationKey: string | null,
   now: string): D1PreparedStatement {
   const editorial = initialEditorialState(source, publicationAuthorRule(matchedRules));
+  const storedAuthor = normaliseArticleAuthorForStorage(article.author, source.name);
   // Conflict updates preserve editorial decisions. Only Pending can be promoted by a later,
   // positively identified trusted-author observation; Rejected/Hidden always win.
   return db.prepare(`INSERT INTO media_articles (source_key, canonical_url, canonical_url_hash,
@@ -106,7 +108,7 @@ export function persistArticle(db: D1Database, source: Source, article: Discover
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ${ARTICLE_CONFLICT_UPDATE_SQL}
     RETURNING id, revision`).bind(source.source_key, article.canonical_url,
-      article.canonical_url_hash, article.original_url, article.title, source.name, article.author,
+      article.canonical_url_hash, article.original_url, article.title, source.name, storedAuthor,
       article.published_at, now, now, JSON.stringify(article.categories), editorial.status,
       source.review_level, editorial.approval_method, editorial.approval_author_rule_key,
       article.preview_url, source.image_policy, article.display_title, article.display_title_origin,
