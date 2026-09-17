@@ -53,6 +53,7 @@ const AddAuthorRuleBody = z.object({
 const LookupBody = z.object({ url: z.url().max(2048) }).strict();
 const ArticleAuthorBody = z.object({ author: z.string().max(500).nullable() }).strict();
 const ManualArticleBody = z.object({
+  initial_status: z.enum(['pending', 'approved']),
   url: z.url().max(2048),
   title: z.string().min(1).max(1000),
   publisher: z.string().min(1).max(200),
@@ -641,15 +642,18 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
         '{"retain_excerpt":false}', 'article_head_allowed', 'disabled', 'remote_preview', ?, ?)`)
       .bind(sourceKey, parsed.data.publisher, identity.domain, now, now));
   }
+  const approved = parsed.data.initial_status === 'approved';
   statements.push(db.prepare(`INSERT INTO media_articles
     (source_key, canonical_url, canonical_url_hash, original_url, title, publisher, author,
      published_at, discovered_at, last_seen_at, status, review_level, approval_method,
-     og_image_url, image_policy, approved_at, revision, mutation_key, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, 'manual', ?, ?, ?, 0, ?, ?, ?)`)
+     approval_author_rule_key, og_image_url, image_policy, approved_at, revision,
+     mutation_key, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, ?, ?, ?)`)
     .bind(sourceKey, identity.canonicalUrl, identity.hash, parsed.data.url,
       cleanText(parsed.data.title, 1000), cleanText(parsed.data.publisher, 200),
       cleanText(parsed.data.author, 500), parsed.data.published_at ?? null, now, now,
-      source.review_level, preview, source.image_policy, now, eventKey, now, now));
+      parsed.data.initial_status, source.review_level, approved ? 'manual' : null,
+      preview, source.image_policy, approved ? now : null, eventKey, now, now));
   try { await db.batch(statements); }
   catch (error) {
     const duplicate = await db.prepare('SELECT id FROM media_articles WHERE canonical_url_hash = ?')
