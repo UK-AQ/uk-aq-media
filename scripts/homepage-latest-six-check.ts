@@ -61,8 +61,8 @@ assert.equal(await publicPreviewImageUrl('https://media.test', {
   source_image_policy: 'blocked',
 }), null, 'source image policy must block the CAWS default');
 
-const mediaPublicSource = readFileSync(resolve('apps/media-public/src/index.ts'), 'utf8');
-assert.equal([...mediaPublicSource.matchAll(/communities-against-woodsmoke-default\.png/g)].length, 1,
+const presentationImageSource = readFileSync(resolve('packages/core/src/presentation-image.ts'), 'utf8');
+assert.equal([...presentationImageSource.matchAll(/communities-against-woodsmoke-default\.png/g)].length, 1,
   'the placeholder path must remain a presentation constant, not a stored og_image_url value');
 assert.ok(existsSync(resolve(
   'apps/media-public/public/source-images/communities-against-woodsmoke-default.png')),

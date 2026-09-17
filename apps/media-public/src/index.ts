@@ -1,4 +1,4 @@
-import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, reconcileHomepageLatestSix, remotePreviewUrl,
+import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, reconcileHomepageLatestSix, remotePreviewUrl, sourcePresentationPlaceholderPath,
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 
@@ -23,8 +23,6 @@ const IMAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const IMAGE_TIMEOUT_MS = 10_000;
 const HOMEPAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
-const CAWS_SOURCE_KEY = 'communities-against-woodsmoke';
-const CAWS_DEFAULT_IMAGE_PATH = '/source-images/communities-against-woodsmoke-default.png';
 
 type HomepageRow = {
   id: number;
@@ -46,12 +44,8 @@ export async function publicPreviewImageUrl(origin: string,
   if (publisherImageUrl) {
     return versionedArticleImageUrl(origin, article.id, publisherImageUrl);
   }
-  if (article.source_key === CAWS_SOURCE_KEY &&
-      article.article_image_policy === 'remote_preview' &&
-      article.source_image_policy === 'remote_preview') {
-    return new URL(CAWS_DEFAULT_IMAGE_PATH, origin).href;
-  }
-  return null;
+  const placeholderPath = sourcePresentationPlaceholderPath(article);
+  return placeholderPath ? new URL(placeholderPath, origin).href : null;
 }
 
 export function decodeArticleCursor(raw: string | null): [string, number] | null {

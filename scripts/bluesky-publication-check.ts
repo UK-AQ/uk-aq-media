@@ -51,6 +51,7 @@ class SqliteD1 {
   private preferredBatchCommitted = false;
   private releaseLosingBatch: (() => void) | null = null;
   private losingBatchBarrier: Promise<void> = Promise.resolve();
+  private bulkRaceWinner: { key: string; idsJson: string; post: boolean } | null = null;
 
   constructor(private readonly database: DatabaseSync) {}
 
@@ -64,7 +65,19 @@ class SqliteD1 {
     this.losingBatchBarrier = new Promise(resolve => { this.releaseLosingBatch = resolve; });
   }
 
+  armBulkIdentityRace(key: string, ids: number[], post: boolean): void {
+    this.bulkRaceWinner = { key, idsJson: JSON.stringify([...ids].sort((a, b) => a - b)), post };
+  }
+
   async afterRead(sql: string): Promise<void> {
+    if (this.bulkRaceWinner &&
+        sql.includes('FROM media_admin_bulk_status_requests WHERE request_key = ?')) {
+      const winner = this.bulkRaceWinner;
+      this.bulkRaceWinner = null;
+      this.database.prepare(`INSERT INTO media_admin_bulk_status_requests
+        (request_key, article_ids_json, post_to_bluesky, created_at) VALUES (?, ?, ?, ?)`)
+        .run(winner.key, winner.idsJson, Number(winner.post), '2026-09-17T12:00:00.000Z');
+    }
     if (this.preflightReadsRemaining === 0 ||
         !sql.includes('FROM media_article_events WHERE event_key = ?')) return;
     const firstRead = this.preflightReadsRemaining === 2;
@@ -326,6 +339,22 @@ function scalar(sqlite: DatabaseSync, sql: string, ...values: SqlValue[]): numbe
 }
 
 async function checkConcurrentAdminIdempotency(): Promise<void> {
+  {
+    const { sqlite, facade, env } = statusRaceDatabase();
+    insertStatusFixture(sqlite, 99, 'pending');
+    insertStatusFixture(sqlite, 100, 'pending');
+    const key = 'bulk_identity_race_001';
+    // Inject the competing winner after the caller's absent preflight read and
+    // before its batch, deterministically reproducing the narrow race window.
+    facade.armBulkIdentityRace(key, [100], true);
+    const losing = await invokeStatus(env, bulkRequest([99], key, false));
+    assert.equal(losing.status, 409);
+    assert.equal(losing.body.error, 'idempotency_key_conflict');
+    assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_article_events
+      WHERE event_key GLOB ?`, `admin-bulk:${key}:*`), 0);
+    sqlite.close();
+  }
+
   {
     const { sqlite, facade, env } = statusRaceDatabase();
     insertStatusFixture(sqlite, 101, 'rejected');

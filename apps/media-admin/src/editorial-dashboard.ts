@@ -1,7 +1,8 @@
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, PublicationPolicy,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
-  loadSource, normaliseArticleAuthorForStorage, publisherHttpsUrl, reconcileHomepageLatestSix,
+  hasPermittedPresentationImage, loadSource, normaliseArticleAuthorForStorage, publisherHttpsUrl,
+  reconcileHomepageLatestSix, sourcePresentationPlaceholderPath,
   remotePreviewUrl, z,
   SourceSchema,
 } from '@uk-aq-media/core';
@@ -395,9 +396,16 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       ? `https://bsky.app/profile/ukaq.co.uk/post/${row.post_uri.split('/').at(-1)}` : null }));
   const thumbnailEligible = article.og_image_url !== null && article.image_policy === 'remote_preview' &&
     article.source_image_policy === 'remote_preview';
-  const manualPostReason = article.status === 'rejected' ? 'rejected_repost'
+  const manualPostReason = article.status === 'pending' ? 'pending_approved'
+    : article.status === 'rejected' ? 'rejected_repost'
     : article.status === 'hidden' ? 'unhidden_repost' : null;
-  return json({ article: { ...article, admin_preview_image_path: article.og_image_url
+  const presentationImage = hasPermittedPresentationImage({
+    source_key: String(article.source_key),
+    og_image_url: typeof article.og_image_url === 'string' ? article.og_image_url : null,
+    article_image_policy: String(article.image_policy),
+    source_image_policy: String(article.source_image_policy),
+  });
+  return json({ article: { ...article, admin_preview_image_path: presentationImage
     ? `/admin/articles/${id}/image` : null }, events: events.results,
     discovery_evidence: evidence.results,
     bluesky: { post_count: blueskyCount?.post_count ?? 0,
@@ -532,7 +540,7 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
       a.ai_title_decided_at, a.publisher, a.author,
       a.published_at, a.discovered_at, a.approved_at, a.updated_at, a.status,
       a.revision, a.approval_method, a.approval_author_rule_key, a.og_image_url,
-      a.image_policy,
+      a.image_policy, s.image_policy AS source_image_policy,
       (SELECT count(*) FROM media_bluesky_publications bp
         WHERE bp.article_id = a.id AND bp.status = 'posted')
         AS bluesky_post_count,
@@ -541,12 +549,18 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
       (SELECT status FROM media_bluesky_publications bp WHERE bp.article_id = a.id
         ORDER BY bp.id DESC LIMIT 1) AS bluesky_latest_status,
       ${spec.expression} AS cursor_value
-    FROM media_articles a ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY ${spec.expression} ${spec.direction}, a.id ${spec.direction} LIMIT ?`;
   const { results } = await db.prepare(sql).bind(...binds, limit + 1).all<Record<string, unknown>>();
   const hasMore = results.length > limit;
   const rows: Array<Record<string, unknown>> = results.slice(0, limit).map(row => ({ ...row,
-    admin_preview_image_path: row.og_image_url ? `/admin/articles/${row.id}/image` : null }));
+    admin_preview_image_path: hasPermittedPresentationImage({
+      source_key: String(row.source_key),
+      og_image_url: typeof row.og_image_url === 'string' ? row.og_image_url : null,
+      article_image_policy: String(row.image_policy),
+      source_image_policy: String(row.source_image_policy),
+    }) ? `/admin/articles/${row.id}/image` : null }));
   const last = rows.at(-1);
   return json({ articles: rows, page: { limit, has_more: hasMore,
     next_cursor: hasMore && last ? encodeCursor(String(last.cursor_value ?? ''), Number(last.id)) : null,
@@ -745,8 +759,8 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
   return articleDetail(db, id);
 }
 
-async function adminImage(db: D1Database, id: number): Promise<Response> {
-  const row = await db.prepare(`SELECT a.source_key, a.og_image_url,
+async function adminImage(env: MediaAdminEnv, id: number): Promise<Response> {
+  const row = await env.MEDIA_DB.prepare(`SELECT a.source_key, a.og_image_url,
       a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
       s.canonical_domain FROM media_articles a JOIN media_sources s
       ON s.source_key = a.source_key WHERE a.id = ?`).bind(id).first<{
@@ -757,7 +771,18 @@ async function adminImage(db: D1Database, id: number): Promise<Response> {
       row.source_image_policy !== 'remote_preview') throw new HttpError(404, 'image_not_found');
   const imageUrl = row.source_key === 'the-guardian' ? guardianRemotePreviewUrl(row.og_image_url)
     : remotePreviewUrl(row.og_image_url, row);
-  if (!imageUrl) throw new HttpError(404, 'image_not_found');
+  if (!imageUrl) {
+    const placeholderPath = sourcePresentationPlaceholderPath(row);
+    if (!placeholderPath) throw new HttpError(404, 'image_not_found');
+    const assetRequest = new Request(new URL(placeholderPath, 'https://media-assets.invalid'));
+    const assetResponse = await env.ASSETS.fetch(assetRequest);
+    if (!assetResponse.ok) throw new HttpError(404, 'image_not_found');
+    const headers = new Headers(assetResponse.headers);
+    headers.set('Cache-Control', 'private, max-age=300');
+    headers.set('Content-Security-Policy', "default-src 'none'");
+    headers.set('X-Content-Type-Options', 'nosniff');
+    return new Response(assetResponse.body, { status: 200, headers });
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -1008,7 +1033,7 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
   const imageMatch = /^\/admin\/articles\/([1-9]\d*)\/image$/.exec(url.pathname);
   if (imageMatch) {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
-    return adminImage(env.MEDIA_DB, Number(imageMatch[1]));
+    return adminImage(env, Number(imageMatch[1]));
   }
   const metadataMatch = /^\/admin\/articles\/([1-9]\d*)\/metadata\/(preview|apply)$/.exec(url.pathname);
   if (metadataMatch) {
