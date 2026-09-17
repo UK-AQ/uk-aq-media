@@ -490,7 +490,8 @@ async function checkManualApprovalContract(): Promise<void> {
   const blocked = sqlite.prepare(`SELECT status, last_error_code FROM media_bluesky_publications
     WHERE publication_key = 'cancelled-audit-fixture'`).get() as
     { status: string; last_error_code: string };
-  assert.deepEqual(blocked, { status: 'blocked', last_error_code: 'operator_cancelled' });
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.last_error_code, 'operator_cancelled');
 
   // A newly inserted genuinely automatic approval still creates exactly one outbox row.
   const instant = '2026-09-17T12:00:00.000Z';
