@@ -9,10 +9,22 @@ HTML metadata read for its title, `.blog-date`, `.category-link`, and head previ
 copy is retained or sent to AI. DSAWSP Webflow previews may use only the exact
 `cdn.prod.website-files.com` hostname and continue through the normal remote-preview proxy.
 
+## Communities Against Woodsmoke publisher source
+
+Communities Against Woodsmoke is an enabled manual/Standard publisher source. Its single
+scheduled work unit makes one bounded HTML request to the configured first-party `/blog/`
+index. Extraction is limited to the region after “Check out the latest blog articles below”
+and before “Other groups campaigning against woodsmoke pollution”; only titled HTTPS
+publisher links with an associated `D Month YYYY` date become candidates, in index order,
+up to 20. The index is not treated as a sitemap, `/feed/` is not used, and article pages are
+not fetched to establish candidates. Index prose and excerpts are not retained or sent to AI.
+After acceptance, the existing generic bounded article-head path may obtain presentation
+metadata under `remote_preview`; there is no CAWS-specific external image-host exception.
+
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
 Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, a bounded
-DSAWSP publisher-index adapter, and a
+DSAWSP and Communities Against Woodsmoke publisher-index adapters, and a
 separate global GDELT Web NGrams batch that retains English AQ candidates globally but
 promotes only relevant UK-publisher candidates into the existing Media system.
 The public website reaches the approved homepage feed only through the sibling
@@ -73,7 +85,9 @@ OpenAQ and Phys.org as manual/Standard generic RSS publishers. `0013` initialize
 generation-backed homepage latest-six state. `0014` adds GDELT checkpoint,
 run/file/chunk evidence, global candidate/family state and the conservative publisher-domain
 scope registry; `0015` adds separate malformed NGram accounting; and `0016` advances only
-still-blocked GDELT dynamic publisher sources to `remote_preview`. Four publisher adapters
+still-blocked GDELT dynamic publisher sources to `remote_preview`. Migration `0023` adds the
+bounded CAWS Blog index with manual/Standard publication policy and publisher-index
+provenance. Four publisher adapters
 remain deferred.
 
 ## GDELT Web NGrams discovery
@@ -218,10 +232,11 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 29 }`
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 30 }`
   when all current routes and all three Guardian author rules are enabled: one AQN scan,
   eleven Guardian routes, four BBC routes, four Sky routes, five Independent routes and
-  one route for each RSS specialist publisher, and one DSAWSP publisher-index route.
+  one route for each RSS specialist publisher, and one route for each of the DSAWSP and CAWS
+  publisher indexes.
   Disabled or structurally mismatched author rules omit only their profile route, so
   `queued` reports the actual bounded message count. The
   count reflects only enabled, internally configured supported work and may be zero.
@@ -257,7 +272,8 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
 helper that selects only allowlisted AQN, Guardian, BBC News, Sky News and Independent
-work, plus Carbon Brief, OpenAQ, Phys.org and DSAWSP, when each D1 source is current and enabled.
+work, plus Carbon Brief, OpenAQ, Phys.org, DSAWSP and CAWS, when each D1 source is current,
+enabled and matches its supported adapter shape.
 The caller cannot supply source or
 route selection. AQN retains its route-less `source_scan`; every Guardian and generic
 publisher RSS route receives its own `source_scan`. The consumer reloads and validates
