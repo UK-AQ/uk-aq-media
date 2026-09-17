@@ -753,6 +753,10 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
   const receipt = await env.MEDIA_DB.prepare(`SELECT article_ids_json, post_to_bluesky
     FROM media_admin_bulk_status_requests WHERE request_key = ?`).bind(key).first<BulkRequestRow>();
   if (!receipt) throw new HttpError(409, 'bulk_approval_state_conflict');
+  if (receipt.article_ids_json !== idsJson ||
+      Boolean(receipt.post_to_bluesky) !== requestedPost) {
+    throw new HttpError(409, 'idempotency_key_conflict');
+  }
   const eventPrefix = `admin-bulk:${key}:`;
   const { results: articles } = await env.MEDIA_DB.prepare(`SELECT article_id AS id,
     to_status AS status, revision FROM media_article_events
