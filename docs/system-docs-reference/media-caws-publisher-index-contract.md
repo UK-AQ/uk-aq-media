@@ -1,10 +1,10 @@
 # UK AQ Media Communities Against Woodsmoke publisher-index contract
 
-**Status:** Approved implementation authority for the next Communities Against Woodsmoke direct-discovery addition. This contract is source-specific and supersedes any older Communities Against Woodsmoke wording in `media_contract.md`, `README.md` or plans that refers to WordPress RSS `/feed/` discovery.
+**Status:** Current source-specific implementation authority for Communities Against Woodsmoke direct discovery and preview-image handling. This contract supersedes any older Communities Against Woodsmoke wording in `media_contract.md`, `README.md` or plans that refers to WordPress RSS `/feed/` discovery or that prohibits the narrowly bounded CAWS image and source-placeholder fallbacks defined below.
 
 ## 1. Decision and evidence
 
-Communities Against Woodsmoke (CAWS) is to be added as a bounded direct publisher source using its public Blog index, not its WordPress RSS feed.
+Communities Against Woodsmoke (CAWS) is a bounded direct publisher source using its public Blog index, not its WordPress RSS feed.
 
 The previously proposed endpoint:
 
@@ -22,7 +22,9 @@ https://www.communitiesagainstwoodsmoke.com/blog/
 
 A current external check of that page showed a distinct Blog section headed **Blog**, the text **Check out the latest blog articles below**, individual article-title links with publication dates, and a later **Other groups campaigning against woodsmoke pollution** section. The page also contains ordinary site navigation such as Home, Health, Climate, Action and Contact. Therefore the adapter MUST scope extraction to the article-listing region and MUST NOT treat all same-domain links as article candidates.
 
-This is a structural source check sufficient to approve implementation. Functional acceptance remains a post-deployment real-operation task.
+Real TEST operation on 17 September 2026 confirmed that the deployed CAWS source can discover the Blog-index articles. The initial discovery also established a preview-specific limitation: CAWS article rows received `preview_metadata_checked_at` values while `og_image_url` remained null, so the existing article-head preview path completed without finding a permitted `og:image` or `twitter:image`. A current browser retrieval of a CAWS article showed that the article itself can contain a normal publisher-hosted content image under the CAWS domain, including `/wp-content/uploads/` media. The narrow source-specific fallback in section 7 is therefore approved so that CAWS can supply a useful preview image without broadening generic article-body permissions.
+
+Subsequent real TEST use confirmed that the CAWS article-image fallback can populate genuine publisher-hosted article images where present, while some older CAWS articles have no usable publisher image. For those genuinely image-less articles, a UK AQ-owned CAWS default presentation image is approved as the final source-specific public-display fallback under section 7.3. This placeholder is not publisher metadata and MUST remain distinct from `og_image_url`.
 
 ## 2. Source identity and policy
 
@@ -44,7 +46,7 @@ image_policy: remote_preview
 
 `discovery_method: sitemap` deliberately reuses the existing configuration value already used by the bounded DSAWSP first-party publisher-index adapter. It does not mean CAWS discovery may fetch a sitemap. The only approved CAWS direct-discovery URL is the Blog index below.
 
-The source MUST be enabled when the implementation is deployed.
+The source MUST remain enabled while this adapter is operational.
 
 ## 3. Bounded Blog index route
 
@@ -130,6 +132,10 @@ It MUST NOT retain page-body prose, article-body text, arbitrary Blog-index pros
 
 The adapter MUST NOT fetch article bodies to establish inclusion.
 
+After an article has already passed the CAWS direct-source inclusion boundary, the preview-image logic MAY inspect a tightly bounded portion of that article's HTML solely to locate a permitted presentation-image URL under section 7. This is a source-specific image-metadata exception, not permission to retain, analyse, summarise or send article-body prose to AI.
+
+Only the selected preview-image URL and normal preview-check timestamp may be retained from this fallback. The HTML/body content used to locate it MUST remain transient and MUST NOT be stored in D1, R2, logs, discovery evidence or AI context.
+
 `content_fetch_policy=discovery_metadata_only` remains authoritative for broader content use.
 
 `ai_content_policy=metadata_only` permits only policy-compatible metadata-level AI behaviour under the separate AI contracts. It MUST NOT be interpreted as permission to submit CAWS article-body content to AI. Routine discovery MUST not broaden the existing automatic AI source allowlist merely because CAWS is added.
@@ -138,11 +144,91 @@ The adapter MUST NOT fetch article bodies to establish inclusion.
 
 `image_policy=remote_preview` authorises the existing generic bounded publisher presentation-metadata path in `media-preview-contract.md` after a CAWS article has been accepted by the direct-source inclusion boundary.
 
-The CAWS publisher-index adapter does not need to scrape or copy article-body images from the Blog listing.
+The normal candidate order is:
 
-No CAWS-specific external image/CDN hostname is authorised by this contract. Preview URLs MUST satisfy the existing generic publisher-domain/subdomain rules unless later real publisher metadata demonstrates a legitimate external publisher-controlled host and an explicit narrow contract change approves it.
+1. permitted `og:image` from the bounded article-head metadata path;
+2. permitted `twitter:image` from the bounded article-head metadata path;
+3. only when neither produces a permitted preview, the CAWS-specific bounded article-image fallback defined below;
+4. only when no permitted publisher image exists after those steps, the UK AQ-hosted CAWS default presentation image defined in section 7.3.
+
+A genuine publisher-derived image always takes precedence over the default presentation image. The CAWS publisher-index page itself MUST NOT be used as an image source for individual articles.
+
+### 7.1 CAWS-only bounded article-image fallback
+
+The fallback is permitted only for:
+
+```text
+source_key: communities-against-woodsmoke
+image_policy: remote_preview
+```
+
+and only after the article has already been accepted from the contracted Blog index. It MUST NOT become a generic fallback for other publishers.
+
+The fallback MAY make at most one additional bounded HTML request to the accepted canonical CAWS article URL when the normal head path found no permitted preview image. That request MUST:
+
+- use HTTPS only;
+- validate the configured CAWS publisher domain before the request and after every redirect;
+- use manual redirect handling with a small bounded redirect count;
+- accept only HTML/XHTML;
+- use a bounded timeout no greater than 15 seconds;
+- inspect no more than 512 KiB of response bytes;
+- stop reading as soon as a permitted article-content image has been identified;
+- fail closed on disallowed redirects, malformed URLs, non-HTML responses, timeouts or byte-limit exhaustion.
+
+The fallback SHOULD first use stable structured/presentation markup if CAWS exposes it, such as a publisher-provided JSON-LD `image` or `thumbnailUrl`. If no such usable value exists, it MAY select the first suitable image from the semantic article-content region.
+
+A body-image candidate MUST NOT be selected merely because it is the first `<img>` in the document. Extraction MUST be scoped to the article's main/content region using stable CAWS-specific semantic structure. Header/navigation/footer images, site logos, cookie/UI images, social icons, sidebars, related-content cards, tracking pixels and other non-article images MUST be excluded.
+
+Every fallback candidate MUST pass the existing `remotePreviewUrl` publisher-host validation. For the initial CAWS implementation, no external image/CDN hostname is authorised. A same-domain CAWS media URL such as `/wp-content/uploads/...` is permitted by the existing publisher-domain rule; an external host requires a later explicit contract amendment based on observed evidence.
+
+The fallback MUST NOT download or retain the image bytes during discovery. It records only the permitted remote image URL; the normal remote-preview image path remains responsible for any later bounded image-byte fetch used by the product UI.
+
+If no permitted fallback image is found, `og_image_url` may remain null. Absence of an image MUST NOT fail otherwise-valid CAWS article discovery.
+
+### 7.2 Existing CAWS rows
+
+CAWS rows discovered before this fallback may already have `preview_metadata_checked_at` populated with `og_image_url = NULL`. The implementation MAY perform one narrowly scoped recheck of those existing CAWS remote-preview rows so they can benefit from the new fallback.
+
+That recheck MUST be bounded to CAWS rows with no stored preview image and MUST NOT alter article status, approval provenance, title, publication date or other editorial state. It MUST NOT create an indefinite every-run retry loop for CAWS articles that genuinely have no suitable image.
+
+A small forward-only migration or equivalently bounded versioned recheck mechanism is acceptable. If a migration is used, it SHOULD only make the existing CAWS null-image rows eligible for one subsequent preview refresh; it MUST NOT rewrite article identities or editorial fields.
 
 Publisher image bytes MUST NOT be durably copied under `remote_preview`.
+
+### 7.3 UK AQ-hosted CAWS default presentation image
+
+When a CAWS article has no permitted publisher-derived image after the normal article-head lookup and the bounded CAWS article-image fallback, Media MAY expose a UK AQ-owned static CAWS default image as the final presentation fallback.
+
+The approved repository asset is:
+
+```text
+apps/media-public/public/source-images/communities-against-woodsmoke-default.png
+```
+
+and its public path SHOULD remain:
+
+```text
+/source-images/communities-against-woodsmoke-default.png
+```
+
+unless a later implementation-level static-asset convention changes the path without changing the policy boundary.
+
+This fallback MUST obey all of the following:
+
+- it applies only to `source_key='communities-against-woodsmoke'`;
+- it applies only when no genuine publisher image is currently stored/available for the article;
+- it is a UK AQ-owned presentation asset, not publisher metadata;
+- it MUST NOT be written into `media_articles.og_image_url`;
+- it MUST NOT be represented as a discovered publisher image or publisher provenance;
+- it MUST NOT pass through the publisher remote-preview proxy merely to make it look like an article image;
+- public Media responses MAY expose the first-party static asset URL as `preview_image_url` for otherwise image-less CAWS articles;
+- a later genuine publisher image MUST automatically take precedence over the default without requiring editorial replacement of the placeholder;
+- no per-article durable copy of the placeholder is required or permitted merely for this fallback;
+- failure to serve the placeholder MUST NOT invalidate the article or alter editorial state.
+
+Because this is a UK AQ-owned asset rather than copied publisher media, storing the single source placeholder in the Media repository and deploying it as a `media-public` static asset is permitted. The publisher-image durability restrictions in `media-preview-contract.md` continue to apply to publisher-origin images and are not weakened by this source placeholder.
+
+The placeholder is a presentation fallback only. `og_image_url = NULL` remains the correct durable article metadata state when the publisher supplied no usable image.
 
 ## 8. Identity, provenance and GDELT overlap
 
@@ -179,36 +265,49 @@ route_key: communities-against-woodsmoke-blog-index
 
 ## 10. Structural implementation boundary
 
-Before implementation, only structural viability is required. The following has been established:
+The following has been established structurally or through real TEST operation:
 
 - the public `/blog/` index exposes article titles and dates within a distinct Blog article-listing section;
 - ordinary site navigation is also present, so extraction must be scoped rather than domain-wide;
-- the existing source schema can represent the adapter using the same `sitemap` discovery-method value used by DSAWSP;
-- the existing scheduled-source allowlist can add one explicit CAWS work unit;
-- the existing `publisher_web_index` provenance class and canonical article persistence model can be reused;
-- the existing generic `remote_preview` path can supply optional article preview metadata without broadening article-body permissions.
+- the existing source schema represents the adapter using the same `sitemap` discovery-method value used by DSAWSP;
+- the existing scheduled-source allowlist supports one explicit CAWS work unit;
+- the existing `publisher_web_index` provenance class and canonical article persistence model are reused;
+- deployed CAWS discovery has produced article rows from the Blog index;
+- the existing generic article-head preview path has completed for CAWS rows while leaving their image URL null;
+- the existing `remotePreviewUrl` rule already permits same-domain HTTPS CAWS image URLs, so no external-host exception is needed for the observed WordPress media pattern;
+- the CAWS bounded article-image fallback has produced real publisher-hosted thumbnails where suitable article images exist;
+- some older CAWS articles have no suitable publisher image and therefore need a presentation-only source placeholder rather than fabricated publisher metadata;
+- `media-public` is already the authoritative service that exposes `preview_image_url`, so it is the correct ownership boundary for the static CAWS placeholder.
 
-No further live pre-implementation request from Codex Cloud is required. In particular, Codex MUST NOT treat its inability to access the publisher from its cloud environment as a reason to stop implementation. It should implement to this contract and leave functional validation to deployed real operation.
+No live pre-implementation request from Codex Cloud is required for the static placeholder. Structural viability is limited to confirming that the existing `media-public` Worker configuration can expose a repository-owned static asset without changing publisher-image validation or D1 article metadata semantics.
 
-Do not create speculative pre-deployment functional test suites. Existing structural/unit checks around parser/configuration logic MAY be updated where the repository's current check suite requires them.
+Do not create a speculative pre-deployment functional test suite. Existing focused deterministic checks MAY be extended to validate the source-specific placeholder selection and precedence where the repository's current check architecture supports that cleanly.
 
 ## 11. Post-deployment real-operation acceptance
 
 After deployment, real Media operation MUST confirm:
 
-- the normal scheduler queues exactly one CAWS Blog-index work unit when the supported source is enabled;
-- the deployed Worker can fetch the real `/blog/` page successfully from Cloudflare;
-- the run records the expected CAWS route and succeeds;
-- current article cards from the Blog listing are discovered;
+- the normal scheduler still queues exactly one CAWS Blog-index work unit when the supported source is enabled;
+- the deployed Worker still fetches the real `/blog/` page successfully from Cloudflare;
+- current Blog article cards are still discovered correctly;
 - navigation, footer, other-groups and ordinary CAWS pages are not discovered;
 - up to 20 newest valid index candidates are processed in publisher order;
 - new otherwise-valid CAWS articles enter Pending under `manual` / `standard`;
 - no generic broad-publisher keyword filter removes a valid CAWS Blog-index item;
 - no CAWS item is auto-approved solely because it was found on the specialist Blog index;
-- index/body prose is not retained;
-- optional preview metadata uses only the existing bounded `remote_preview` path;
+- a CAWS article with a usable normal `og:image` or `twitter:image` continues to use that normal head metadata without invoking the body fallback;
+- a CAWS article with no usable head image but with a suitable same-domain article-content image can populate `og_image_url` through the bounded CAWS fallback;
+- the fallback selects the genuine article-content image rather than a logo, navigation/footer image, icon, related-content image or tracking asset;
+- article/body prose is not retained or sent to AI;
+- the fallback records only a permitted remote image URL and the normal preview-check timestamp;
+- existing CAWS rows with null images receive at most the intended one-time refresh opportunity rather than an indefinite retry every two hours;
+- the normal remote-preview image proxy can subsequently serve the selected same-domain image under existing rules;
+- a CAWS article with no genuine publisher image may expose `/source-images/communities-against-woodsmoke-default.png` as its public `preview_image_url`;
+- use of the default image leaves `media_articles.og_image_url` null and does not create publisher-image provenance;
+- a genuine publisher image takes precedence over the default whenever one is present or later becomes available;
+- the single UK AQ-owned default asset is served from the Media public surface without creating per-article image copies;
 - repeated scans do not duplicate article identities or reset editorial state;
 - a CAWS/GDELT overlap converges on one canonical `media_articles` row with separate provenance evidence;
-- failures fetching/parsing CAWS do not affect other Media sources or already-approved content.
+- failures in optional CAWS image enrichment or placeholder delivery do not fail otherwise-valid CAWS article discovery or affect other Media sources.
 
-If the deployed Cloudflare Worker itself receives 403 or otherwise cannot fetch `/blog/`, record that as real operational evidence and revise the source strategy explicitly rather than adding an uncontracted crawl, alternate endpoint or access-control workaround.
+If the deployed Cloudflare Worker itself cannot fetch an individual CAWS article for the optional image fallback, record that as preview-enrichment evidence. If no publisher image is available, the public CAWS placeholder may still be used. Do not fall back to `/feed/`, a sitemap, recursive crawling, a proxy, an external image host or another access-control workaround.

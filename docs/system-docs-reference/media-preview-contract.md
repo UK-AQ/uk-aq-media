@@ -1,6 +1,6 @@
 # UK AQ Media preview image and display-title contract
 
-**Status:** Current narrow implementation authority for article preview images, compact display titles, explicit publisher-metadata reload and versioned public image delivery. This contract is narrower than `media_contract.md` and supersedes that file's image-preview rules where they differ. AI-assisted display-title suggestion is governed separately by `media-display-title-ai-contract.md`.
+**Status:** Current narrow implementation authority for article preview images, compact display titles, explicit publisher-metadata reload, versioned public image delivery and source-specific first-party presentation placeholders. This contract is narrower than `media_contract.md` and supersedes that file's image-preview rules where they differ. AI-assisted display-title suggestion is governed separately by `media-display-title-ai-contract.md`.
 
 ## 1. Scope
 
@@ -11,9 +11,10 @@ This contract owns:
 - optional compact display titles while preserving the publisher's original headline;
 - explicit authenticated reload of permitted publisher metadata for an existing article;
 - transient Cloudflare edge caching of remote preview-image bytes;
-- versioned public Media image-delivery URLs/cache identity used by UK AQ presentation surfaces.
+- versioned public Media image-delivery URLs/cache identity used by UK AQ presentation surfaces;
+- the generic boundary under which a narrower source-specific contract MAY authorise a UK AQ-owned static presentation placeholder when no publisher image exists.
 
-It does not itself authorise article-body fetching, article-body storage, AI use, durable local copies of publisher images or LIVE public website cut-over. The separate `media-display-title-ai-contract.md` is the narrow authority for bounded Workers AI display-title suggestions and source-specific RSS metadata supplied to that feature.
+It does not itself authorise article-body fetching, article-body storage, AI use, durable local copies of publisher images or LIVE public website cut-over. A narrower source-specific contract MAY separately authorise a UK AQ-owned static presentation asset because that is not a copied publisher image and does not become publisher metadata. The separate `media-display-title-ai-contract.md` is the narrow authority for bounded Workers AI display-title suggestions and source-specific RSS metadata supplied to that feature.
 
 The deployed TEST website MAY consume the public Media feed through the same-origin Ops cache-proxy bridge defined by `../cache_proxy/media-public-feed-contract.md`. That bridge does not move Media authority into Ops.
 
@@ -74,14 +75,16 @@ A source with `image_policy='blocked'` MUST NOT gain this capability. Changing `
 
 ## 4. Preview URL validation
 
-A discovered preview URL MUST:
+A discovered publisher preview URL MUST:
 
 - be HTTPS;
 - belong to the configured publisher domain/subdomains unless this contract or a narrower source-specific contract explicitly permits a named publisher CDN;
-- originate from feed metadata or permitted article-head metadata for the same article;
+- originate from feed metadata or permitted article-head metadata for the same article, or from another source-specific publisher-image mechanism explicitly authorised by a narrower contract;
 - pass both source-level and article-level image policy checks before public exposure.
 
-A preview URL is metadata only. It does not alter canonical article identity.
+A discovered publisher preview URL is metadata only. It does not alter canonical article identity.
+
+These publisher-preview rules govern publisher-derived URLs stored as article image metadata such as `og_image_url`. A UK AQ-owned static source placeholder authorised by a narrower source-specific contract is not discovered publisher metadata, MUST NOT be written into `og_image_url`, and is governed separately by section 7.4.
 
 Automatic rediscovery MAY fill a previously null `og_image_url`, but MUST NOT overwrite an existing non-null article image selection automatically. This preserves future manual image choices and article-level blocks. Source-specific explicit repair exceptions may be defined by a narrower contract, such as the Guardian RSS preview contract.
 
@@ -128,18 +131,20 @@ The cached-remote-preview rules are:
 
 1. the source bytes remain publisher-origin bytes for the same article preview;
 2. cache storage MUST be transient Cloudflare HTTP/Cache API storage only;
-3. image bytes MUST NOT be written to D1, R2, Git, Dropbox or another durable UK AQ media store under `remote_preview`;
-4. the Worker MUST NOT resize, recompress, crop, watermark or otherwise transform the cached bytes;
+3. publisher image bytes MUST NOT be written to D1, R2, Git, Dropbox or another durable UK AQ media store under `remote_preview`;
+4. the Worker MUST NOT resize, recompress, crop, watermark or otherwise transform the cached publisher bytes;
 5. CSS `object-fit: cover` and clipping by the website are presentation only and are permitted;
 6. the cache MUST have a finite TTL. The initial implementation SHOULD use 24 hours;
 7. a cache miss MAY fetch only the validated `og_image_url` associated with the requested approved article;
 8. image fetches MUST use HTTPS, reject redirects, require an `image/*` content type, use a bounded timeout and enforce a conservative response-size limit;
 9. the initial implementation SHOULD use a 10-second timeout and a 5 MiB maximum image size;
 10. failed, blocked, oversized, redirected or non-image responses MUST fail closed and MUST NOT be cached as successful images;
-11. public article JSON MUST remain usable when the image route fails;
-12. once an article/source no longer exposes a permitted image, normal public pages MUST stop referencing the cached image route. A finite cache TTL bounds residual edge copies.
+11. public article JSON MUST remain usable when the publisher image route fails;
+12. once an article/source no longer exposes a permitted publisher image, normal public pages MUST stop referencing the cached publisher-image route. A finite cache TTL bounds residual edge copies.
 
-`local_copy_permitted` remains reserved for a durable copied/stored image where an explicit permission/licence or another clearly documented right has been established. This contract does not make that determination.
+`local_copy_permitted` remains reserved for a durable copied/stored publisher image where an explicit permission/licence or another clearly documented right has been established. This contract does not make that determination.
+
+A UK AQ-owned static source placeholder authorised under section 7.4 is not a cached remote publisher preview and is therefore not subject to the prohibition on durable copies of publisher bytes. It remains subject to its narrower source contract and normal first-party static-asset controls.
 
 ## 7. Versioned public API/image route
 
@@ -160,7 +165,7 @@ The exact path/query shape is an implementation detail, but the route MUST:
 
 ### 7.1 Current image version and cache identity
 
-The public `/articles` response SHOULD expose a versioned `preview_image_url` suitable for website use. Its version token MUST be derived deterministically from a collision-resistant digest of the exact current stored `og_image_url`; a compact truncated digest is acceptable when collision risk remains negligible for this use.
+The public `/articles` response SHOULD expose a versioned `preview_image_url` suitable for website use when a publisher image is stored. Its version token MUST be derived deterministically from a collision-resistant digest of the exact current stored `og_image_url`; a compact truncated digest is acceptable when collision risk remains negligible for this use.
 
 The image Worker MUST independently derive the expected current version from D1. The caller-supplied `v` value is an assertion/reference to a version, not authority over what publisher URL or Cache API entry is used.
 
@@ -183,17 +188,38 @@ The stale-version response MUST NOT:
 - create a redirect loop;
 - turn arbitrary query parameters into cache-key selectors.
 
-A request with no current permitted image, a non-approved article, or a blocked source/article policy MUST still fail normally rather than redirecting to an image that is no longer authorised.
+A request with no current permitted publisher image, a non-approved article, or a blocked source/article policy MUST still fail normally rather than redirecting to a publisher image that is no longer authorised. A separately authorised static source placeholder, if any, is handled by the public feed/presentation path under section 7.4 rather than by reviving `/article-images/:id` with synthetic metadata.
 
 This stale-version behaviour exists to cover the short period in which a client may still hold an older cached `/articles` response after `og_image_url` changes. It does not require preserving historical image versions.
 
 ### 7.3 Public feed and bridge
 
-The public `/articles` response SHOULD expose the UK AQ versioned image-delivery URL while retaining the original `og_image_url` only if existing public compatibility requires it. New website presentation SHOULD prefer the UK AQ image-delivery URL so publisher traffic is bounded by the edge cache.
+The public `/articles` response SHOULD expose the UK AQ versioned image-delivery URL when a publisher image exists, while retaining the original `og_image_url` only if existing public compatibility requires it. New website presentation SHOULD prefer the UK AQ image-delivery URL so publisher traffic is bounded by the edge cache.
+
+When an active narrower source-specific contract authorises a UK AQ-owned static placeholder for an image-less article, `media-public` MAY instead expose that first-party static asset URL as `preview_image_url`. It MUST NOT fabricate an `og_image_url` merely to fit the publisher-image route.
 
 For deployed TEST website use, `media-public /articles` is the authoritative upstream behind the same-origin `GET /api/media/articles` bridge owned by `../cache_proxy/media-public-feed-contract.md`. The bridge SHOULD relay the public article response rather than reconstructing Media data in Ops.
 
 The `preview_image_url` returned by Media remains an absolute Media public image-delivery URL. It MUST NOT be rewritten by the Ops bridge into a second image-proxy route.
+
+### 7.4 Source-specific first-party static placeholders
+
+A narrower source-specific contract MAY authorise a UK AQ-owned static presentation image as the final fallback for articles from that source when no permitted publisher-derived image exists.
+
+Such a placeholder MUST satisfy all of the following:
+
+1. it is explicitly authorised for the named source by a narrower current contract;
+2. it is a UK AQ-owned presentation asset, not copied publisher media and not publisher metadata;
+3. it is served from a Media-controlled HTTPS origin or Media Worker static-asset path;
+4. it MUST NOT be written into `media_articles.og_image_url` or represented as publisher discovery provenance;
+5. it MUST NOT be routed through `/article-images/:id` merely to mimic a publisher image;
+6. `preview_image_url` MAY point directly to the first-party static asset when no publisher image exists;
+7. a genuine permitted publisher image always takes precedence over the placeholder and automatically restores the normal versioned publisher-image path;
+8. the placeholder MUST NOT alter article identity, publication state, approval provenance, preview-check timestamps or publisher metadata merely because it is displayed;
+9. storing a single UK AQ-owned placeholder in Git/Workers static assets is permitted and is not a durable copy of publisher image bytes;
+10. failure to serve the placeholder MUST NOT make the article/public feed unusable.
+
+The source-specific contract SHOULD name the intended asset path so implementation cannot accidentally apply one source's branding to another source.
 
 ## 8. Main AQ in the News page handoff
 
@@ -206,7 +232,7 @@ Media MUST provide enough public data for that UI to render:
 - publisher;
 - publication/discovery date as already contracted;
 - article URL;
-- optional versioned cached-preview delivery URL;
+- optional versioned cached publisher-preview delivery URL or authorised first-party source-placeholder URL;
 - existing optional summary/topics/context fields.
 
 The Media API remains useful when any optional image or compact-title field is null.
@@ -215,9 +241,11 @@ The deployed TEST page SHOULD request the same-origin `/api/media/articles` rout
 
 ## 9. Validation boundary
 
-Before implementation, validate only structural viability: migration compatibility, Worker binding/API shape, bounded fetch/cache design, deterministic URL-derived versioning, stale-version redirect/serve shape, explicit metadata reload/apply semantics and compatibility with existing source-policy enforcement. AI-title structural validation belongs to `media-display-title-ai-contract.md`.
+Before implementation, validate only structural viability: migration compatibility, Worker binding/API shape, bounded fetch/cache design, deterministic URL-derived versioning, stale-version redirect/serve shape, explicit metadata reload/apply semantics, source-specific static-asset delivery where authorised and compatibility with existing source-policy enforcement. AI-title structural validation belongs to `media-display-title-ai-contract.md`.
 
 For a source-specific publisher CDN addition, a targeted pre-implementation evidence check is required only to identify the exact hostname currently supplied by the publisher and confirm that the existing source-specific URL-validation shape can represent it without a wildcard or broader fetch-policy change. This is a contract-boundary check, not a speculative functional test suite.
+
+For a source-specific first-party static placeholder, pre-implementation validation is limited to confirming that the existing Media public Worker can expose the named repository-owned asset and select it without mutating `og_image_url` or weakening publisher-image policy. No speculative functional suite is required.
 
 For the TEST same-origin feed bridge, the cache-proxy-specific structural and post-deployment requirements are owned by `../cache_proxy/media-public-feed-contract.md`.
 
@@ -228,13 +256,15 @@ After deployment, use real TEST operation to confirm at least:
 - a BBC or other publisher image on a non-permitted external hostname remains rejected rather than causing a broader hostname exception;
 - automatic rediscovery fills previously absent preview metadata without overwriting existing non-null image choices;
 - explicit editorial/source-specific repair preserves unrelated article/editorial state;
-- the public cached image route serves permitted images and rejects blocked/invalid/non-image/oversized responses;
+- the public cached publisher-image route serves permitted images and rejects blocked/invalid/non-image/oversized responses;
 - publisher image bytes are not written to durable UK AQ storage under `remote_preview`;
-- `preview_image_url` is versioned from the current stored publisher image URL and changes when that URL changes;
-- internal Cache API identity changes with the current stored URL/version and cannot be selected by arbitrary request query parameters;
-- an old explicit version URL no longer returns a broken image merely because the article has moved to a new valid image version, and instead resolves safely to the current version without reviving the old cache identity;
+- publisher-derived `preview_image_url` is versioned from the current stored publisher image URL and changes when that URL changes;
+- internal Cache API identity changes with the current stored publisher URL/version and cannot be selected by arbitrary request query parameters;
+- an old explicit version URL no longer returns a broken publisher image merely because the article has moved to a new valid image version, and instead resolves safely to the current version without reviving the old cache identity;
 - unversioned legacy requests, if retained, use the current D1-derived cache identity;
-- the public article feed remains usable when an image is unavailable;
+- an authorised source-specific static placeholder can appear as `preview_image_url` only when the article lacks a permitted publisher image, without populating `og_image_url` or publisher provenance;
+- a later genuine publisher image takes precedence over any static source placeholder;
+- the public article feed remains usable when an image or optional placeholder is unavailable;
 - original publisher titles remain preserved while compact display titles remain optional;
 - the deployed TEST AQ in the News page renders the public response correctly through its same-origin feed route.
 
