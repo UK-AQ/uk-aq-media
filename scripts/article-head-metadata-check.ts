@@ -142,6 +142,65 @@ try {
   assert.ok(discovered.preview_metadata_checked_at);
 } finally { globalThis.fetch = originalFetch; }
 
+const cawsSource: Source = {
+  ...source,
+  source_key: 'communities-against-woodsmoke',
+  name: 'Communities Against Woodsmoke',
+  canonical_domain: 'communitiesagainstwoodsmoke.com',
+};
+const cawsArticle: DiscoveredArticle = {
+  ...article,
+  canonical_url: 'https://communitiesagainstwoodsmoke.com/blog/article/',
+  original_url: 'https://communitiesagainstwoodsmoke.com/blog/article/',
+};
+let cawsRequests = 0;
+globalThis.fetch = async () => {
+  cawsRequests++;
+  return cawsRequests === 1
+    ? new Response('<head><meta name="twitter:image" content="https://communitiesagainstwoodsmoke.com/wp-content/uploads/twitter.jpg"></head>',
+      { headers: { 'Content-Type': 'text/html' } })
+    : new Response('<main><article><img src="https://communitiesagainstwoodsmoke.com/wp-content/uploads/body.jpg"></article></main>',
+      { headers: { 'Content-Type': 'text/html' } });
+};
+try {
+  const normalWins = await discoverArticleHeadPreviewMetadata(cawsArticle, cawsSource);
+  assert.equal(normalWins.preview_url,
+    'https://communitiesagainstwoodsmoke.com/wp-content/uploads/twitter.jpg');
+  assert.equal(cawsRequests, 1);
+} finally { globalThis.fetch = originalFetch; }
+
+cawsRequests = 0;
+globalThis.fetch = async () => {
+  cawsRequests++;
+  return cawsRequests === 1
+    ? new Response('<head><title>No normal image</title></head>',
+      { headers: { 'Content-Type': 'text/html' } })
+    : new Response('<main><article><img src="https://communitiesagainstwoodsmoke.com/wp-content/uploads/body.jpg"></article></main>',
+      { headers: { 'Content-Type': 'text/html' } });
+};
+try {
+  const fallback = await discoverArticleHeadPreviewMetadata(cawsArticle, cawsSource);
+  assert.equal(fallback.preview_url,
+    'https://communitiesagainstwoodsmoke.com/wp-content/uploads/body.jpg');
+  assert.ok(fallback.preview_metadata_checked_at);
+  assert.equal(cawsRequests, 2);
+} finally { globalThis.fetch = originalFetch; }
+
+cawsRequests = 0;
+globalThis.fetch = async () => {
+  cawsRequests++;
+  return cawsRequests === 1
+    ? new Response('<head><title>No normal image</title></head>',
+      { headers: { 'Content-Type': 'text/html' } })
+    : new Response(null, { status: 403 });
+};
+try {
+  const optionalFailure = await discoverArticleHeadPreviewMetadata(cawsArticle, cawsSource);
+  assert.equal(optionalFailure.preview_url, null);
+  assert.ok(optionalFailure.preview_metadata_checked_at);
+  assert.equal(cawsRequests, 2);
+} finally { globalThis.fetch = originalFetch; }
+
 globalThis.fetch = async () => new Response(`<head>
   <meta property="og:image" content="${physOrgPreview}">
 </head>`, { headers: { 'Content-Type': 'text/html' } });

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  CAWS_INDEX_URL, configuredCawsIndex, discoverCaws, extractCawsIndexCandidates,
+  CAWS_INDEX_URL, configuredCawsIndex, discoverCaws, extractCawsArticlePreviewImage,
+  extractCawsIndexCandidates, fetchCawsArticlePreviewImage,
 } from '@uk-aq-media/discovery';
 import { initialEditorialState, SourceSchema, z } from '@uk-aq-media/core';
 import { ScanError } from '../packages/discovery/src/rss';
@@ -15,6 +16,12 @@ assert.ok(configuredCawsIndex(source));
 assert.deepEqual(initialEditorialState(source), {
   status: 'pending', approval_method: null, approval_author_rule_key: null,
 });
+const recheckMigration = readFileSync('migrations/0024_caws_preview_image_recheck.sql', 'utf8');
+assert.match(recheckMigration, /source_key = 'communities-against-woodsmoke'/);
+assert.match(recheckMigration, /image_policy = 'remote_preview'/);
+assert.match(recheckMigration, /og_image_url IS NULL/);
+assert.match(recheckMigration, /preview_metadata_checked_at IS NOT NULL/);
+assert.match(recheckMigration, /1970-01-01T00:00:00\.000Z/);
 
 const html = `<nav><a href="/">Home</a><a href="/contact/">Contact</a></nav>
 <section><h1>Blog</h1><p>Check out the latest blog articles below</p>
@@ -61,4 +68,59 @@ assert.deepEqual(discovered.articles.map(article => ({ title: article.title,
   { title: 'Second article', published_at: '2026-03-29', preview_url: null,
     title_context: null },
 ]);
+
+const articleUrl = 'https://communitiesagainstwoodsmoke.com/blog/first-article/';
+const contentImage = 'https://www.communitiesagainstwoodsmoke.com/wp-content/uploads/article.jpg';
+const structuredImage =
+  'https://communitiesagainstwoodsmoke.com/wp-content/uploads/structured.jpg';
+const articleHtml = `<html><head>
+  <script type="application/ld+json">{"@type":"BlogPosting","image":"${structuredImage}"}</script>
+</head><body>
+  <header><img src="https://communitiesagainstwoodsmoke.com/logo.png"></header>
+  <nav><img src="https://communitiesagainstwoodsmoke.com/nav.png"></nav>
+  <main><article><img src="${contentImage}"></article>
+    <aside><img src="https://communitiesagainstwoodsmoke.com/sidebar.png"></aside>
+    <section class="related-posts"><img src="https://communitiesagainstwoodsmoke.com/related.png"></section>
+  </main><footer><img src="https://communitiesagainstwoodsmoke.com/footer.png"></footer>
+</body></html>`;
+assert.equal(extractCawsArticlePreviewImage(articleHtml, articleUrl, source), structuredImage);
+assert.equal(extractCawsArticlePreviewImage(`<header><img src="${contentImage}"></header>
+  <main><article><img src="${contentImage}"></article></main>`, articleUrl, source), contentImage);
+assert.equal(extractCawsArticlePreviewImage(`<main><article>
+  <img src="https://external.example/image.jpg"></article></main>`, articleUrl, source), null);
+assert.equal(extractCawsArticlePreviewImage(`<nav><img src="${contentImage}"></nav>
+  <main><section class="related"><img src="${contentImage}"></section></main>
+  <footer><img src="${contentImage}"></footer>`, articleUrl, source), null);
+assert.equal(extractCawsArticlePreviewImage(articleHtml, articleUrl,
+  { ...source, source_key: 'another-publisher' }), null);
+
+let previewCancelled = false;
+const encoder = new TextEncoder();
+const previewRequests: string[] = [];
+const fetchedImage = await fetchCawsArticlePreviewImage(articleUrl, source,
+  (async (input, init) => {
+    previewRequests.push(String(input));
+    assert.equal(init?.redirect, 'manual');
+    let sent = false;
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) { sent = true; controller.enqueue(encoder.encode(
+          `<main><article><img src="${contentImage}">`)); }
+        else controller.enqueue(encoder.encode('x'.repeat(512 * 1024)));
+      },
+      cancel() { previewCancelled = true; },
+    }), { headers: { 'Content-Type': 'text/html' } });
+  }) as typeof fetch);
+assert.equal(fetchedImage, contentImage);
+assert.deepEqual(previewRequests, [articleUrl]);
+assert.equal(previewCancelled, true);
+
+await assert.rejects(fetchCawsArticlePreviewImage(articleUrl, source,
+  (async () => new Response(null, { status: 302,
+    headers: { Location: 'https://external.example/article' } })) as typeof fetch),
+error => error instanceof ScanError && error.code === 'caws_preview_redirect_rejected');
+await assert.rejects(fetchCawsArticlePreviewImage(articleUrl, source,
+  (async () => new Response('x'.repeat(512 * 1024 + 1),
+    { headers: { 'Content-Type': 'text/html' } })) as typeof fetch),
+error => error instanceof ScanError && error.code === 'caws_preview_html_too_large');
 console.log('CAWS discovery checks passed');

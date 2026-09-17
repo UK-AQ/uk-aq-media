@@ -52,6 +52,7 @@ export type { PublisherRssSourceKey } from './publisher-rss';
 export {
   discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
 } from './article-head-metadata';
+export { extractCawsArticlePreviewImage, fetchCawsArticlePreviewImage } from './caws-preview-image';
 export type { ArticleHeadMetadata } from './article-head-metadata';
 export {
   configuredGuardianRouteKeys, discoverGuardianCurrentRssImageView,
@@ -124,6 +125,8 @@ type ExistingPreviewState = {
   image_policy: string;
   preview_metadata_checked_at: string | null;
 };
+
+const CAWS_PREVIEW_RECHECK_SENTINEL = '1970-01-01T00:00:00.000Z';
 
 export type DisplayTitleAiRuntime = {
   binding: Ai;
@@ -259,7 +262,10 @@ async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
     const hasPreview = article.preview_url !== null || state?.og_image_url !== null &&
       state?.og_image_url !== undefined;
     const articleAllowsPreview = !state || state.image_policy === 'remote_preview';
-    if (hasPreview || !articleAllowsPreview || state?.preview_metadata_checked_at) continue;
+    const cawsRecheck = source.source_key === 'communities-against-woodsmoke' &&
+      state?.preview_metadata_checked_at === CAWS_PREVIEW_RECHECK_SENTINEL;
+    if (hasPreview || !articleAllowsPreview ||
+        state?.preview_metadata_checked_at && !cawsRecheck) continue;
     try {
       Object.assign(article, await discoverArticleHeadPreviewMetadata(article, source));
     } catch (error) {

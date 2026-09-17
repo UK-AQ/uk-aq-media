@@ -3,6 +3,7 @@ import {
   type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { ScanError } from './rss';
+import { fetchCawsArticlePreviewImage } from './caws-preview-image';
 
 const MAX_HEAD_BYTES = 256 * 1024;
 const HEAD_TIMEOUT_MS = 10_000;
@@ -221,12 +222,18 @@ export async function discoverArticleHeadPreviewMetadata(article: DiscoveredArti
   source: Source): Promise<Pick<DiscoveredArticle, 'preview_url' | 'display_title' |
     'display_title_origin' | 'preview_metadata_checked_at'>> {
   const metadata = await fetchArticleHeadMetadata(article.canonical_url, source);
-    const displayTitle = compactPublisherTitle(article.title,
-      [metadata.ogTitle, metadata.twitterTitle]);
-    return {
-      preview_url: metadata.previewUrl,
-      display_title: displayTitle,
-      display_title_origin: displayTitle ? 'publisher' : null,
-      preview_metadata_checked_at: metadata.checkedAt,
-    };
+  const displayTitle = compactPublisherTitle(article.title,
+    [metadata.ogTitle, metadata.twitterTitle]);
+  let previewUrl = metadata.previewUrl;
+  if (!previewUrl && source.source_key === 'communities-against-woodsmoke' &&
+      source.image_policy === 'remote_preview') {
+    try { previewUrl = await fetchCawsArticlePreviewImage(article.canonical_url, source); }
+    catch { /* Optional CAWS presentation enrichment must not invalidate discovery. */ }
+  }
+  return {
+    preview_url: previewUrl,
+    display_title: displayTitle,
+    display_title_origin: displayTitle ? 'publisher' : null,
+    preview_metadata_checked_at: metadata.checkedAt,
+  };
 }

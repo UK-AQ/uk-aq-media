@@ -372,6 +372,12 @@ not invoke AI for any of these three sources. Carbon Brief and OpenAQ remain eli
 an explicit authenticated editorial title request; any resulting suggestion stays
 separately Pending until editorial acceptance.
 
+For CAWS only, when neither normal `og:image` nor `twitter:image` yields a permitted
+preview, discovery may make one additional bounded request to the accepted canonical
+article and select structured article-image metadata or an image inside semantic article
+content. The fallback remains subject to the same publisher-domain preview validation;
+page chrome and external-host images are rejected, and no body prose or HTML is retained.
+
 Article canonical-domain validation remains separate from preview-image validation.
 OpenAQ article identity stays restricted to `openaq.medium.com`; only its preview policy
 permits exact host `cdn-images-1.medium.com`.
