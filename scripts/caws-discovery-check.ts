@@ -4,6 +4,7 @@ import {
   CAWS_INDEX_URL, configuredCawsIndex, discoverCaws, extractCawsIndexCandidates,
 } from '@uk-aq-media/discovery';
 import { initialEditorialState, SourceSchema, z } from '@uk-aq-media/core';
+import { ScanError } from '../packages/discovery/src/rss';
 
 const sources = z.array(SourceSchema).parse(JSON.parse(
   readFileSync('config/sources.seed.json', 'utf8'),
@@ -31,8 +32,17 @@ assert.deepEqual(extractCawsIndexCandidates(html, source), [
   { canonical_url: 'https://communitiesagainstwoodsmoke.com/blog/second-article/',
     title: 'Second article', published_at: '2026-03-29' },
 ]);
-assert.deepEqual(extractCawsIndexCandidates(html.replace(
-  'Other groups campaigning against woodsmoke pollution', 'Missing boundary'), source), []);
+assert.throws(() => extractCawsIndexCandidates(html.replace(
+  'Check out the latest blog articles below', 'Missing start boundary'), source),
+error => error instanceof ScanError && error.code === 'caws_listing_start_missing');
+assert.throws(() => extractCawsIndexCandidates(html.replace(
+  'Other groups campaigning against woodsmoke pollution', 'Missing end boundary'), source),
+error => error instanceof ScanError && error.code === 'caws_listing_end_missing');
+assert.throws(() => extractCawsIndexCandidates(
+  `<p>Check out the latest blog articles below</p>
+  <a href="/blog/no-date/">No valid date</a>
+  <h2>Other groups campaigning against woodsmoke pollution</h2>`, source),
+error => error instanceof ScanError && error.code === 'caws_no_valid_index_candidates');
 
 const requested: string[] = [];
 const discovered = await discoverCaws(source, (async (input, init) => {

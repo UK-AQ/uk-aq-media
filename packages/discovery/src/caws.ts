@@ -68,10 +68,10 @@ export type CawsIndexCandidate = { canonical_url: string; title: string; publish
 
 export function extractCawsIndexCandidates(html: string, source: Source): CawsIndexCandidate[] {
   const start = html.toLocaleLowerCase('en-GB').indexOf(LISTING_START.toLowerCase());
-  if (start < 0) return [];
+  if (start < 0) throw new ScanError('caws_listing_start_missing');
   const end = html.toLocaleLowerCase('en-GB').indexOf(LISTING_END.toLowerCase(), start +
     LISTING_START.length);
-  if (end < 0) return [];
+  if (end < 0) throw new ScanError('caws_listing_end_missing');
   const region = html.slice(start + LISTING_START.length, end);
   const links = [...region.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)];
   const candidates: CawsIndexCandidate[] = [];
@@ -95,6 +95,7 @@ export function extractCawsIndexCandidates(html: string, source: Source): CawsIn
     seen.add(canonical);
     candidates.push({ canonical_url: canonical, title, published_at: publishedAt });
   }
+  if (candidates.length === 0) throw new ScanError('caws_no_valid_index_candidates');
   return candidates;
 }
 

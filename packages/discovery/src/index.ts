@@ -9,7 +9,7 @@ import {
 } from '@uk-aq-media/enrichment';
 import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
 import { discoverAqn } from './aqn';
-import { configuredCawsIndex, discoverCaws } from './caws';
+import { CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, discoverCaws } from './caws';
 import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
 import {
   configuredPublisherRssRouteKeys, discoverPublisherRss,
@@ -307,7 +307,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         return;
       }
       result = await discoverGuardian(source, routeKey);
-    } else if (sourceKey === 'communities-against-woodsmoke' && routeKey &&
+    } else if (sourceKey === 'communities-against-woodsmoke' &&
+        routeKey === CAWS_INDEX_ROUTE_KEY &&
         configuredCawsIndex(source)) {
       result = await discoverCaws(source);
     } else if (sourceKey === 'dsawsp' && routeKey && configuredDsawspIndex(source)) {
