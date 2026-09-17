@@ -1,12 +1,3 @@
-REFERENCE SNAPSHOT FOR IMPLEMENTATION
-
-Copied from TEST-uk-aq/uk-aq-system-docs on 15/09/2026.
-
-The authoritative version remains in uk-aq-system-docs.
-Do not maintain or independently revise this copy.
-If implementation work reveals a required contract change, update
-uk-aq-system-docs separately rather than editing product decisions here.
-
 # UK AQ Media Bluesky publication contract
 
 **Status:** Future implementation authority, agreed 15 September 2026  
@@ -114,6 +105,40 @@ Bluesky thumbnail creation MUST NOT broaden Media's existing image permissions. 
 
 If a stored thumbnail cannot be fetched, validated or converted into a valid Bluesky thumbnail at publish time, the publication MUST NOT fall back to a thumbnail-less post. The durable publication row must record a bounded failure/blocked reason for operator visibility.
 
+### 5.1 External-card title and description
+
+The text inside the Bluesky external card represents the publisher article and is separate from the UK AQ-generated post text defined in section 6.
+
+The external card MUST NOT use the UK AQ `display_title` merely because that title is selected for the post body.
+
+At publication time, `external.title` SHOULD use the best available publisher headline in this order:
+
+```text
+og:title
+    -> twitter:title
+    -> HTML <title>
+    -> stored original publisher title
+```
+
+The stored original publisher title is the normal Media article `title`, not `display_title` and not a pending AI title suggestion.
+
+At publication time, `external.description` SHOULD use the best available publisher description in this order:
+
+```text
+og:description
+    -> twitter:description
+    -> <meta name="description">
+    -> empty string
+```
+
+The publisher MUST NOT synthesise `From {publisher}` or equivalent attribution into `external.description`. Publisher attribution belongs in the UK AQ post body/default message and is therefore not repeated in the external-card description.
+
+Publisher title and description metadata MUST be obtained only through the existing bounded, policy-permitted article-head metadata boundary. This rule MUST NOT add article-body fetching, AI-generated card copy, arbitrary URL fetching or broader source/image permissions.
+
+External-card text metadata acquisition is best effort and is not a new publication eligibility requirement. If current publisher-head text metadata cannot be fetched or parsed, publication MAY continue when the mandatory thumbnail is valid. The fallback MUST be the stored original publisher title for `external.title` and an empty string for `external.description`.
+
+Failure to obtain optional current card text metadata MUST NOT turn an otherwise valid thumbnail-backed publication into a failed or blocked publication. Existing Bluesky posts MUST NOT be backfilled or edited solely to apply this external-card text rule.
+
 ## 6. Post content and default message
 
 The post MUST reuse already-publishable Media metadata. It MUST NOT invoke AI to create a separate social summary.
@@ -124,6 +149,8 @@ Title priority is:
 published/accepted display_title
     -> original publisher title
 ```
+
+This title priority applies to the UK AQ-generated post text only. It does not control `app.bsky.embed.external.external.title`, which follows the publisher-metadata priority in section 5.1.
 
 A Pending internal AI title suggestion MUST NOT be used simply because it exists.
 
