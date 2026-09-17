@@ -65,6 +65,10 @@ const BlueskySettingsBody = z.object({
   cooldown_minutes: z.number().int().min(1).max(1440),
 }).strict();
 const StatusMutationBody = z.object({ post_to_bluesky: z.boolean().optional() }).strict();
+const BulkApproveBody = z.object({
+  article_ids: z.array(z.number().int().positive()).min(1).max(50),
+  post_to_bluesky: z.boolean().optional(),
+}).strict();
 const MAX_ADMIN_BODY_BYTES = 4096;
 const MAX_HUMAN_DISPLAY_TITLE_CHARACTERS = 500;
 const NEURON_MICRO_UNITS = 1_000_000;
@@ -611,7 +615,8 @@ async function blueskySettings(request: Request, env: MediaAdminEnv): Promise<Re
 }
 
 function manualPublicationReason(action: Action,
-  fromStatus: Status | null): 'rejected_repost' | 'unhidden_repost' | null {
+  fromStatus: Status | null): 'pending_approved' | 'rejected_repost' | 'unhidden_repost' | null {
+  if (action === 'approve' && fromStatus === 'pending') return 'pending_approved';
   if (action === 'approve' && fromStatus === 'rejected') return 'rejected_repost';
   if (action === 'unhide' && fromStatus === 'hidden') return 'unhidden_repost';
   return null;
@@ -658,10 +663,115 @@ async function statusMutationReceipt(db: D1Database, key: string, id: number,
 async function statusMutationResponse(env: MediaAdminEnv, id: number, receipt: NonNullable<
   Awaited<ReturnType<typeof statusMutationReceipt>>>, replayed: boolean): Promise<Response> {
   await reconcileHomepageLatestSix(env.MEDIA_DB);
-  try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
-  catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
+  if (receipt.publication) {
+    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
+  }
   return json({ article: { id, status: receipt.event.to_status, revision: receipt.event.revision },
     bluesky_publication: receipt.publication, replayed });
+}
+
+type BulkRequestRow = { article_ids_json: string; post_to_bluesky: number };
+type BulkTargetRow = { id: number; status: Status; og_image_url: string | null;
+  image_policy: string; source_image_policy: string };
+
+async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Response> {
+  const key = request.headers.get('Idempotency-Key');
+  if (!key || !/^[A-Za-z0-9_-]{16,100}$/.test(key)) throw new HttpError(400, 'idempotency_key_required');
+  const parsed = BulkApproveBody.safeParse(await boundedOptionalJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_bulk_approve_body');
+  const ids = [...parsed.data.article_ids].sort((left, right) => left - right);
+  if (new Set(ids).size !== ids.length) throw new HttpError(400, 'duplicate_article_id');
+  const requestedPost = parsed.data.post_to_bluesky === true;
+  const idsJson = JSON.stringify(ids);
+  const existing = await env.MEDIA_DB.prepare(`SELECT article_ids_json, post_to_bluesky
+    FROM media_admin_bulk_status_requests WHERE request_key = ?`).bind(key).first<BulkRequestRow>();
+  if (existing && (existing.article_ids_json !== idsJson ||
+      Boolean(existing.post_to_bluesky) !== requestedPost)) {
+    throw new HttpError(409, 'idempotency_key_conflict');
+  }
+
+  if (!existing) {
+    const placeholders = ids.map(() => '?').join(', ');
+    const { results } = await env.MEDIA_DB.prepare(`SELECT a.id, a.status, a.og_image_url,
+      a.image_policy, s.image_policy AS source_image_policy
+      FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+      WHERE a.id IN (${placeholders}) ORDER BY a.id`).bind(...ids).all<BulkTargetRow>();
+    const byId = new Map(results.map(row => [row.id, row]));
+    const failures = ids.flatMap(id => {
+      const row = byId.get(id);
+      if (!row) return [{ article_id: id, error: 'article_not_found' }];
+      if (!['pending', 'rejected', 'hidden'].includes(row.status)) {
+        return [{ article_id: id, error: 'invalid_state_transition' }];
+      }
+      if (requestedPost && (!row.og_image_url || row.image_policy !== 'remote_preview' ||
+          row.source_image_policy !== 'remote_preview')) {
+        return [{ article_id: id, error: 'thumbnail_missing' }];
+      }
+      return [];
+    });
+    if (failures.length) return json({ error: 'bulk_approval_ineligible', failures }, 409);
+
+    const now = new Date().toISOString();
+    const eligibleImages = requestedPost
+      ? `AND a.og_image_url IS NOT NULL AND a.image_policy = 'remote_preview'
+         AND s.image_policy = 'remote_preview'` : '';
+    const statements: D1PreparedStatement[] = [env.MEDIA_DB.prepare(`
+      INSERT INTO media_admin_bulk_status_requests
+        (request_key, article_ids_json, post_to_bluesky, created_at)
+      SELECT ?, ?, ?, ?
+      WHERE (SELECT count(*) FROM media_articles a
+        JOIN media_sources s ON s.source_key = a.source_key
+        WHERE a.id IN (${placeholders}) AND a.status IN ('pending', 'rejected', 'hidden')
+        ${eligibleImages}) = ?
+      ON CONFLICT(request_key) DO NOTHING`)
+      .bind(key, idsJson, Number(requestedPost), now, ...ids, ids.length),
+    env.MEDIA_DB.prepare(`UPDATE media_articles SET status = 'approved',
+      mutation_key = 'admin-bulk:' || ? || ':' || id, revision = revision + 1,
+      updated_at = ?, approval_method = 'manual', approval_author_rule_key = NULL,
+      approved_at = ?, hidden_at = NULL
+      WHERE id IN (${placeholders}) AND status IN ('pending', 'rejected', 'hidden')
+        AND EXISTS (SELECT 1 FROM media_admin_bulk_status_requests
+          WHERE request_key = ? AND article_ids_json = ? AND post_to_bluesky = ?)`)
+      .bind(key, now, now, ...ids, key, idsJson, Number(requestedPost))];
+    if (requestedPost) {
+      statements.push(env.MEDIA_DB.prepare(`INSERT INTO media_bluesky_publications
+        (article_id, approval_event_id, publication_key, publication_reason, status,
+         created_at, updated_at)
+        SELECT e.article_id, NULL, 'admin-bulk-request:' || ? || ':' || e.article_id,
+          CASE e.from_status WHEN 'pending' THEN 'pending_approved'
+            WHEN 'rejected' THEN 'rejected_repost' ELSE 'unhidden_repost' END,
+          'queued', ?, ? FROM media_article_events e
+        WHERE e.event_key = 'admin-bulk:' || ? || ':' || e.article_id
+          AND e.article_id IN (${placeholders}) AND e.to_status = 'approved'
+        ON CONFLICT(publication_key) DO NOTHING`)
+        .bind(key, now, now, key, ...ids));
+    }
+    await env.MEDIA_DB.batch(statements);
+  }
+
+  const receipt = await env.MEDIA_DB.prepare(`SELECT article_ids_json, post_to_bluesky
+    FROM media_admin_bulk_status_requests WHERE request_key = ?`).bind(key).first<BulkRequestRow>();
+  if (!receipt) throw new HttpError(409, 'bulk_approval_state_conflict');
+  const eventPrefix = `admin-bulk:${key}:`;
+  const { results: articles } = await env.MEDIA_DB.prepare(`SELECT article_id AS id,
+    to_status AS status, revision FROM media_article_events
+    WHERE event_key GLOB ? ORDER BY article_id`).bind(`${eventPrefix}*`).all();
+  if (articles.length !== ids.length) throw new HttpError(409, 'bulk_approval_state_conflict');
+  const { results: publications } = requestedPost
+    ? await env.MEDIA_DB.prepare(`SELECT id, article_id, status FROM media_bluesky_publications
+        WHERE publication_key GLOB ? ORDER BY article_id`)
+      .bind(`admin-bulk-request:${key}:*`).all()
+    : { results: [] };
+  if (requestedPost && publications.length !== ids.length) {
+    throw new HttpError(409, 'bulk_approval_state_conflict');
+  }
+  await reconcileHomepageLatestSix(env.MEDIA_DB);
+  if (publications.length) {
+    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', request_key: key })); }
+  }
+  return json({ articles, bluesky_publications: publications, replayed: Boolean(existing) });
 }
 
 async function mutate(request: Request, env: MediaAdminEnv, id: number, action: Action): Promise<Response> {
@@ -751,6 +861,10 @@ export default {
       if (url.pathname === '/admin/bluesky/settings') return await blueskySettings(request, env);
       const editorialResponse = await handleEditorialDashboard(request, env, url);
       if (editorialResponse) return editorialResponse;
+      if (url.pathname === '/admin/articles/bulk/approve') {
+        if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+        return await bulkApprove(request, env);
+      }
       const bulkImageRefresh = /^\/admin\/guardian-image-refresh\/(preview|apply)$/.exec(url.pathname);
       if (bulkImageRefresh) {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);

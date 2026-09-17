@@ -249,7 +249,8 @@ function environment(rows: PublicationRow[], now: () => number) {
 
 const FIXTURE_ADMIN_TOKEN = 'fixture-admin-token';
 
-function statusRaceDatabase(): { sqlite: DatabaseSync; facade: SqliteD1; env: MediaAdminEnv } {
+function statusRaceDatabase(): { sqlite: DatabaseSync; facade: SqliteD1; env: MediaAdminEnv;
+  wakes: unknown[] } {
   const sqlite = new DatabaseSync(':memory:');
   applyMigrations(sqlite);
   const instant = '2026-09-16T12:00:00.000Z';
@@ -262,16 +263,17 @@ function statusRaceDatabase(): { sqlite: DatabaseSync; facade: SqliteD1; env: Me
       'disabled', 'remote_preview', ?, ?)`)
     .run(instant, instant);
   const facade = new SqliteD1(sqlite);
-  const queue = { async send() { /* durable state is asserted below */ } } as unknown as Queue;
+  const wakes: unknown[] = [];
+  const queue = { async send(body: unknown) { wakes.push(body); } } as unknown as Queue;
   return { sqlite, facade, env: {
     MEDIA_DB: facade as unknown as D1Database,
     MEDIA_BLUESKY_QUEUE: queue,
     MEDIA_ADMIN_TOKEN: FIXTURE_ADMIN_TOKEN,
-  } as MediaAdminEnv };
+  } as MediaAdminEnv, wakes };
 }
 
 function insertStatusFixture(sqlite: DatabaseSync, id: number,
-  status: 'rejected' | 'approved'): void {
+  status: 'pending' | 'rejected' | 'approved' | 'hidden', image = true): void {
   const instant = '2026-09-16T12:00:00.000Z';
   const url = `https://fixture.example/article-${id}`;
   sqlite.prepare(`INSERT INTO media_articles
@@ -281,13 +283,14 @@ function insertStatusFixture(sqlite: DatabaseSync, id: number,
     VALUES (?, 'bluesky-race-fixture', ?, ?, ?, ?, 'Race fixture', ?, ?, ?, 'standard',
       ?, ?, 'remote_preview', ?, ?, ?, ?)`)
     .run(id, url, id.toString(16).padStart(64, '0'), url, `Fixture article ${id}`,
-      instant, instant, status, status === 'approved' ? 'manual' : null,
-      `https://fixture.example/image-${id}.jpg`, status === 'approved' ? instant : null,
+      instant, instant, status, ['approved', 'hidden'].includes(status) ? 'manual' : null,
+      image ? `https://fixture.example/image-${id}.jpg` : null,
+      ['approved', 'hidden'].includes(status) ? instant : null,
       status === 'rejected' ? instant : null, instant, instant);
 }
 
 function statusRequest(id: number, action: 'approve' | 'reject' | 'hide', key: string,
-  postToBluesky: boolean): Request {
+  postToBluesky?: boolean): Request {
   return new Request(`https://media.example/admin/articles/${id}/${action}`, {
     method: 'POST',
     headers: {
@@ -295,7 +298,17 @@ function statusRequest(id: number, action: 'approve' | 'reject' | 'hide', key: s
       'Content-Type': 'application/json',
       'Idempotency-Key': key,
     },
-    body: JSON.stringify({ post_to_bluesky: postToBluesky }),
+    body: JSON.stringify(postToBluesky === undefined ? {} : { post_to_bluesky: postToBluesky }),
+  });
+}
+
+function bulkRequest(ids: number[], key: string, postToBluesky?: boolean): Request {
+  return new Request('https://media.example/admin/articles/bulk/approve', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}`,
+      'Content-Type': 'application/json', 'Idempotency-Key': key },
+    body: JSON.stringify({ article_ids: ids, ...(postToBluesky === undefined
+      ? {} : { post_to_bluesky: postToBluesky }) }),
   });
 }
 
@@ -396,6 +409,104 @@ async function checkConcurrentAdminIdempotency(): Promise<void> {
   }
 }
 
+async function checkManualApprovalContract(): Promise<void> {
+  const { sqlite, env, wakes } = statusRaceDatabase();
+  sqlite.prepare(`UPDATE media_bluesky_settings SET activation_event_id = 0 WHERE id = 1`).run();
+
+  insertStatusFixture(sqlite, 201, 'pending');
+  let result = await invokeStatus(env, statusRequest(201, 'approve', 'pending_without_social_01'));
+  assert.equal(result.status, 200);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+    WHERE article_id = 201`), 0, 'manual Pending approval must not use the automatic trigger');
+  assert.equal(wakes.length, 0, 'approval without a durable publication must not wake Bluesky');
+
+  insertStatusFixture(sqlite, 202, 'pending');
+  const explicitKey = 'pending_with_social_001';
+  result = await invokeStatus(env, statusRequest(202, 'approve', explicitKey, true));
+  assert.equal(result.status, 200);
+  assert.equal((sqlite.prepare(`SELECT publication_reason FROM media_bluesky_publications
+    WHERE article_id = 202`).get() as { publication_reason: string }).publication_reason,
+  'pending_approved');
+  result = await invokeStatus(env, statusRequest(202, 'approve', explicitKey, true));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.replayed, true);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+    WHERE article_id = 202`), 1, 'identical explicit retries must stay idempotent');
+
+  insertStatusFixture(sqlite, 203, 'pending', false);
+  assert.equal((await invokeStatus(env,
+    statusRequest(203, 'approve', 'pending_no_thumbnail_01'))).status, 200);
+  insertStatusFixture(sqlite, 204, 'pending', false);
+  result = await invokeStatus(env, statusRequest(204, 'approve', 'pending_thumbnail_fail', true));
+  assert.equal(result.status, 409);
+  assert.equal(result.body.error, 'thumbnail_missing');
+  assert.equal((sqlite.prepare('SELECT status FROM media_articles WHERE id = 204').get() as
+    { status: string }).status, 'pending');
+
+  insertStatusFixture(sqlite, 205, 'rejected');
+  assert.equal((await invokeStatus(env,
+    statusRequest(205, 'approve', 'rejected_with_social_1', true))).status, 200);
+  insertStatusFixture(sqlite, 206, 'hidden');
+  assert.equal((await invokeStatus(env, new Request(
+    'https://media.example/admin/articles/206/unhide', { method: 'POST', headers: {
+      Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}`, 'Content-Type': 'application/json',
+      'Idempotency-Key': 'hidden_with_social_0001' },
+    body: JSON.stringify({ post_to_bluesky: true }) }))).status, 200);
+
+  insertStatusFixture(sqlite, 207, 'pending');
+  insertStatusFixture(sqlite, 208, 'rejected');
+  result = await invokeStatus(env, bulkRequest([208, 207], 'bulk_without_social_001'));
+  assert.equal(result.status, 200);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+    WHERE article_id IN (207, 208)`), 0);
+
+  insertStatusFixture(sqlite, 209, 'pending');
+  insertStatusFixture(sqlite, 210, 'hidden');
+  const bulkKey = 'bulk_with_social_00001';
+  result = await invokeStatus(env, bulkRequest([209, 210], bulkKey, true));
+  assert.equal(result.status, 200);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+    WHERE article_id IN (209, 210)`), 2);
+  result = await invokeStatus(env, bulkRequest([210, 209], bulkKey, true));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.replayed, true);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+    WHERE article_id IN (209, 210)`), 2);
+
+  insertStatusFixture(sqlite, 211, 'pending');
+  insertStatusFixture(sqlite, 212, 'pending', false);
+  result = await invokeStatus(env, bulkRequest([211, 212], 'bulk_thumbnail_failure', true));
+  assert.equal(result.status, 409);
+  assert.deepEqual(sqlite.prepare(`SELECT status FROM media_articles WHERE id IN (211, 212)
+    ORDER BY id`).all().map(row => row.status), ['pending', 'pending'],
+  'bulk social validation must fail before any approval');
+
+  sqlite.prepare(`INSERT INTO media_bluesky_publications
+    (article_id, publication_key, publication_reason, status, last_error_code, created_at, updated_at)
+    VALUES (201, 'cancelled-audit-fixture', 'pending_approved', 'blocked',
+      'operator_cancelled', '2026-09-17T00:00:00.000Z', '2026-09-17T00:00:00.000Z')`).run();
+  insertStatusFixture(sqlite, 213, 'pending');
+  await invokeStatus(env, statusRequest(213, 'approve', 'unrelated_after_cancel_1'));
+  const blocked = sqlite.prepare(`SELECT status, last_error_code FROM media_bluesky_publications
+    WHERE publication_key = 'cancelled-audit-fixture'`).get() as
+    { status: string; last_error_code: string };
+  assert.deepEqual(blocked, { status: 'blocked', last_error_code: 'operator_cancelled' });
+
+  // A newly inserted genuinely automatic approval still creates exactly one outbox row.
+  const instant = '2026-09-17T12:00:00.000Z';
+  sqlite.prepare(`INSERT INTO media_articles
+    (id, source_key, canonical_url, canonical_url_hash, original_url, title, publisher,
+     discovered_at, last_seen_at, status, review_level, approval_method, og_image_url,
+     image_policy, approved_at, created_at, updated_at)
+    VALUES (214, 'bluesky-race-fixture', 'https://fixture.example/auto-214', ?,
+      'https://fixture.example/auto-214', 'Automatic fixture', 'Race fixture', ?, ?,
+      'approved', 'standard', 'trusted_source_auto', 'https://fixture.example/auto.jpg',
+      'remote_preview', ?, ?, ?)`).run('f'.repeat(64), instant, instant, instant, instant, instant);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+    WHERE article_id = 214 AND publication_reason = 'auto_approved'`), 1);
+  sqlite.close();
+}
+
 const originalNow = Date.now;
 const originalFetch = globalThis.fetch;
 const originalConsoleError = console.error;
@@ -416,6 +527,7 @@ globalThis.fetch = (async () => {
 console.error = () => undefined;
 
 try {
+  await checkManualApprovalContract();
   await checkConcurrentAdminIdempotency();
 
   const publisherSource = readFileSync('apps/media-discovery/src/bluesky.ts', 'utf8');
