@@ -71,8 +71,13 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `
     display_title_origin = CASE
       WHEN media_articles.display_title IS NULL AND excluded.display_title IS NOT NULL
         THEN excluded.display_title_origin ELSE media_articles.display_title_origin END,
-    preview_metadata_checked_at = coalesce(media_articles.preview_metadata_checked_at,
-      excluded.preview_metadata_checked_at),
+    preview_metadata_checked_at = CASE
+      WHEN media_articles.source_key = 'communities-against-woodsmoke'
+        AND media_articles.preview_metadata_checked_at = '1970-01-01T00:00:00.000Z'
+        AND excluded.preview_metadata_checked_at IS NOT NULL
+      THEN excluded.preview_metadata_checked_at
+      ELSE coalesce(media_articles.preview_metadata_checked_at,
+        excluded.preview_metadata_checked_at) END,
     status = CASE WHEN media_articles.status = 'pending'
       AND excluded.approval_method = 'trusted_author_auto' THEN 'approved'
       ELSE media_articles.status END,
