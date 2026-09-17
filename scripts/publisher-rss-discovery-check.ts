@@ -5,7 +5,8 @@ import {
   PUBLISHER_RSS_ROUTES,
 } from '@uk-aq-media/discovery';
 import {
-  canonicalizeUrl, initialEditorialState, publisherHttpsUrl, remotePreviewUrl,
+  canonicalizeUrl, initialEditorialState, normaliseArticleAuthorForStorage,
+  publisherHttpsUrl, remotePreviewUrl,
   SourceSchema, z,
 } from '@uk-aq-media/core';
 import { MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES } from
@@ -95,6 +96,13 @@ assert.equal(openaqParsed.articles[0]?.canonical_url,
   'https://openaq.medium.com/open-air-quality-data-123');
 assert.equal(openaqParsed.articles[0]?.preview_url, openaqPreview);
 assert.equal(openaqParsed.articles[0]?.display_title, null);
+assert.equal(openaqParsed.articles[0]?.author, 'OpenAQ',
+  'raw byline remains available for relevance and author-rule matching');
+assert.equal(normaliseArticleAuthorForStorage(openaqParsed.articles[0]?.author, openaq.name), null);
+assert.equal(normaliseArticleAuthorForStorage('openaq', openaq.name), null);
+assert.equal(normaliseArticleAuthorForStorage(' OpenAQ ', openaq.name), null);
+assert.equal(normaliseArticleAuthorForStorage('OpenAQ Team', openaq.name), 'OpenAQ Team');
+assert.equal(normaliseArticleAuthorForStorage('Guardian', 'The Guardian'), 'Guardian');
 assert.equal('content_encoded_preview_url' in openaqParsed.articles[0]!, false);
 assert.doesNotMatch(JSON.stringify(openaqParsed.articles[0]), /RSS body marker/);
 assert.equal(remotePreviewUrl(openaqPreview, openaq), openaqPreview);

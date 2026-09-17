@@ -1,7 +1,8 @@
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, PublicationPolicy,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
-  loadSource, publisherHttpsUrl, reconcileHomepageLatestSix, remotePreviewUrl, z,
+  loadSource, normaliseArticleAuthorForStorage, publisherHttpsUrl, reconcileHomepageLatestSix,
+  remotePreviewUrl, z,
   SourceSchema,
 } from '@uk-aq-media/core';
 import {
@@ -412,7 +413,13 @@ async function setArticleAuthor(request: Request, db: D1Database, id: number): P
   const eventKey = `admin:author:${requireIdempotencyKey(request)}`;
   const parsed = ArticleAuthorBody.safeParse(await readJson(request));
   if (!parsed.success) throw new HttpError(400, 'invalid_article_author_body');
-  const author = normaliseArticleAuthor(parsed.data.author);
+  const requestedAuthor = normaliseArticleAuthor(parsed.data.author);
+  const current = await db.prepare(`SELECT id, status, publisher, author, revision
+    FROM media_articles WHERE id = ?`).bind(id).first<{
+      id: number; status: string; publisher: string; author: string | null; revision: number;
+    }>();
+  if (!current) throw new HttpError(404, 'article_not_found');
+  const author = normaliseArticleAuthorForStorage(requestedAuthor, current.publisher);
   const replay = await db.prepare(`SELECT article_id, event_type, to_status, revision, metadata_json
     FROM media_article_events WHERE event_key = ?`).bind(eventKey).first<{
       article_id: number; event_type: string; to_status: string; revision: number;
@@ -426,16 +433,13 @@ async function setArticleAuthor(request: Request, db: D1Database, id: number): P
         metadata.field !== 'author' || metadata.after !== author) {
       throw new HttpError(409, 'idempotency_key_conflict');
     }
-    return json({ article: { id, status: replay.to_status, author, revision: replay.revision },
+    return json({ article: { id, status: replay.to_status, author,
+      revision: replay.revision },
       replayed: true, changed: true });
   }
-  const current = await db.prepare(`SELECT id, status, author, revision
-    FROM media_articles WHERE id = ?`).bind(id).first<{
-      id: number; status: string; author: string | null; revision: number;
-    }>();
-  if (!current) throw new HttpError(404, 'article_not_found');
   if (current.author === author) {
-    return json({ article: current, replayed: false, changed: false });
+    return json({ article: { id: current.id, status: current.status, author: current.author,
+      revision: current.revision }, replayed: false, changed: false });
   }
   const now = new Date().toISOString();
   const nextRevision = current.revision + 1;
@@ -643,6 +647,9 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
       .bind(sourceKey, parsed.data.publisher, identity.domain, now, now));
   }
   const approved = parsed.data.initial_status === 'approved';
+  const publisher = cleanText(parsed.data.publisher, 200);
+  const author = normaliseArticleAuthorForStorage(cleanText(parsed.data.author, 500),
+    publisher ?? '');
   statements.push(db.prepare(`INSERT INTO media_articles
     (source_key, canonical_url, canonical_url_hash, original_url, title, publisher, author,
      published_at, discovered_at, last_seen_at, status, review_level, approval_method,
@@ -650,8 +657,8 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
      mutation_key, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, ?, ?, ?)`)
     .bind(sourceKey, identity.canonicalUrl, identity.hash, parsed.data.url,
-      cleanText(parsed.data.title, 1000), cleanText(parsed.data.publisher, 200),
-      cleanText(parsed.data.author, 500), parsed.data.published_at ?? null, now, now,
+      cleanText(parsed.data.title, 1000), publisher, author,
+      parsed.data.published_at ?? null, now, now,
       parsed.data.initial_status, source.review_level, approved ? 'manual' : null,
       preview, source.image_policy, approved ? now : null, eventKey, now, now));
   try { await db.batch(statements); }
