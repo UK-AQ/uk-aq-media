@@ -44,6 +44,9 @@ export type ArticleHeadMetadata = {
   ogTitle: string | null;
   twitterTitle: string | null;
   htmlTitle: string | null;
+  ogDescription: string | null;
+  twitterDescription: string | null;
+  htmlDescription: string | null;
   publisher: string | null;
   author: string | null;
   publishedAt: string | null;
@@ -68,6 +71,9 @@ export function extractArticleHeadMetadata(htmlHead: string): ArticleHeadMetadat
     twitterTitle: title('twitter:title'),
     htmlTitle: normaliseMetadataText(
       /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(htmlHead)?.[1] ?? '') || null,
+    ogDescription: title('og:description'),
+    twitterDescription: title('twitter:description'),
+    htmlDescription: title('description'),
     publisher: title('og:site_name'),
     author: title('author') ?? title('article:author'),
     publishedAt: title('article:published_time'),

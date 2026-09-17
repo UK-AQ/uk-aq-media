@@ -47,6 +47,7 @@ export type { PublisherRssSourceKey } from './publisher-rss';
 export {
   discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
 } from './article-head-metadata';
+export type { ArticleHeadMetadata } from './article-head-metadata';
 export {
   configuredGuardianRouteKeys, discoverGuardianCurrentRssImageView,
   discoverGuardianPreviewForArticle, GUARDIAN_ROUTES, guardianPreviewForArticleFromFeed,

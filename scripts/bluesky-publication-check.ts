@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { BLUESKY_POST_BYTES, graphemes, renderBlueskyPost } from '@uk-aq-media/core';
 import mediaAdminWorker from '../apps/media-admin/src/index';
-import { consumeBluesky } from '../apps/media-discovery/src/bluesky';
+import { consumeBluesky, externalCardText } from '../apps/media-discovery/src/bluesky';
 
 type SqlValue = string | number | bigint | null | Uint8Array;
 
@@ -422,6 +422,21 @@ try {
   assert.match(publisherSource,
     /createOrReadPost\(auth, recordKey, \{[\s\S]*?\$type: 'app\.bsky\.feed\.post',[\s\S]*?langs: \['en-GB'\],/u,
     'new Bluesky post records must declare exactly UK English language metadata');
+
+  assert.deepEqual(externalCardText('Stored publisher title', {
+    ogImage: null, twitterImage: null, ogTitle: 'Open Graph title',
+    twitterTitle: 'Twitter title', htmlTitle: 'HTML title',
+    ogDescription: 'Open Graph description', twitterDescription: 'Twitter description',
+    htmlDescription: 'HTML description', publisher: null, author: null, publishedAt: null,
+  }), { title: 'Open Graph title', description: 'Open Graph description' });
+  assert.deepEqual(externalCardText('Stored publisher title', {
+    ogImage: null, twitterImage: null, ogTitle: null,
+    twitterTitle: 'Twitter title', htmlTitle: 'HTML title',
+    ogDescription: null, twitterDescription: null,
+    htmlDescription: 'HTML description', publisher: null, author: null, publishedAt: null,
+  }), { title: 'Twitter title', description: 'HTML description' });
+  assert.deepEqual(externalCardText('Stored publisher title'),
+    { title: 'Stored publisher title', description: '' });
 
   const rows: PublicationRow[] = [
     { id: 1, article_id: 1, publication_key: 'a', status: 'posting', attempt_count: 0,

@@ -1,7 +1,8 @@
 import {
   BLUESKY_HANDLE, BLUESKY_THUMBNAIL_BYTES, deterministicTid, fetchRemotePreviewImage,
-  isBlueskyWakeup, remotePreviewUrl, renderBlueskyPost, type BlueskyWakeup,
+  isBlueskyWakeup, remotePreviewUrl, renderBlueskyPost, type BlueskyWakeup, type Source,
 } from '@uk-aq-media/core';
+import { fetchArticleHeadMetadata, type ArticleHeadMetadata } from '@uk-aq-media/discovery';
 
 type Settings = { publishing_enabled: number; activation_event_id: number | null;
   cooldown_seconds: number; default_message_template: string; last_successful_post_at: string | null };
@@ -9,7 +10,7 @@ type Publication = { id: number; article_id: number; publication_key: string; st
   attempt_count: number; record_key: string | null; created_at: string };
 type Article = { canonical_url: string; title: string; display_title: string | null;
   publisher: string; og_image_url: string | null; image_policy: string; source_key: string;
-  canonical_domain: string; source_image_policy: string; social_handle: string | null;
+  canonical_domain: string; source_image_policy: Source['image_policy']; social_handle: string | null;
   social_did: string | null };
 
 const XRPC = 'https://bsky.social/xrpc/';
@@ -21,6 +22,30 @@ const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 export class PublicationError extends Error {
   constructor(readonly code: string, readonly transient = false) { super(code); }
+}
+
+export function externalCardText(articleTitle: string,
+  metadata?: ArticleHeadMetadata): { title: string; description: string } {
+  return {
+    title: metadata?.ogTitle ?? metadata?.twitterTitle ?? metadata?.htmlTitle ?? articleTitle,
+    description: metadata?.ogDescription ?? metadata?.twitterDescription ??
+      metadata?.htmlDescription ?? '',
+  };
+}
+
+async function loadExternalCardText(article: Article): Promise<{
+  title: string; description: string;
+}> {
+  try {
+    const metadata = await fetchArticleHeadMetadata(article.canonical_url, {
+      source_key: article.source_key,
+      canonical_domain: article.canonical_domain,
+      image_policy: article.source_image_policy,
+    });
+    return externalCardText(article.title, metadata);
+  } catch {
+    return externalCardText(article.title);
+  }
 }
 
 type XrpcResult = { status: number; ok: boolean; body: unknown };
@@ -312,6 +337,7 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
       WHERE a.id = ?`).bind(publication.article_id).first<Article>();
     if (!article) throw new PublicationError('publication_state_conflict');
     const thumbnail = await loadThumbnail(article);
+    const cardText = await loadExternalCardText(article);
     const auth = await authenticate(env.UK_AQ_MEDIA_BLUESKY_APP_PSWD);
     const blob = await uploadBlob(auth, thumbnail);
     const rendered = renderBlueskyPost({ title: article.display_title ?? article.title,
@@ -323,8 +349,8 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
       $type: 'app.bsky.feed.post', text: rendered.text, facets: rendered.facets,
       langs: ['en-GB'], createdAt: recordCreatedAt,
       embed: { $type: 'app.bsky.embed.external', external: {
-        uri: article.canonical_url, title: article.display_title ?? article.title,
-        description: `From ${article.publisher}`, thumb: blob,
+        uri: article.canonical_url, title: cardText.title,
+        description: cardText.description, thumb: blob,
       } },
     });
     const postedAt = result.createdAt;
