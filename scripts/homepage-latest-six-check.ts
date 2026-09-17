@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import worker from '../apps/media-public/src/index';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import worker, { publicPreviewImageUrl } from '../apps/media-public/src/index';
 import {
   homepageLatestSixSnapshot,
   reconciledHomepageLatestSixState,
@@ -28,6 +30,48 @@ const previous: HomepageLatestSixState = {
 };
 const nextUpdatedAt = '2026-09-13T12:01:00.000Z';
 
+const previewSelection = {
+  id: 42,
+  source_key: 'ordinary-publisher',
+  og_image_url: 'https://publisher.example/preview.jpg',
+  article_image_policy: 'remote_preview',
+  source_image_policy: 'remote_preview',
+};
+const ordinaryPublisherImage = await publicPreviewImageUrl('https://media.test', previewSelection);
+assert.match(ordinaryPublisherImage ?? '',
+  /^https:\/\/media\.test\/article-images\/42\?v=[a-f0-9]{32}$/,
+  'ordinary publisher images must use the versioned article-image route');
+assert.match(await publicPreviewImageUrl('https://media.test', {
+  ...previewSelection, source_key: 'communities-against-woodsmoke',
+}) ?? '', /^https:\/\/media\.test\/article-images\/42\?v=[a-f0-9]{32}$/,
+'a real CAWS publisher image must take precedence over the static default');
+const cawsDefaultUrl = 'https://media.test/source-images/communities-against-woodsmoke-default.png';
+assert.equal(await publicPreviewImageUrl('https://media.test', {
+  ...previewSelection, source_key: 'communities-against-woodsmoke', og_image_url: null,
+}), cawsDefaultUrl, 'an image-less permitted CAWS article must receive the static default');
+assert.equal(await publicPreviewImageUrl('https://media.test', {
+  ...previewSelection, og_image_url: null,
+}), null, 'an image-less non-CAWS article must not receive a default');
+assert.equal(await publicPreviewImageUrl('https://media.test', {
+  ...previewSelection, source_key: 'communities-against-woodsmoke', og_image_url: null,
+  article_image_policy: 'blocked',
+}), null, 'article image policy must block the CAWS default');
+assert.equal(await publicPreviewImageUrl('https://media.test', {
+  ...previewSelection, source_key: 'communities-against-woodsmoke', og_image_url: null,
+  source_image_policy: 'blocked',
+}), null, 'source image policy must block the CAWS default');
+
+const mediaPublicSource = readFileSync(resolve('apps/media-public/src/index.ts'), 'utf8');
+assert.equal([...mediaPublicSource.matchAll(/communities-against-woodsmoke-default\.png/g)].length, 1,
+  'the placeholder path must remain a presentation constant, not a stored og_image_url value');
+assert.ok(existsSync(resolve(
+  'apps/media-public/public/source-images/communities-against-woodsmoke-default.png')),
+'the bundled CAWS default image must exist');
+const mediaPublicWrangler = readFileSync(
+  resolve('apps/media-public/wrangler.jsonc'), 'utf8');
+assert.match(mediaPublicWrangler, /"assets"\s*:\s*\{\s*"directory"\s*:\s*"\.\/public"\s*\}/,
+  'media-public must deploy its public directory as Workers Static Assets');
+
 assert.equal(reconciledHomepageLatestSixState(previous, baseline, nextUpdatedAt).generation, 10,
   'unchanged current six must not bump generation');
 assert.equal(reconciledHomepageLatestSixState(previous,
@@ -46,9 +90,12 @@ assert.equal(reconciledHomepageLatestSixState(previous, baseline, nextUpdatedAt)
   previous.snapshot_json, 'changes outside the current six do not alter the snapshot');
 
 const state = { ...previous, generation: 11 };
-const rows = baseline.map(item => ({
+const rows = baseline.map((item, index) => ({
   ...item,
+  source_key: index === 0 ? 'communities-against-woodsmoke' : 'ordinary-publisher',
   og_image_url: item.preview_image_url,
+  article_image_policy: 'remote_preview',
+  source_image_policy: 'remote_preview',
 }));
 const database = {
   prepare(sql: string) {
@@ -86,9 +133,67 @@ try {
   assert.equal(feed.status, 200);
   assert.match(feed.headers.get('Cache-Control') ?? '', /max-age=86400/);
   assert.match(feed.headers.get('Cache-Control') ?? '', /immutable/);
-  assert.equal((await feed.json() as { articles: unknown[] }).articles.length, 6);
+  const homepageArticles = (await feed.json() as {
+    articles: Array<{ preview_image_url: string | null }>;
+  }).articles;
+  assert.equal(homepageArticles.length, 6);
+  assert.equal(homepageArticles[0]?.preview_image_url, cawsDefaultUrl,
+    'the homepage endpoint must use the shared CAWS fallback selection');
   await Promise.all(background);
   assert.deepEqual(writes, ['https://media.test/articles/homepage?generation=11']);
+
+  const imageOnlyDatabase = {
+    prepare() {
+      return { bind() { return this; }, first: async () => ({
+        source_key: 'communities-against-woodsmoke',
+        og_image_url: null,
+        canonical_domain: 'communitiesagainstwoodsmoke.com',
+        article_image_policy: 'remote_preview',
+        source_image_policy: 'remote_preview',
+      }) };
+    },
+  } as unknown as D1Database;
+  const missingPublisherImage = await worker.fetch(
+    new Request('https://media.test/article-images/42'),
+    { MEDIA_DB: imageOnlyDatabase } as MediaPublicEnv, context);
+  assert.equal(missingPublisherImage.status, 404,
+    '/article-images/:id must remain unavailable when CAWS has no real publisher image');
+
+  const publicFeedDatabase = {
+    prepare() {
+      return { bind() { return this; }, all: async () => ({ results: [{
+        id: 42,
+        source_key: 'communities-against-woodsmoke',
+        canonical_url: 'https://communitiesagainstwoodsmoke.com/example/',
+        title: 'CAWS article',
+        display_title: null,
+        display_title_origin: null,
+        publisher: 'Communities Against Woodsmoke',
+        author: null,
+        published_at: '2026-09-17T12:00:00.000Z',
+        discovered_at: '2026-09-17T12:00:00.000Z',
+        feed_sort_at: '2026-09-17T12:00:00.000Z',
+        summary: null,
+        why_it_matters: null,
+        editorial_content_origin: null,
+        featured: 0,
+        topics_json: '[]',
+        pollutants_json: '[]',
+        locations_json: '[]',
+        og_image_url: null,
+        article_image_policy: 'remote_preview',
+        source_image_policy: 'remote_preview',
+      }] }) };
+    },
+  } as unknown as D1Database;
+  const publicFeed = await worker.fetch(new Request('https://media.test/articles?limit=1'),
+    { MEDIA_DB: publicFeedDatabase } as MediaPublicEnv, context);
+  assert.equal(publicFeed.status, 200);
+  const publicArticles = (await publicFeed.json() as {
+    articles: Array<{ preview_image_url: string | null }>;
+  }).articles;
+  assert.equal(publicArticles[0]?.preview_image_url, cawsDefaultUrl,
+    '/articles must use the same shared CAWS fallback selection as the homepage endpoint');
 } finally {
   if (originalCaches) Object.defineProperty(globalThis, 'caches', { configurable: true, value: originalCaches });
   else Reflect.deleteProperty(globalThis, 'caches');

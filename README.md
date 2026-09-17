@@ -20,6 +20,11 @@ up to 20. The index is not treated as a sitemap, `/feed/` is not used, and artic
 not fetched to establish candidates. Index prose and excerpts are not retained or sent to AI.
 After acceptance, the existing generic bounded article-head path may obtain presentation
 metadata under `remote_preview`; there is no CAWS-specific external image-host exception.
+Real CAWS publisher images continue through the versioned `/article-images/:id` route. When
+an approved CAWS article has no publisher image and both source and article image policies
+still permit remote previews, the public feed instead uses the bundled Media public asset at
+`/source-images/communities-against-woodsmoke-default.png`. This is a presentation-only
+fallback and is never stored in `media_articles.og_image_url`.
 
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
@@ -157,8 +162,10 @@ Public:
 The response includes original headline/link/publisher, an optional publisher
 compact display title, available date/author, structured tags, optional UK AQ
 editorial fields with their human/AI origin, and a permitted UK AQ cached-preview
-URL. Each `preview_image_url` contains the current stored-image version; the proxy derives
-and validates that version from D1 rather than trusting arbitrary request query parameters.
+URL. Publisher-derived `preview_image_url` values contain the current stored-image version;
+the proxy derives and validates that version from D1 rather than trusting arbitrary request
+query parameters. An image-less CAWS article may instead use the absolute URL of its bundled
+Media public static default, which is not routed through the publisher-image proxy.
 Descriptions/bodies and internal fields are absent.
 Only approved articles are selected. Successful responses allow five minutes of
 caching; errors use `no-store`. Browser access remains same-origin through the cache proxy.

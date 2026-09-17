@@ -2,7 +2,14 @@ import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepa
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 
-type FeedRow = PublicArticle & { feed_sort_at: string; topics_json: string;
+type PreviewSelection = {
+  id: number;
+  source_key: string;
+  og_image_url: string | null;
+  article_image_policy: string;
+  source_image_policy: string;
+};
+type FeedRow = PublicArticle & PreviewSelection & { feed_sort_at: string; topics_json: string;
   pollutants_json: string; locations_json: string };
 type ImageRow = {
   source_key: string;
@@ -16,6 +23,8 @@ const IMAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const IMAGE_TIMEOUT_MS = 10_000;
 const HOMEPAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
+const CAWS_SOURCE_KEY = 'communities-against-woodsmoke';
+const CAWS_DEFAULT_IMAGE_PATH = '/source-images/communities-against-woodsmoke-default.png';
 
 type HomepageRow = {
   id: number;
@@ -24,8 +33,26 @@ type HomepageRow = {
   display_title: string | null;
   publisher: string;
   published_at: string | null;
-  og_image_url: string | null;
-};
+} & PreviewSelection;
+
+function permittedStoredImageUrl(article: PreviewSelection): string | null {
+  return article.article_image_policy === 'remote_preview' &&
+    article.source_image_policy === 'remote_preview' ? article.og_image_url : null;
+}
+
+export async function publicPreviewImageUrl(origin: string,
+  article: PreviewSelection): Promise<string | null> {
+  const publisherImageUrl = permittedStoredImageUrl(article);
+  if (publisherImageUrl) {
+    return versionedArticleImageUrl(origin, article.id, publisherImageUrl);
+  }
+  if (article.source_key === CAWS_SOURCE_KEY &&
+      article.article_image_policy === 'remote_preview' &&
+      article.source_image_policy === 'remote_preview') {
+    return new URL(CAWS_DEFAULT_IMAGE_PATH, origin).href;
+  }
+  return null;
+}
 
 export function decodeArticleCursor(raw: string | null): [string, number] | null {
   if (!raw) return null;
@@ -58,9 +85,8 @@ function staleHomepageGeneration(generation: number): Response {
 
 async function homepageRows(db: D1Database): Promise<HomepageRow[]> {
   const { results } = await db.prepare(`SELECT a.id, a.canonical_url, a.title, a.display_title,
-      a.publisher, a.published_at,
-      CASE WHEN a.image_policy = 'remote_preview' AND s.image_policy = 'remote_preview'
-        THEN a.og_image_url ELSE NULL END AS og_image_url
+      a.publisher, a.published_at, a.source_key, a.og_image_url,
+      a.image_policy AS article_image_policy, s.image_policy AS source_image_policy
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.status = 'approved'
     ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT 6`).all<HomepageRow>();
@@ -75,17 +101,22 @@ async function homepageFeedResponse(origin: string, rows: HomepageRow[]): Promis
     display_title: article.display_title,
     publisher: article.publisher,
     published_at: article.published_at,
-    preview_image_url: article.og_image_url
-      ? await versionedArticleImageUrl(origin, article.id, article.og_image_url) : null,
+    preview_image_url: await publicPreviewImageUrl(origin, article),
   })));
   return json({ articles }, 200,
     `public, max-age=${HOMEPAGE_CACHE_TTL_SECONDS}, s-maxage=${HOMEPAGE_CACHE_TTL_SECONDS}, immutable`);
 }
 
 function homepageSnapshot(rows: HomepageRow[]): string {
-  return homepageLatestSixSnapshot(rows.map(({ og_image_url, ...article }) => ({
-    ...article,
-    preview_image_url: og_image_url,
+  return homepageLatestSixSnapshot(rows.map(article => ({
+    id: article.id,
+    canonical_url: article.canonical_url,
+    title: article.title,
+    display_title: article.display_title,
+    publisher: article.publisher,
+    published_at: article.published_at,
+    // Reconciliation tracks publisher-image state, not a deterministic presentation fallback.
+    preview_image_url: permittedStoredImageUrl(article),
   })));
 }
 
@@ -272,9 +303,8 @@ export default {
         a.title, a.display_title, a.display_title_origin, a.publisher, a.author,
         a.published_at, a.discovered_at, a.feed_sort_at,
         a.summary, a.why_it_matters, a.editorial_content_origin, a.featured,
-        a.topics_json, a.pollutants_json, a.locations_json,
-        CASE WHEN a.image_policy = 'remote_preview' AND s.image_policy = 'remote_preview'
-          THEN a.og_image_url ELSE NULL END AS og_image_url
+        a.topics_json, a.pollutants_json, a.locations_json, a.og_image_url,
+        a.image_policy AS article_image_policy, s.image_policy AS source_image_policy
         FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
         WHERE a.status = 'approved'
         ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
@@ -284,9 +314,11 @@ export default {
       const page = results.slice(0, limit);
       const last = page.at(-1);
       const articles = await Promise.all(page.map(async ({ feed_sort_at: _sort, topics_json,
-        pollutants_json, locations_json, featured, ...article }) => ({ ...article,
-        preview_image_url: article.og_image_url
-          ? await versionedArticleImageUrl(url.origin, article.id, article.og_image_url) : null,
+        pollutants_json, locations_json, featured, article_image_policy,
+        source_image_policy, ...article }) => ({ ...article,
+        preview_image_url: await publicPreviewImageUrl(url.origin, {
+          ...article, article_image_policy, source_image_policy,
+        }),
         featured: featured === 1,
         topics: JSON.parse(topics_json), pollutants: JSON.parse(pollutants_json),
         locations: JSON.parse(locations_json) })));
