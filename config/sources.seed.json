@@ -311,6 +311,30 @@
     "image_policy": "remote_preview"
   },
   {
+    "source_key": "communities-against-woodsmoke",
+    "name": "Communities Against Woodsmoke",
+    "canonical_domain": "communitiesagainstwoodsmoke.com",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "sitemap",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "communities-against-woodsmoke-blog-index",
+          "url": "https://www.communitiesagainstwoodsmoke.com/blog/",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "metadata_only",
+    "image_policy": "remote_preview"
+  },
+  {
     "source_key": "the-times",
     "name": "The Times",
     "canonical_domain": "thetimes.com",

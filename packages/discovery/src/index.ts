@@ -9,6 +9,7 @@ import {
 } from '@uk-aq-media/enrichment';
 import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
 import { discoverAqn } from './aqn';
+import { CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, discoverCaws } from './caws';
 import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
 import {
   configuredPublisherRssRouteKeys, discoverPublisherRss,
@@ -34,6 +35,10 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { parseAqnFeed } from './aqn';
+export {
+  configuredCawsIndex, discoverCaws, extractCawsIndexCandidates,
+  CAWS_INDEX_ROUTE_KEY, CAWS_INDEX_URL, CAWS_MAX_ITEMS,
+} from './caws';
 export {
   configuredDsawspIndex, discoverDsawsp, extractDsawspArticleMetadata,
   extractDsawspIndexUrls, extractDsawspNextIndexUrl, DSAWSP_INDEX_ROUTE_KEY,
@@ -302,6 +307,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         return;
       }
       result = await discoverGuardian(source, routeKey);
+    } else if (sourceKey === 'communities-against-woodsmoke' &&
+        routeKey === CAWS_INDEX_ROUTE_KEY &&
+        configuredCawsIndex(source)) {
+      result = await discoverCaws(source);
     } else if (sourceKey === 'dsawsp' && routeKey && configuredDsawspIndex(source)) {
       result = await discoverDsawsp(source);
     } else if (routeKey && configuredPublisherRssRouteKeys(source).includes(routeKey)) {
@@ -325,7 +334,9 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
-      const publisherRelevant = !['air-quality-news', 'the-guardian', 'dsawsp'].includes(sourceKey)
+      const publisherRelevant = ![
+        'air-quality-news', 'the-guardian', 'dsawsp', 'communities-against-woodsmoke',
+      ].includes(sourceKey)
         ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
           canonical_url: article.canonical_url, categories: article.categories }).relevant : true;
       if ((guardianEvaluation && !guardianEvaluation.accepted) || !publisherRelevant) {
@@ -351,7 +362,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const approvalObservationKey = selectedAutoRule
         ? `author-auto:${runId}:${article.canonical_url_hash}` : null;
       statements.push(persistArticle(db, source, article, matchedRules, approvalObservationKey, now));
-      const providerKey = sourceKey === 'dsawsp' ? 'publisher_web_index' : 'publisher_rss';
+      const providerKey = ['dsawsp', 'communities-against-woodsmoke'].includes(sourceKey)
+        ? 'publisher_web_index' : 'publisher_rss';
       statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
         article, matchedRules, approvalObservationKey, now));
     }
