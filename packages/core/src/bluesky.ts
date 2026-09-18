@@ -78,7 +78,7 @@ export function renderBlueskyPost(input: { title: string; publisher: string;
   validateBlueskyTemplate(input.template);
   const mention = input.publisherMention?.handle ? `@${input.publisherMention.handle}` : '';
   const expanded = expandBlueskyTemplate(input.template, input.publisher, mention);
-  const separator = '\n\n';
+  const separator = '\n';
   const remaining = BLUESKY_POST_GRAPHEMES - graphemes(separator + expanded.text).length;
   if (remaining < 1) throw new Error('post_text_too_long');
   const titleParts = graphemes(input.title.trim());

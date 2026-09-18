@@ -562,6 +562,9 @@ try {
 
   const publisherSource = readFileSync('apps/media-discovery/src/bluesky.ts', 'utf8');
   assert.match(publisherSource,
+    /renderBlueskyPost\(\{ title: article\.title,/,
+    'the publication path must render the stored original publisher title');
+  assert.match(publisherSource,
     /createOrReadPost\(auth, recordKey, \{[\s\S]*?\$type: 'app\.bsky\.feed\.post',[\s\S]*?langs: \['en-GB'\],/u,
     'new Bluesky post records must declare exactly UK English language metadata');
 
@@ -627,7 +630,7 @@ try {
     publisherMention: { handle: 'publisher.example', did: 'did:plc:publisher' },
   });
   assert.equal(injected.text,
-    'Air quality title\n\nFrom Literal {publisher_mention} Publisher @publisher.example',
+    'Air quality title\nFrom Literal {publisher_mention} Publisher @publisher.example',
   'publisher text must not be reinterpreted as a template token');
   assert.equal(injected.facets.filter(facet => facet.features[0]?.$type ===
     'app.bsky.richtext.facet#mention').length, 1);
@@ -636,7 +639,7 @@ try {
     title: 'Air quality title', publisher: 'Publisher',
     template: 'From {publisher_mention} {publisher}', publisherMention: null,
   });
-  assert.equal(noMention.text, 'Air quality title\n\nFrom Publisher',
+  assert.equal(noMention.text, 'Air quality title\nFrom Publisher',
     'an empty optional mention must not leave doubled whitespace');
 
   const byteHeavy = renderBlueskyPost({
@@ -647,7 +650,7 @@ try {
     'the rendered post must satisfy the provider byte limit');
   assert.ok(graphemes(byteHeavy.text).length <= 300,
     'the rendered post must satisfy the provider grapheme limit');
-  assert.ok(byteHeavy.text.split('\n\n', 1)[0]?.endsWith('…'),
+  assert.ok(byteHeavy.text.split('\n', 1)[0]?.endsWith('…'),
     'only the rendered byte-heavy title should be shortened');
 
   const hashtags = renderBlueskyPost({
