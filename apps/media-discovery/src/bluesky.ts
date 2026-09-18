@@ -8,7 +8,7 @@ type Settings = { publishing_enabled: number; activation_event_id: number | null
   cooldown_seconds: number; default_message_template: string; last_successful_post_at: string | null };
 type Publication = { id: number; article_id: number; publication_key: string; status: string;
   attempt_count: number; record_key: string | null; created_at: string };
-type Article = { canonical_url: string; title: string; display_title: string | null;
+type Article = { canonical_url: string; title: string;
   publisher: string; og_image_url: string | null; image_policy: string; source_key: string;
   canonical_domain: string; source_image_policy: Source['image_policy']; social_handle: string | null;
   social_did: string | null };
@@ -327,7 +327,7 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
   }
   let wakeSettings = settings;
   try {
-    const article = await env.MEDIA_DB.prepare(`SELECT a.canonical_url, a.title, a.display_title,
+    const article = await env.MEDIA_DB.prepare(`SELECT a.canonical_url, a.title,
       a.publisher, a.og_image_url, a.image_policy, a.source_key, s.canonical_domain,
       s.image_policy AS source_image_policy, social.handle AS social_handle,
       social.account_did AS social_did FROM media_articles a
@@ -340,7 +340,7 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
     const cardText = await loadExternalCardText(article);
     const auth = await authenticate(env.UK_AQ_MEDIA_BLUESKY_APP_PSWD);
     const blob = await uploadBlob(auth, thumbnail);
-    const rendered = renderBlueskyPost({ title: article.display_title ?? article.title,
+    const rendered = renderBlueskyPost({ title: article.title,
       publisher: article.publisher, template: settings.default_message_template,
       publisherMention: article.social_handle && article.social_did
         ? { handle: article.social_handle, did: article.social_did } : null });
