@@ -25,9 +25,9 @@ assert.equal(oversizedError.message, 'facebook_provider_error');
 let request: { url: string; init?: RequestInit } | undefined;
 const identity = await validateFacebookIdentity(token, async (url, init) => {
   request = { url, init };
-  return json({ id: '1336337862891538', name: 'UK AQ - ukaq.co.uk' });
+  return json({ id: '1336337862891538', name: 'UK Air Quality - ukaq.co.uk' });
 });
-assert.deepEqual(identity, { id: '1336337862891538', name: 'UK AQ - ukaq.co.uk', nameDrift: false });
+assert.deepEqual(identity, { id: '1336337862891538', name: 'UK Air Quality - ukaq.co.uk', nameDrift: false });
 assert.match(request?.url ?? '', /\/v26\.0\/me\?fields=id%2Cname$/);
 assert.equal(new Headers(request?.init?.headers).get('authorization'), `Bearer ${token}`);
 assert(!request?.url.includes(token));
