@@ -14,7 +14,8 @@ export const FACEBOOK_PUBLICATION_STATUSES = [
 export type FacebookPublicationStatus = typeof FACEBOOK_PUBLICATION_STATUSES[number];
 
 export const FACEBOOK_PUBLICATION_REASONS = [
-  'pending_approved', 'rejected_repost', 'unhidden_repost', 'manual_post', 'manual_repost',
+  'auto_approved', 'pending_approved', 'rejected_repost', 'unhidden_repost',
+  'manual_post', 'manual_repost',
 ] as const;
 export type FacebookPublicationReason = typeof FACEBOOK_PUBLICATION_REASONS[number];
 
