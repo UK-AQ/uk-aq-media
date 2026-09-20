@@ -375,7 +375,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.id = ?`).bind(id).first<Record<string, unknown>>();
   if (!article) throw new HttpError(404, 'article_not_found');
-  const [events, evidence, bluesky, blueskyCount] = await Promise.all([
+  const [events, evidence, bluesky, blueskyCount, facebook, facebookCount] = await Promise.all([
     db.prepare(`SELECT id, event_type, actor_type, from_status, to_status, revision,
       created_at, metadata_json FROM media_article_events WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
@@ -389,6 +389,15 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     db.prepare(`SELECT count(*) AS publication_count,
       count(*) FILTER (WHERE status = 'posted') AS post_count
       FROM media_bluesky_publications WHERE article_id = ?`)
+      .bind(id).first<{ publication_count: number; post_count: number }>(),
+    db.prepare(`SELECT id, publication_reason, status, attempt_count, facebook_post_id,
+      facebook_permalink_url, last_error_code, next_attempt_at, remote_request_started_at,
+      unknown_at, reconciled_at, reconciliation_method, created_at, last_attempted_at,
+      posted_at, updated_at FROM media_facebook_publications WHERE article_id = ?
+      ORDER BY id DESC LIMIT 25`).bind(id).all(),
+    db.prepare(`SELECT count(*) AS publication_count,
+      count(*) FILTER (WHERE status = 'posted') AS post_count
+      FROM media_facebook_publications WHERE article_id = ?`)
       .bind(id).first<{ publication_count: number; post_count: number }>(),
   ]);
   const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
@@ -414,7 +423,12 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       manual_post_available: manualPostReason !== null && thumbnailEligible,
       manual_post_reason: manualPostReason,
       manual_post_unavailable_reason: manualPostReason && !thumbnailEligible ? 'thumbnail_missing' : null,
-      thumbnail_eligible: thumbnailEligible, publications: blueskyPublications } });
+      thumbnail_eligible: thumbnailEligible, publications: blueskyPublications },
+    facebook: { post_count: facebookCount?.post_count ?? 0,
+      publication_count: facebookCount?.publication_count ?? 0,
+      latest_status: facebook.results[0]?.status ?? null,
+      manual_post_reason: manualPostReason,
+      publications: facebook.results } });
 }
 
 async function setArticleAuthor(request: Request, db: D1Database, id: number): Promise<Response> {
@@ -548,6 +562,12 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
         AS bluesky_publication_count,
       (SELECT status FROM media_bluesky_publications bp WHERE bp.article_id = a.id
         ORDER BY bp.id DESC LIMIT 1) AS bluesky_latest_status,
+      (SELECT count(*) FROM media_facebook_publications fp
+        WHERE fp.article_id = a.id AND fp.status = 'posted') AS facebook_post_count,
+      (SELECT count(*) FROM media_facebook_publications fp WHERE fp.article_id = a.id)
+        AS facebook_publication_count,
+      (SELECT status FROM media_facebook_publications fp WHERE fp.article_id = a.id
+        ORDER BY fp.id DESC LIMIT 1) AS facebook_latest_status,
       ${spec.expression} AS cursor_value
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
