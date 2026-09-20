@@ -4,6 +4,7 @@ export * from './homepage-latest-six';
 export * from './remote-preview-image';
 export * from './presentation-image';
 export * from './bluesky';
+export * from './facebook';
 export * from './db';
 export * from './http';
 export * from './article-author';
