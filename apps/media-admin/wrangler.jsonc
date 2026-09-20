@@ -31,6 +31,10 @@
       {
         "binding": "MEDIA_BLUESKY_QUEUE",
         "queue": "uk-aq-media-bluesky"
+      },
+      {
+        "binding": "MEDIA_FACEBOOK_QUEUE",
+        "queue": "uk-aq-media-facebook"
       }
     ]
   },

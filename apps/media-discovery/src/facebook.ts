@@ -29,7 +29,9 @@ export class FacebookProviderError extends Error {
 export type FacebookFetch = (input: string, init?: RequestInit) => Promise<Response>;
 export type FacebookSettings = { publishing_enabled: number; page_id: string; page_name: string;
   graph_api_version: string | null; default_message_template: string; cooldown_seconds: number;
-  last_identity_verified_at: string | null; last_successful_post_at: string | null };
+  last_identity_checked_at: string | null; last_identity_verified_at: string | null;
+  last_identity_observed_name: string | null; last_identity_name_drift: number;
+  last_identity_error_code: string | null; last_successful_post_at: string | null };
 export type FacebookPublication = { id: number; article_id: number; publication_key: string;
   publication_reason: string; status: string; attempt_count: number; facebook_post_id: string | null;
   facebook_permalink_url: string | null; next_attempt_at: string | null;
@@ -234,20 +236,37 @@ export async function markFacebookRemoteRequestStarted(db: D1Database, id: numbe
   if (!result.meta.changes) throw new FacebookProviderError('facebook_dispatch_marker_failed', 'local_state_conflict');
 }
 
+export async function persistFacebookConfirmedPostId(db: D1Database, id: number,
+  postId: string, now: string): Promise<void> {
+  const confirmedId = validPostId(postId, 'local_state_conflict');
+  const result = await db.prepare(`UPDATE media_facebook_publications SET facebook_post_id = ?,
+    attempt_count = CASE WHEN facebook_post_id IS NULL THEN attempt_count + 1 ELSE attempt_count END,
+    updated_at = ?
+    WHERE id = ? AND status = 'posting' AND remote_request_started_at IS NOT NULL
+      AND (facebook_post_id IS NULL OR facebook_post_id = ?)`)
+    .bind(confirmedId, now, id, confirmedId).run();
+  if (!result.meta.changes) {
+    throw new FacebookProviderError('facebook_confirmed_post_id_conflict', 'local_state_conflict');
+  }
+}
+
 export async function markFacebookPosted(db: D1Database, id: number, postId: string,
   permalink: string | null, postedAt: string): Promise<void> {
+  const confirmedId = validPostId(postId, 'local_state_conflict');
   const [publication] = await db.batch([
-    db.prepare(`UPDATE media_facebook_publications SET status = 'posted', facebook_post_id = ?,
-      facebook_permalink_url = ?, posted_at = ?, attempt_count = attempt_count + 1,
+    db.prepare(`UPDATE media_facebook_publications SET status = 'posted',
+      facebook_permalink_url = COALESCE(facebook_permalink_url, ?),
+      posted_at = ?,
       last_error_code = NULL, next_attempt_at = NULL, updated_at = ?
-      WHERE id = ? AND status = 'posting' AND remote_request_started_at IS NOT NULL`)
-      .bind(postId, permalink, postedAt, postedAt, id),
+      WHERE id = ? AND status = 'posting' AND remote_request_started_at IS NOT NULL
+        AND facebook_post_id = ?`)
+      .bind(permalink, postedAt, postedAt, id, confirmedId),
     db.prepare(`UPDATE media_facebook_settings SET last_successful_post_at = CASE
         WHEN last_successful_post_at IS NULL OR last_successful_post_at < ? THEN ?
         ELSE last_successful_post_at END, updated_at = ? WHERE id = 1 AND EXISTS (
         SELECT 1 FROM media_facebook_publications WHERE id = ? AND status = 'posted'
           AND facebook_post_id = ? AND posted_at = ?)`)
-      .bind(postedAt, postedAt, postedAt, id, postId, postedAt),
+      .bind(postedAt, postedAt, postedAt, id, confirmedId, postedAt),
   ]);
   if (!publication?.meta.changes) throw new FacebookProviderError('facebook_post_state_conflict', 'local_state_conflict');
 }
@@ -292,7 +311,7 @@ export async function classifyStaleFacebookPublications(db: D1Database, now: str
         AND (last_attempted_at IS NULL OR last_attempted_at <= ?)`).bind(now, staleBefore),
     db.prepare(`UPDATE media_facebook_publications SET status = 'unknown_remote_state',
       last_error_code = 'facebook_stale_after_dispatch', unknown_at = COALESCE(unknown_at, ?), updated_at = ?
-      WHERE status = 'posting' AND remote_request_started_at IS NOT NULL
+      WHERE status = 'posting' AND remote_request_started_at IS NOT NULL AND facebook_post_id IS NULL
         AND (last_attempted_at IS NULL OR last_attempted_at <= ?)`).bind(now, now, staleBefore),
   ]);
 }
@@ -310,4 +329,263 @@ export async function reconcileFacebookExactPost(db: D1Database, publication: Fa
     WHERE id = ? AND facebook_post_id = ?`)
     .bind(read.permalinkUrl, now, now, publication.id, read.facebookPostId).run();
   if (!result.meta.changes) throw new FacebookProviderError('facebook_post_state_conflict', 'local_state_conflict');
+}
+
+async function recordFacebookExactReconciliation(db: D1Database, publicationId: number,
+  postId: string, permalinkUrl: string | null, now: string): Promise<void> {
+  const result = await db.prepare(`UPDATE media_facebook_publications
+    SET facebook_permalink_url = COALESCE(facebook_permalink_url, ?),
+      reconciled_at = COALESCE(reconciled_at, ?),
+      reconciliation_method = COALESCE(reconciliation_method, 'exact_post_id'), updated_at = ?
+    WHERE id = ? AND status = 'posted' AND facebook_post_id = ?`)
+    .bind(permalinkUrl, now, now, publicationId, postId).run();
+  if (!result.meta.changes) throw new FacebookProviderError('facebook_post_state_conflict', 'local_state_conflict');
+}
+
+async function loadFacebookKnownIdPosting(db: D1Database): Promise<FacebookPublication | null> {
+  return db.prepare(`SELECT * FROM media_facebook_publications
+    WHERE status = 'posting' AND facebook_post_id IS NOT NULL ORDER BY id LIMIT 1`)
+    .first<FacebookPublication>();
+}
+
+async function deferFacebookKnownIdReconciliation(db: D1Database, id: number,
+  code: string, now: string): Promise<void> {
+  const result = await db.prepare(`UPDATE media_facebook_publications SET last_attempted_at = ?,
+    last_error_code = ?, next_attempt_at = NULL, updated_at = ?
+    WHERE id = ? AND status = 'posting' AND facebook_post_id IS NOT NULL`)
+    .bind(now, boundCode(code), now, id).run();
+  if (!result.meta.changes) throw new FacebookProviderError('facebook_post_state_conflict', 'local_state_conflict');
+}
+
+async function holdFacebookKnownIdReconciliation(db: D1Database, id: number,
+  code: string, now: string): Promise<void> {
+  const result = await db.prepare(`UPDATE media_facebook_publications SET status = 'unknown_remote_state',
+    last_error_code = ?, next_attempt_at = NULL, unknown_at = COALESCE(unknown_at, ?), updated_at = ?
+    WHERE id = ? AND status = 'posting' AND facebook_post_id IS NOT NULL`)
+    .bind(boundCode(code), now, now, id).run();
+  if (!result.meta.changes) throw new FacebookProviderError('facebook_post_state_conflict', 'local_state_conflict');
+}
+
+const FACEBOOK_MAX_ATTEMPTS = 5;
+
+type FacebookQueueMessage = { type: 'facebook_wakeup'; publication_id?: number } |
+  { type: 'facebook_identity_check' };
+
+function parseFacebookMessage(value: unknown): FacebookQueueMessage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (record.type === 'facebook_identity_check' && keys.length === 1) return { type: record.type };
+  if (record.type !== 'facebook_wakeup' || keys.some(key => key !== 'type' && key !== 'publication_id')) return null;
+  if (record.publication_id === undefined) return { type: record.type };
+  return Number.isSafeInteger(record.publication_id) && Number(record.publication_id) > 0
+    ? { type: record.type, publication_id: Number(record.publication_id) } : null;
+}
+
+async function recordIdentitySuccess(db: D1Database, identity: { name: string | null;
+  nameDrift: boolean }, now: string): Promise<void> {
+  await db.prepare(`UPDATE media_facebook_settings SET last_identity_checked_at = ?,
+    last_identity_verified_at = ?, last_identity_observed_name = ?,
+    last_identity_name_drift = ?, last_identity_error_code = NULL, updated_at = ? WHERE id = 1`)
+    .bind(now, now, identity.name, Number(identity.nameDrift), now).run();
+}
+
+async function recordIdentityFailure(db: D1Database, code: string, now: string): Promise<void> {
+  await db.prepare(`UPDATE media_facebook_settings SET last_identity_checked_at = ?,
+    last_identity_error_code = ?, updated_at = ? WHERE id = 1`)
+    .bind(now, boundCode(code), now).run();
+}
+
+async function checkIdentity(env: MediaDiscoveryEnv): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    const identity = await validateFacebookIdentity(env.UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN);
+    await recordIdentitySuccess(env.MEDIA_DB, identity, now);
+  } catch (error) {
+    const code = error instanceof FacebookProviderError ? error.code : 'facebook_identity_check_failed';
+    await recordIdentityFailure(env.MEDIA_DB, code, now);
+    throw error;
+  }
+}
+
+async function validateAndRecordIdentity(env: MediaDiscoveryEnv): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    const identity = await validateFacebookIdentity(env.UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN);
+    await recordIdentitySuccess(env.MEDIA_DB, identity, now);
+  } catch (error) {
+    await recordIdentityFailure(env.MEDIA_DB,
+      error instanceof FacebookProviderError ? error.code : 'facebook_identity_check_failed', now);
+    throw error;
+  }
+}
+
+function validSettings(settings: FacebookSettings | null): settings is FacebookSettings {
+  return !!settings && settings.page_id === FACEBOOK_PAGE_ID &&
+    settings.graph_api_version === FACEBOOK_GRAPH_API_VERSION &&
+    Number.isInteger(settings.cooldown_seconds) && settings.cooldown_seconds >= 60 &&
+    settings.cooldown_seconds <= 86_400;
+}
+
+async function nextFacebookWakeDelay(db: D1Database, settings: FacebookSettings,
+  nowMs: number): Promise<number | null> {
+  // Any active claim is a global barrier. Its stale boundary owns the next
+  // wake even when an older queued row is already due.
+  const posting = await db.prepare(`SELECT MIN(COALESCE(last_attempted_at, created_at)) AS claimed_at
+    FROM media_facebook_publications WHERE status = 'posting'`)
+    .first<{ claimed_at: string | null }>();
+  if (posting?.claimed_at) {
+    const claimedMs = Date.parse(posting.claimed_at);
+    const staleMs = Number.isFinite(claimedMs) ? claimedMs + FACEBOOK_STALE_CLAIM_MS : nowMs;
+    return Math.max(0, Math.min(FACEBOOK_MAX_QUEUE_DELAY_SECONDS,
+      Math.ceil((staleMs - nowMs) / 1000)));
+  }
+
+  const queued = await db.prepare(`SELECT MIN(COALESCE(next_attempt_at, created_at)) AS due_at
+    FROM media_facebook_publications WHERE status = 'queued'`)
+    .first<{ due_at: string | null }>();
+  if (!queued?.due_at) return null;
+  let dueMs = Date.parse(queued.due_at);
+  if (!Number.isFinite(dueMs)) dueMs = nowMs;
+  if (settings.last_successful_post_at) {
+    dueMs = Math.max(dueMs, Date.parse(settings.last_successful_post_at) + settings.cooldown_seconds * 1000);
+  }
+  return Math.max(0, Math.min(FACEBOOK_MAX_QUEUE_DELAY_SECONDS, Math.ceil((dueMs - nowMs) / 1000)));
+}
+
+async function scheduleNextFacebookWake(env: MediaDiscoveryEnv,
+  settings: FacebookSettings): Promise<void> {
+  const delaySeconds = await nextFacebookWakeDelay(env.MEDIA_DB, settings, Date.now());
+  if (delaySeconds !== null) {
+    await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }, { delaySeconds });
+  }
+}
+
+export async function reconcileFacebookQueue(env: MediaDiscoveryEnv): Promise<void> {
+  const settings = await loadFacebookSettings(env.MEDIA_DB);
+  if (!validSettings(settings) || !settings.publishing_enabled) return;
+  await scheduleNextFacebookWake(env, settings);
+}
+
+export async function recoverFacebookKnownIdPosting(env: MediaDiscoveryEnv,
+  publication: FacebookPublication, fetchImpl: FacebookFetch = fetch): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    const read = await readFacebookPost(publication.facebook_post_id ?? '',
+      env.UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN, fetchImpl);
+    await markFacebookPosted(env.MEDIA_DB, publication.id, read.facebookPostId,
+      read.permalinkUrl, now);
+    await recordFacebookExactReconciliation(env.MEDIA_DB, publication.id,
+      read.facebookPostId, read.permalinkUrl, now);
+  } catch (error) {
+    const provider = error instanceof FacebookProviderError ? error
+      : new FacebookProviderError('facebook_reconciliation_failed', 'known_safe_retry');
+    if (provider.kind === 'known_safe_retry' || provider.kind === 'definite_pre_dispatch') {
+      await deferFacebookKnownIdReconciliation(env.MEDIA_DB, publication.id, provider.code, now);
+    } else if (provider.kind !== 'local_state_conflict') {
+      await holdFacebookKnownIdReconciliation(env.MEDIA_DB, publication.id, provider.code, now);
+    }
+    console.error(JSON.stringify({ event: 'facebook_exact_reconciliation_failed',
+      publication_id: publication.id, error_code: provider.code }));
+  }
+}
+
+async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
+  const settings = await loadFacebookSettings(env.MEDIA_DB);
+  if (!validSettings(settings) || !settings.publishing_enabled) return;
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const knownIdPosting = await loadFacebookKnownIdPosting(env.MEDIA_DB);
+  if (knownIdPosting) {
+    await recoverFacebookKnownIdPosting(env, knownIdPosting);
+    const latest = await loadFacebookSettings(env.MEDIA_DB);
+    if (validSettings(latest) && latest.publishing_enabled) await scheduleNextFacebookWake(env, latest);
+    return;
+  }
+  await classifyStaleFacebookPublications(env.MEDIA_DB, nowIso,
+    new Date(now.getTime() - FACEBOOK_STALE_CLAIM_MS).toISOString());
+  if (settings.last_successful_post_at &&
+      Date.parse(settings.last_successful_post_at) + settings.cooldown_seconds * 1000 > now.getTime()) {
+    await scheduleNextFacebookWake(env, settings);
+    return;
+  }
+  const publication = await claimFacebookPublication(env.MEDIA_DB, nowIso);
+  if (!publication) {
+    const latest = await loadFacebookSettings(env.MEDIA_DB);
+    if (validSettings(latest) && latest.publishing_enabled) await scheduleNextFacebookWake(env, latest);
+    return;
+  }
+  let created: { facebookPostId: string; permalinkUrl: null };
+  try {
+    const article = await loadFacebookArticle(env.MEDIA_DB, publication.article_id);
+    if (!article) throw new FacebookProviderError('facebook_article_missing', 'blocked');
+    await validateAndRecordIdentity(env);
+    created = await createFacebookPost({ token: env.UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN,
+      ...article, template: settings.default_message_template,
+      markRemoteRequestStarted: () => markFacebookRemoteRequestStarted(env.MEDIA_DB,
+        publication.id, new Date().toISOString()) });
+  } catch (error) {
+    const provider = error instanceof FacebookProviderError ? error
+      : new FacebookProviderError('facebook_publication_failed', 'blocked');
+    const failureAt = new Date().toISOString();
+    if (provider.kind === 'known_safe_retry' || provider.kind === 'definite_pre_dispatch') {
+      if (publication.attempt_count + 1 >= FACEBOOK_MAX_ATTEMPTS) {
+        await markFacebookFailed(env.MEDIA_DB, publication.id, provider.code, failureAt);
+      } else {
+        await scheduleFacebookKnownSafeRetry(env.MEDIA_DB, publication.id, provider.code, failureAt,
+          facebookRetryAt(publication.attempt_count, settings.cooldown_seconds, Date.now()));
+      }
+    } else if (provider.kind === 'unknown_remote_state') {
+      await markFacebookUnknownRemoteState(env.MEDIA_DB, publication.id, provider.code, failureAt);
+    } else if (provider.kind === 'blocked') {
+      await markFacebookBlocked(env.MEDIA_DB, publication.id, provider.code, failureAt);
+    }
+    console.error(JSON.stringify({ event: 'facebook_publication_failed',
+      publication_id: publication.id, error_code: provider.code }));
+    const latest = await loadFacebookSettings(env.MEDIA_DB);
+    if (validSettings(latest) && latest.publishing_enabled) await scheduleNextFacebookWake(env, latest);
+    return;
+  }
+
+  // From this point Meta has confirmed creation with an exact ID. Local
+  // persistence failures must never flow through provider retry classification.
+  try {
+    const confirmedAt = new Date().toISOString();
+    await persistFacebookConfirmedPostId(env.MEDIA_DB, publication.id,
+      created.facebookPostId, confirmedAt);
+    await markFacebookPosted(env.MEDIA_DB, publication.id, created.facebookPostId, null, confirmedAt);
+  } catch (error) {
+    const code = error instanceof FacebookProviderError ? error.code : 'facebook_confirmed_post_persist_failed';
+    console.error(JSON.stringify({ event: 'facebook_confirmed_post_persist_failed',
+      publication_id: publication.id, error_code: boundCode(code) }));
+    const latest = await loadFacebookSettings(env.MEDIA_DB);
+    if (validSettings(latest) && latest.publishing_enabled) await scheduleNextFacebookWake(env, latest);
+    return;
+  }
+  try {
+    const posted = await loadFacebookPublication(env.MEDIA_DB, publication.id);
+    if (posted) await reconcileFacebookExactPost(env.MEDIA_DB, posted,
+      env.UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN, new Date().toISOString());
+  } catch {
+    console.warn(JSON.stringify({ event: 'facebook_readback_failed', publication_id: publication.id }));
+  }
+  const latest = await loadFacebookSettings(env.MEDIA_DB);
+  if (validSettings(latest) && latest.publishing_enabled) await scheduleNextFacebookWake(env, latest);
+}
+
+export async function consumeFacebook(message: Message<unknown>, env: MediaDiscoveryEnv): Promise<void> {
+  const parsed = parseFacebookMessage(message.body);
+  if (!parsed) {
+    console.error(JSON.stringify({ event: 'unsupported_facebook_message', message_id: message.id }));
+    message.ack();
+    return;
+  }
+  if (parsed.type === 'facebook_identity_check') {
+    try { await checkIdentity(env); }
+    catch { /* Durable bounded connection state is the result; Queue retry is unnecessary. */ }
+    message.ack();
+    return;
+  }
+  await publishOne(env);
+  message.ack();
 }

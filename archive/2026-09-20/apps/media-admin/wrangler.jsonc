@@ -1,0 +1,51 @@
+// Configuration only: replace the all-zero D1 ID after manual resource creation.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "uk-aq-media-admin",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "../media-public/public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "d1_databases": [
+    {
+      "binding": "MEDIA_DB",
+      "database_name": "uk-aq-media",
+      "database_id": "75b39d56-a8e2-48dc-9208-7ac0d199219c",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "MEDIA_BLUESKY_QUEUE",
+        "queue": "uk-aq-media-bluesky"
+      }
+    ]
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "secrets": {
+    "required": [
+      "MEDIA_ADMIN_TOKEN"
+    ]
+  },
+  "vars": {
+    "MEDIA_AI_DAILY_NEURON_BUDGET": 8000,
+    "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY": 10000,
+    "MEDIA_AI_MAX_TITLES_PER_REQUEST": 5,
+    "MEDIA_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+  }
+}

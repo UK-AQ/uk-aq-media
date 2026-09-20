@@ -1,0 +1,71 @@
+// Configuration only: replace the all-zero D1 ID after manual resource creation.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "uk-aq-media-discovery",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "d1_databases": [
+    {
+      "binding": "MEDIA_DB",
+      "database_name": "uk-aq-media",
+      "database_id": "75b39d56-a8e2-48dc-9208-7ac0d199219c",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "MEDIA_DISCOVERY_QUEUE",
+        "queue": "uk-aq-media-discovery"
+      },
+      {
+        "binding": "MEDIA_BLUESKY_QUEUE",
+        "queue": "uk-aq-media-bluesky"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "uk-aq-media-discovery",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "max_concurrency": 1,
+        "retry_delay": 300
+      },
+      {
+        "queue": "uk-aq-media-bluesky",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "max_concurrency": 1,
+        "retry_delay": 30
+      }
+    ]
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "secrets": {
+    "required": [
+      "UK_AQ_MEDIA_WORKER_HTTP_SECRET",
+      "UK_AQ_MEDIA_GDELT_INGEST_SECRET",
+      "UK_AQ_MEDIA_BLUESKY_APP_PSWD"
+    ]
+  },
+  "vars": {
+    "MEDIA_AI_MAX_REQUESTS_PER_RUN": 10,
+    "MEDIA_AI_DAILY_NEURON_BUDGET": 8000,
+    "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY": 10000,
+    "MEDIA_AI_MAX_TITLES_PER_REQUEST": 5,
+    "MEDIA_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+  }
+}

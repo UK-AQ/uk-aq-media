@@ -12,6 +12,14 @@ import {
 } from '@uk-aq-media/gdelt/ingest';
 import { GDELT_MAX_INGEST_BODY_BYTES } from '@uk-aq-media/gdelt';
 import { consumeBluesky, reconcileBlueskyQueue } from './bluesky';
+import { consumeFacebook, reconcileFacebookQueue } from './facebook';
+
+async function reconcileSocialQueues(env: MediaDiscoveryEnv): Promise<void> {
+  try { await reconcileBlueskyQueue(env); }
+  catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+  try { await reconcileFacebookQueue(env); }
+  catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed' })); }
+}
 
 const NEURON_MICRO_UNITS = 1_000_000;
 const MAX_EMPTY_GDELT_START_BODY_READS = 8;
@@ -187,8 +195,7 @@ export default {
     }
     try {
       const queued = await enqueueScheduledDiscovery(env);
-      try { await reconcileBlueskyQueue(env); }
-      catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+      await reconcileSocialQueues(env);
       return json({ ok: true, queued }, 202);
     } catch {
       return json({ error: 'discovery_schedule_failed' }, 503);
@@ -196,12 +203,15 @@ export default {
   },
   async scheduled(_controller, env): Promise<void> {
     await enqueueScheduledDiscovery(env);
-    try { await reconcileBlueskyQueue(env); }
-    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+    await reconcileSocialQueues(env);
   },
   async queue(batch, env): Promise<void> {
     if (batch.queue === 'uk-aq-media-bluesky') {
       for (const message of batch.messages) await consumeBluesky(message, env);
+      return;
+    }
+    if (batch.queue === 'uk-aq-media-facebook') {
+      for (const message of batch.messages) await consumeFacebook(message, env);
       return;
     }
     if (batch.queue !== 'uk-aq-media-discovery') {
@@ -221,8 +231,7 @@ export default {
       try {
         await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
           message.id, message.attempts, configuredDisplayTitleAi(env));
-        try { await reconcileBlueskyQueue(env); }
-        catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+        await reconcileSocialQueues(env);
         message.ack();
       } catch {
         console.error(JSON.stringify({ event: 'discovery_message_failed', message_id: message.id }));
