@@ -30,6 +30,10 @@
       {
         "binding": "MEDIA_BLUESKY_QUEUE",
         "queue": "uk-aq-media-bluesky"
+      },
+      {
+        "binding": "MEDIA_FACEBOOK_QUEUE",
+        "queue": "uk-aq-media-facebook"
       }
     ],
     "consumers": [
@@ -48,6 +52,14 @@
         "max_retries": 5,
         "max_concurrency": 1,
         "retry_delay": 30
+      },
+      {
+        "queue": "uk-aq-media-facebook",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "max_concurrency": 1,
+        "retry_delay": 30
       }
     ]
   },
@@ -58,7 +70,8 @@
     "required": [
       "UK_AQ_MEDIA_WORKER_HTTP_SECRET",
       "UK_AQ_MEDIA_GDELT_INGEST_SECRET",
-      "UK_AQ_MEDIA_BLUESKY_APP_PSWD"
+      "UK_AQ_MEDIA_BLUESKY_APP_PSWD",
+      "UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN"
     ]
   },
   "vars": {

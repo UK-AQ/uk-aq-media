@@ -3,6 +3,7 @@
 interface __BaseEnv_MediaAdminEnv {
 	MEDIA_DB: D1Database;
 	MEDIA_BLUESKY_QUEUE: Queue;
+	MEDIA_FACEBOOK_QUEUE: Queue;
 	AI: Ai;
 	ASSETS: Fetcher;
 	MEDIA_AI_DAILY_NEURON_BUDGET: 8000;

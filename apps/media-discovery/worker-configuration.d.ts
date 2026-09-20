@@ -4,6 +4,7 @@ interface __BaseEnv_MediaDiscoveryEnv {
 	MEDIA_DB: D1Database;
 	MEDIA_DISCOVERY_QUEUE: Queue;
 	MEDIA_BLUESKY_QUEUE: Queue;
+	MEDIA_FACEBOOK_QUEUE: Queue;
 	AI: Ai;
 	MEDIA_AI_MAX_REQUESTS_PER_RUN: 10;
 	MEDIA_AI_DAILY_NEURON_BUDGET: 8000;
@@ -13,6 +14,7 @@ interface __BaseEnv_MediaDiscoveryEnv {
 	UK_AQ_MEDIA_WORKER_HTTP_SECRET: string;
 	UK_AQ_MEDIA_GDELT_INGEST_SECRET: string;
 	UK_AQ_MEDIA_BLUESKY_APP_PSWD: string;
+	UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN: string;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
@@ -25,5 +27,5 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "MEDIA_AI_MAX_REQUESTS_PER_RUN" | "MEDIA_AI_DAILY_NEURON_BUDGET" | "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY" | "MEDIA_AI_MAX_TITLES_PER_REQUEST" | "MEDIA_AI_MODEL" | "UK_AQ_MEDIA_WORKER_HTTP_SECRET" | "UK_AQ_MEDIA_GDELT_INGEST_SECRET" | "UK_AQ_MEDIA_BLUESKY_APP_PSWD">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "MEDIA_AI_MAX_REQUESTS_PER_RUN" | "MEDIA_AI_DAILY_NEURON_BUDGET" | "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY" | "MEDIA_AI_MAX_TITLES_PER_REQUEST" | "MEDIA_AI_MODEL" | "UK_AQ_MEDIA_WORKER_HTTP_SECRET" | "UK_AQ_MEDIA_GDELT_INGEST_SECRET" | "UK_AQ_MEDIA_BLUESKY_APP_PSWD" | "UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN">> {}
 }

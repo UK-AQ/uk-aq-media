@@ -632,6 +632,7 @@ async function facebookSettings(request: Request, env: MediaAdminEnv): Promise<R
   const present = (settings: Record<string, unknown> | null, replayed?: boolean) => ({
     settings: settings ? { ...settings,
       publishing_enabled: Boolean(settings.publishing_enabled),
+      last_identity_name_drift: Boolean(settings.last_identity_name_drift),
       cooldown_minutes: Number(settings.cooldown_seconds) / 60 } : null,
     constraints: { message_template_max_length: FACEBOOK_TEMPLATE_MAX_LENGTH,
       cooldown_minutes_min: 1, cooldown_minutes_max: 1440,
@@ -639,7 +640,8 @@ async function facebookSettings(request: Request, env: MediaAdminEnv): Promise<R
     ...(replayed === undefined ? {} : { replayed }),
   });
   const select = `SELECT publishing_enabled, page_id, page_name, graph_api_version,
-    default_message_template, cooldown_seconds, last_identity_verified_at,
+    default_message_template, cooldown_seconds, last_identity_checked_at, last_identity_verified_at,
+    last_identity_observed_name, last_identity_name_drift, last_identity_error_code,
     last_successful_post_at, updated_at FROM media_facebook_settings WHERE id = 1`;
   if (request.method === 'GET') return json(present(await env.MEDIA_DB.prepare(select).first()));
   if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
@@ -661,20 +663,39 @@ async function facebookSettings(request: Request, env: MediaAdminEnv): Promise<R
     throw new HttpError(409, 'idempotency_key_conflict');
   }
   if (parsed.data.publishing_enabled) {
-    throw new HttpError(409, 'facebook_publisher_not_configured');
+    const connection = await env.MEDIA_DB.prepare(`SELECT page_id, graph_api_version,
+      last_identity_verified_at, last_identity_error_code FROM media_facebook_settings WHERE id = 1`)
+      .first<{ page_id: string; graph_api_version: string | null;
+        last_identity_verified_at: string | null; last_identity_error_code: string | null }>();
+    if (!connection || connection.page_id !== '1336337862891538' ||
+        connection.graph_api_version !== 'v26.0' || !connection.last_identity_verified_at ||
+        connection.last_identity_error_code !== null) {
+      throw new HttpError(409, 'facebook_identity_not_verified');
+    }
   }
   if (!replay) {
     const now = new Date().toISOString();
     await env.MEDIA_DB.batch([
-      env.MEDIA_DB.prepare(`UPDATE media_facebook_settings SET publishing_enabled = 0,
+      env.MEDIA_DB.prepare(`UPDATE media_facebook_settings SET publishing_enabled = ?,
         cooldown_seconds = ?, default_message_template = ?, updated_at = ? WHERE id = 1`)
-        .bind(parsed.data.cooldown_minutes * 60, parsed.data.default_message_template, now),
+        .bind(Number(parsed.data.publishing_enabled), parsed.data.cooldown_minutes * 60,
+          parsed.data.default_message_template, now),
       env.MEDIA_DB.prepare(`INSERT INTO media_facebook_settings_requests
         (request_key, request_json, created_at) VALUES (?, ?, ?)`)
         .bind(key, requestJson, now),
     ]);
   }
+  if (!replay && parsed.data.publishing_enabled) {
+    try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed' })); }
+  }
   return json(present(await env.MEDIA_DB.prepare(select).first(), Boolean(replay)));
+}
+
+async function facebookConnectionCheck(request: Request, env: MediaAdminEnv): Promise<Response> {
+  if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+  await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_identity_check' });
+  return json({ accepted: true }, 202);
 }
 
 function manualPublicationReason(action: Action,
@@ -741,6 +762,10 @@ async function statusMutationResponse(env: MediaAdminEnv, id: number, receipt: N
   if (receipt.blueskyPublication) {
     try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
     catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
+  }
+  if (receipt.facebookPublication) {
+    try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed', article_id: id })); }
   }
   return json({ article: { id, status: receipt.event.to_status, revision: receipt.event.revision },
     bluesky_publication: receipt.blueskyPublication,
@@ -895,6 +920,10 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
     try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
     catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', request_key: key })); }
   }
+  if (facebookPublications.length) {
+    try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
+    catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed', request_key: key })); }
+  }
   return json({ articles, bluesky_publications: publications,
     facebook_publications: facebookPublications, replayed: Boolean(existing) });
 }
@@ -1011,6 +1040,9 @@ export default {
       const url = new URL(request.url);
       if (url.pathname === '/admin/bluesky/settings') return await blueskySettings(request, env);
       if (url.pathname === '/admin/facebook/settings') return await facebookSettings(request, env);
+      if (url.pathname === '/admin/facebook/connection-check') {
+        return await facebookConnectionCheck(request, env);
+      }
       const editorialResponse = await handleEditorialDashboard(request, env, url);
       if (editorialResponse) return editorialResponse;
       if (url.pathname === '/admin/articles/bulk/approve') {
