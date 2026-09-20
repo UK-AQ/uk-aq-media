@@ -1,5 +1,5 @@
 export const FACEBOOK_PAGE_ID = '1336337862891538';
-export const FACEBOOK_PAGE_NAME = 'UK AQ - ukaq.co.uk';
+export const FACEBOOK_PAGE_NAME = 'UK Air Quality - ukaq.co.uk';
 export const FACEBOOK_TEMPLATE_MAX_LENGTH = 2000;
 export const FACEBOOK_TITLE_MAX_LENGTH = 2000;
 export const FACEBOOK_PUBLISHER_MAX_LENGTH = 500;
