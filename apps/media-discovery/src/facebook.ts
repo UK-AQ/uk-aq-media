@@ -377,15 +377,23 @@ function validSettings(settings: FacebookSettings | null): settings is FacebookS
 
 async function nextFacebookWakeDelay(db: D1Database, settings: FacebookSettings,
   nowMs: number): Promise<number | null> {
-  const row = await db.prepare(`SELECT MIN(due_at) AS due_at FROM (
-    SELECT COALESCE(next_attempt_at, created_at) AS due_at FROM media_facebook_publications
-      WHERE status = 'queued'
-    UNION ALL
-    SELECT datetime(COALESCE(last_attempted_at, created_at), '+10 minutes') AS due_at
-      FROM media_facebook_publications WHERE status = 'posting'
-  )`).first<{ due_at: string | null }>();
-  if (!row?.due_at) return null;
-  let dueMs = Date.parse(row.due_at.endsWith('Z') ? row.due_at : `${row.due_at.replace(' ', 'T')}Z`);
+  // Any active claim is a global barrier. Its stale boundary owns the next
+  // wake even when an older queued row is already due.
+  const posting = await db.prepare(`SELECT MIN(COALESCE(last_attempted_at, created_at)) AS claimed_at
+    FROM media_facebook_publications WHERE status = 'posting'`)
+    .first<{ claimed_at: string | null }>();
+  if (posting?.claimed_at) {
+    const claimedMs = Date.parse(posting.claimed_at);
+    const staleMs = Number.isFinite(claimedMs) ? claimedMs + FACEBOOK_STALE_CLAIM_MS : nowMs;
+    return Math.max(0, Math.min(FACEBOOK_MAX_QUEUE_DELAY_SECONDS,
+      Math.ceil((staleMs - nowMs) / 1000)));
+  }
+
+  const queued = await db.prepare(`SELECT MIN(COALESCE(next_attempt_at, created_at)) AS due_at
+    FROM media_facebook_publications WHERE status = 'queued'`)
+    .first<{ due_at: string | null }>();
+  if (!queued?.due_at) return null;
+  let dueMs = Date.parse(queued.due_at);
   if (!Number.isFinite(dueMs)) dueMs = nowMs;
   if (settings.last_successful_post_at) {
     dueMs = Math.max(dueMs, Date.parse(settings.last_successful_post_at) + settings.cooldown_seconds * 1000);
@@ -420,7 +428,11 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
     return;
   }
   const publication = await claimFacebookPublication(env.MEDIA_DB, nowIso);
-  if (!publication) return;
+  if (!publication) {
+    const latest = await loadFacebookSettings(env.MEDIA_DB);
+    if (validSettings(latest) && latest.publishing_enabled) await scheduleNextFacebookWake(env, latest);
+    return;
+  }
   try {
     const article = await loadFacebookArticle(env.MEDIA_DB, publication.article_id);
     if (!article) throw new FacebookProviderError('facebook_article_missing', 'blocked');

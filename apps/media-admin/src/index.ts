@@ -662,6 +662,13 @@ async function facebookSettings(request: Request, env: MediaAdminEnv): Promise<R
   if (replay && replay.request_json !== requestJson) {
     throw new HttpError(409, 'idempotency_key_conflict');
   }
+  if (replay) {
+    if (parsed.data.publishing_enabled) {
+      try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
+      catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed' })); }
+    }
+    return json(present(await env.MEDIA_DB.prepare(select).first(), true));
+  }
   if (parsed.data.publishing_enabled) {
     const connection = await env.MEDIA_DB.prepare(`SELECT page_id, graph_api_version,
       last_identity_verified_at, last_identity_error_code FROM media_facebook_settings WHERE id = 1`)
@@ -673,23 +680,21 @@ async function facebookSettings(request: Request, env: MediaAdminEnv): Promise<R
       throw new HttpError(409, 'facebook_identity_not_verified');
     }
   }
-  if (!replay) {
-    const now = new Date().toISOString();
-    await env.MEDIA_DB.batch([
-      env.MEDIA_DB.prepare(`UPDATE media_facebook_settings SET publishing_enabled = ?,
-        cooldown_seconds = ?, default_message_template = ?, updated_at = ? WHERE id = 1`)
-        .bind(Number(parsed.data.publishing_enabled), parsed.data.cooldown_minutes * 60,
-          parsed.data.default_message_template, now),
-      env.MEDIA_DB.prepare(`INSERT INTO media_facebook_settings_requests
-        (request_key, request_json, created_at) VALUES (?, ?, ?)`)
-        .bind(key, requestJson, now),
-    ]);
-  }
-  if (!replay && parsed.data.publishing_enabled) {
+  const now = new Date().toISOString();
+  await env.MEDIA_DB.batch([
+    env.MEDIA_DB.prepare(`UPDATE media_facebook_settings SET publishing_enabled = ?,
+      cooldown_seconds = ?, default_message_template = ?, updated_at = ? WHERE id = 1`)
+      .bind(Number(parsed.data.publishing_enabled), parsed.data.cooldown_minutes * 60,
+        parsed.data.default_message_template, now),
+    env.MEDIA_DB.prepare(`INSERT INTO media_facebook_settings_requests
+      (request_key, request_json, created_at) VALUES (?, ?, ?)`)
+      .bind(key, requestJson, now),
+  ]);
+  if (parsed.data.publishing_enabled) {
     try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
     catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed' })); }
   }
-  return json(present(await env.MEDIA_DB.prepare(select).first(), Boolean(replay)));
+  return json(present(await env.MEDIA_DB.prepare(select).first(), false));
 }
 
 async function facebookConnectionCheck(request: Request, env: MediaAdminEnv): Promise<Response> {
