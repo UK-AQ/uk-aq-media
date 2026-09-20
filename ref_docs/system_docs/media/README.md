@@ -6,11 +6,13 @@ This area defines the agreed authoritative contract for the **UK AQ Media / AQ i
 
 The standalone Media backend was deployed on **8 September 2026** and completed real-operation validation for AQN, the initial Guardian adapter and the authenticated central-scheduler path. The implementation has since expanded to additional bounded direct publisher adapters and GDELT Web NGrams discovery. Communities Against Woodsmoke is now an approved next bounded publisher-index source addition, but this documentation intentionally precedes its Media implementation and deployment. The subsystem is deliberately **not yet connected to the public/LIVE UK AQ website**. The deployed TEST website may consume the standalone public Media feed through the contracted same-origin bridge.
 
-The implementation repository is the private `TEST-uk-aq/uk-aq-media` repository. Runtime implementation belongs there. Codex and other coding agents treat this `system_docs/` area as read-only.
+The implementation repository is the private `UK-AQ/uk-aq-media` repository. Runtime implementation belongs there. Codex and other coding agents treat this `system_docs/` area as read-only.
 
 This area also contains [`media-homepage-latest-six-contract.md`](media-homepage-latest-six-contract.md), which is explicitly **future implementation authority** for the homepage-specific generation/versioned-cache design. It is not evidence that those endpoints, D1 state or long-lived cache entries are deployed. The current public `GET /articles` runtime remains authoritative until that future contract is implemented and accepted on TEST.
 
 This area also contains [`media_bluesky_contract.md`](media_bluesky_contract.md), which is the **current TEST authority** for article publication to the UK AQ Bluesky account `@ukaq.co.uk`. It defines automatic publication for genuinely auto-approved articles, explicit opt-in Bluesky publication whenever an operator manually chooses Approved, thumbnail-backed external cards, durable D1 publication/audit state, the dedicated Bluesky Queue, configurable cooldown, idempotency, operator cancellation and dashboard controls. Its current-status wording does not by itself imply that public Bluesky publishing is enabled or that the public/LIVE UK AQ website depends on Media.
+
+This area also contains [`media_facebook_contract.md`](media_facebook_contract.md), the **authoritative future implementation contract** for manual-only V1 publication to the configured UK AQ Facebook Page. The provider-independent foundation and dormant admin integration exist, but Facebook remains disabled pending the server-side provider/Queue runtime and TEST operational acceptance. The contract owns Page identity, credential/data-access lifecycle, remote-dispatch ambiguity, conservative retry and reconciliation behaviour.
 
 ## Current standalone runtime
 
@@ -200,7 +202,7 @@ There is no native Media Cron trigger configured. The dormant `scheduled()` hand
 
 ### Deployment automation
 
-Relevant pushes to `main` in `TEST-uk-aq/uk-aq-media` automatically run the repository's Media deployment workflow.
+Relevant pushes to `main` in `UK-AQ/uk-aq-media` automatically run the repository's Media deployment workflow.
 
 The workflow:
 
@@ -225,6 +227,8 @@ For source-wide and author-specific publication-state semantics, including Commu
 For current blanket discovery through GDELT Web NGrams, read [`media-gdelt-web-ngrams-contract.md`](media-gdelt-web-ngrams-contract.md). It is the narrow authority where older broad-contract GDELT transport wording differs.
 
 For current TEST Bluesky article publication behaviour, read [`media_bluesky_contract.md`](media_bluesky_contract.md). It is the narrow authority for automatic Bluesky jobs from genuine source/author auto-approval, explicit opt-in social publication whenever an operator manually chooses Approved, the no-thumbnail/no-post rule, bulk all-or-nothing eligibility, durable cancellation/audit state, D1 outbox/idempotency, the dedicated Bluesky Queue, oldest-first backlog ordering, configurable cooldown and the `@ukaq.co.uk` publishing account.
+
+For the agreed manual-only Facebook V1 and its implemented dormant foundation, read [`media_facebook_contract.md`](media_facebook_contract.md). It is the narrow authority for Page identity, deterministic link posts, independent operator intent, Queue/secret boundaries, provider API behaviour, no remote idempotency primitive, ambiguous writes, stale claims, exact-ID reconciliation and operational acceptance. It does not assert that remote Facebook publishing is enabled.
 
 For the agreed future homepage latest-six generation, D1 state, versioned feed and 24-hour Cache API behaviour, read [`media-homepage-latest-six-contract.md`](media-homepage-latest-six-contract.md). It is explicitly **future implementation authority**, not current runtime. It owns homepage-specific cache invalidation semantics and is separate from any future full News-page generation/cache design.
 
@@ -255,12 +259,15 @@ The contracts define the load-bearing boundaries for:
 - Open Graph/social-preview metadata, cached remote preview delivery and optional compact display titles;
 - future homepage latest-six generation/versioned-cache behaviour;
 - current TEST event-driven Bluesky article publication, automatic-only auto-approval posting, explicit manual-approval opt-in, thumbnail-backed external cards, D1 publication history, Queue cooldown/order, cancellation and dashboard controls;
+- future manual-only Facebook V1, including its implemented dormant durable/admin foundation and the required conservative remote-write boundary;
 - the £0 V1 operating requirement;
 - public-site independence from Media failure.
 
 Detailed implementation sequencing, source-route research and phase history live in [`../../plans/2026-09-07 UK AQ Media/UK_AQ_Media_Plan.md`](../../plans/2026-09-07%20UK%20AQ%20Media/UK_AQ_Media_Plan.md). The plan is non-authoritative and MUST NOT override these contracts or this current-runtime summary.
 
 The current Bluesky implementation sequence lives in [`../../plans/2026-09-11 UK AQ Media Bluesky/UK_AQ_Media_Bluesky_Plan.md`](../../plans/2026-09-11%20UK%20AQ%20Media%20Bluesky/UK_AQ_Media_Bluesky_Plan.md). It is non-authoritative and MUST follow `media_bluesky_contract.md`.
+
+The current Facebook implementation sequence lives in [`../../plans/2026-09-19 UK AQ Media Facebook/UK_AQ_Media_Facebook_Plan.md`](../../plans/2026-09-19%20UK%20AQ%20Media%20Facebook/UK_AQ_Media_Facebook_Plan.md). It is non-authoritative and MUST follow `media_facebook_contract.md`.
 
 ## Current integration boundary
 

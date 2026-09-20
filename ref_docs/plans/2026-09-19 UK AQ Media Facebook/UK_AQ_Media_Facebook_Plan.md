@@ -2,12 +2,12 @@
 
 **Date:** 19 September 2026  
 **Updated:** 20 September 2026  
-**Status:** Draft implementation plan; Meta/Page credential setup complete; Stage 0 repository review complete; Facebook publishing not yet implemented  
+**Status:** Active implementation plan; Stage 0, migration/core foundation, dormant Media-admin integration and Meta provider verification complete; remote Facebook publishing remains disabled pending provider/Queue implementation and TEST acceptance  
 **Implementation repository:** private `UK-AQ/uk-aq-media`  
 **System-docs repository:** `TEST-uk-aq/uk-aq-system-docs`  
 **Runtime owner:** UK AQ Media Cloudflare account  
 **Target:** Facebook Page `UK AQ - ukaq.co.uk`, Page ID `1336337862891538`  
-**Related authority:** [`../../system_docs/media/media_contract.md`](../../system_docs/media/media_contract.md), [`../../system_docs/media/media_bluesky_contract.md`](../../system_docs/media/media_bluesky_contract.md)
+**Related authority:** [`../../system_docs/media/media_contract.md`](../../system_docs/media/media_contract.md), [`../../system_docs/media/media_bluesky_contract.md`](../../system_docs/media/media_bluesky_contract.md), [`../../system_docs/media/media_facebook_contract.md`](../../system_docs/media/media_facebook_contract.md)
 
 ## 1. Purpose
 
@@ -26,7 +26,7 @@ The Facebook path should reuse the architectural lessons already implemented for
 
 Facebook should be implemented as a parallel social publisher, not as Facebook-specific branches inside `bluesky.ts`.
 
-This plan is non-authoritative. Before Facebook publishing is enabled beyond initial TEST acceptance, the agreed load-bearing Facebook behaviour should be promoted into a dedicated contract under `system_docs/media/`. Existing Media and Bluesky contracts continue to own their current areas.
+This plan is non-authoritative. The agreed load-bearing Facebook behaviour is now authoritative in `system_docs/media/media_facebook_contract.md`; this plan records sequencing and completed implementation stages and MUST NOT override that contract. Existing Media and Bluesky contracts continue to own their current areas.
 
 ## 2. Current implementation and Meta setup facts checked 20/09/2026
 
@@ -77,51 +77,68 @@ Established facts:
 - target Page ID: `1336337862891538`;
 - the account managing the Page has `CREATE_CONTENT` and `MANAGE` tasks for it;
 - a long-lived User access token was used to derive the final Page access token;
-- Meta's Access Token Debugger reported the final credential as a valid `Page` token with `Expires: Never`;
+- Meta's Access Token Debugger reported the final credential as a valid `Page` token with `Expires: Never`, and separately reported a Data Access Expiry;
 - using that Page token, `/me?fields=id,name` resolved to Page ID `1336337862891538` and name `UK AQ - ukaq.co.uk`.
 
-The Page token remains revocable/invalidatable by Meta or by later account/Page/app changes even though the debugger shows no fixed expiry. Runtime code therefore still needs fail-closed identity validation and a documented credential-rotation/recovery procedure.
+`Expires: Never` is observed token-expiry metadata, not a guarantee of permanently unattended operation. The separate Data Access Expiry can require renewed data access/re-authorisation, and the Page token also remains revocable/invalidatable through account, Page, permission or app changes. Runtime code therefore still needs fail-closed identity validation, lifecycle monitoring and a documented credential replacement/re-authorisation procedure.
 
 The runtime credential is the final **Page access token**. The User access token is not required by the Media runtime.
 
 No token value, User token, app secret or other credential may be committed to GitHub, copied into D1, included in Queue messages, returned to browser code, logged, or added to documentation.
 
 
-### 2.2 Stage 0 repository findings accepted 20/09/2026
+### 2.2 Completed provider-independent implementation
 
-The Stage 0 repository review found the manual-only Facebook V1 structurally viable.
+Stage 0, migration/core foundation and dormant Media-admin integration are complete and merged.
 
-Accepted implementation facts:
+Implemented foundation:
 
-- the current highest Media migration is `0025_manual_bluesky_approval.sql`; the Facebook migration should therefore be `0026` if no intervening migration lands first;
-- `media-admin` already owns durable individual and bulk approval idempotency;
-- the existing request identity includes `post_to_bluesky`; Facebook should extend the same durable identity with `post_to_facebook`;
-- `media-discovery` already hosts outbound Bluesky publication and dispatches Queue work by concrete queue name;
-- a dedicated `uk-aq-media-facebook` Queue can be added to the existing Worker topology without adding another Worker;
-- `media-admin` should produce Facebook wake-ups while `media-discovery` should produce/consume them and hold the Facebook Page credential;
-- the visible Media dashboard is owned by the separate `UK-AQ/uk-aq-ops` repository, not by `uk-aq-media`;
-- Facebook must not inherit Bluesky thumbnail eligibility;
-- Facebook must not inherit Bluesky's stale-`posting` recovery semantics unless Meta provides an equivalent safe remote idempotency primitive;
-- if Meta does not provide such a primitive, Facebook requires an explicit `unknown_remote_state` that is never silently requeued.
+- migration `0026` exists;
+- `media_admin_status_requests` and `media_admin_bulk_status_requests` include `post_to_facebook`;
+- `media_facebook_settings`, `media_facebook_settings_requests` and `media_facebook_publications` exist;
+- publishing defaults disabled, with the target Page identity configured and `graph_api_version` currently unset pending use by the provider implementation;
+- pure `packages/core/src/facebook.ts` deterministic rendering exists;
+- durable state includes explicit `unknown_remote_state`;
+- no automatic Facebook trigger exists.
 
-Stage 0 could not access current official Meta documentation from the Codex Cloud environment. The exact Page-post endpoint/fields, response/read-back shape, provider idempotency capability, app/review/mode requirements, rate restrictions, and Graph API support horizon therefore remain provider checks that must be resolved before the remote Facebook publisher is finalised.
+Implemented dormant admin integration:
 
-### 2.3 Existing Bluesky bulk-approval defect and parallel repair
+- individual and bulk approval accept optional `post_to_facebook`;
+- Facebook intent participates in durable `Idempotency-Key` identity;
+- individual and bulk publication rows can be created transactionally;
+- Facebook thumbnail eligibility is independent from Bluesky;
+- authenticated `GET/PUT /admin/facebook/settings` exists;
+- enablement is deliberately rejected with `facebook_publisher_not_configured`;
+- article list/detail DTOs expose bounded Facebook state.
 
-The existing visible dashboard's bulk **Approved + Post to Bluesky** operation is currently reported as not working.
+No Facebook Queue or Worker secret exists yet. No Meta HTTP call or remote Facebook publisher exists. Facebook remains disabled.
 
-Repository review shows:
+### 2.3 Meta provider verification completed 20/09/2026
 
-- the Media backend already has a dedicated `POST /admin/articles/bulk/approve` path and durable bulk Bluesky publication logic;
-- the online Ops dashboard API Worker contains a specific translation from `/api/media/articles/bulk-approve` to `/admin/articles/bulk/approve`;
-- the local Ops compatibility proxy does not currently expose the same bulk-approve route.
+The following is **Meta Developer Assistant-confirmed on 20/09/2026** for Graph API v26.0. This records the supplied provider verification; it does not claim that Codex independently fetched Meta's linked reference pages.
 
-The Bluesky bulk defect is being treated as a separate `UK-AQ/uk-aq-ops` repair because the visible dashboard/proxy is owned there.
+- create a Page link post with `POST /{page-id}/feed`, `message`, `link` and the Page access token;
+- successful creation returns JSON field `id`, the exact created Page-post ID, which must be persisted;
+- exact read-back is available through `GET /{post-id}`, while `GET /{page-id}/feed` reads the Page feed;
+- Page feed creation has no supported client-supplied idempotency key/token equivalent;
+- for the present app, used only by its own developer/admin for the single Page they manage with the appropriate Page task, App Review, Advanced Access, Business Verification and Live-mode activation are not required for this self-admin development-mode use; this must not be generalised to other users or third-party Pages;
+- supplied error examples are `80001` (Page-account rate limiting/too many calls), `100` (invalid parameter), `190` (invalid OAuth token) and `200` (permissions error). These examples do not make arbitrary Graph errors retry-safe.
 
-That repair may proceed **in parallel** with Facebook work in `UK-AQ/uk-aq-media`. It does not block provider-independent Facebook schema/core/admin work.
+A permalink may be stored only when returned or obtained through an officially supported exact read-back field. Do not construct one from an assumed URL pattern.
 
-Before combined Bluesky + Facebook bulk acceptance, the existing Bluesky bulk flow must have completed one real TEST operation successfully so that Facebook is not layered onto an unverified bulk UI/proxy path.
+### 2.4 Existing Bluesky bulk-approval repair status
 
+The Ops routing repair for the visible dashboard's bulk **Approved + Post to Bluesky** path has now been merged in `TEST-uk-aq/uk-aq-ops` PR #72.
+
+Repository review and the merged repair establish that:
+
+- the Media backend exposes the authoritative `POST /admin/articles/bulk/approve` path and durable bulk Bluesky publication logic;
+- the online Ops dashboard API Worker already translated `/api/media/articles/bulk-approve` to `/admin/articles/bulk/approve`;
+- the local Ops compatibility proxy now has matching route support and translation, preserving the bounded body, content type, `Idempotency-Key` and server-side authentication.
+
+That repair closes the known structural local-proxy discrepancy. It does **not** by itself prove the full deployed bulk Bluesky operation.
+
+Before combined Bluesky + Facebook bulk acceptance, complete one real TEST bulk **Approved + Post to Bluesky** operation successfully. If it still fails, capture the returned HTTP status, bounded Media JSON error and request `Idempotency-Key` so the remaining runtime/backend failure can be isolated without re-opening the already-corrected Ops route mapping.
 
 ## 3. Proposed V1 product scope
 
@@ -205,9 +222,7 @@ A dedicated Facebook template may be stored in D1 rather than forcing Facebook t
 
 ## 5. Link-preview and image boundary
 
-The preferred Facebook V1 is a normal Page link post where Meta builds the article preview from the canonical publisher URL.
-
-Conceptually:
+Facebook V1 uses the Meta Developer Assistant-confirmed Graph API v26.0 Page link-post shape:
 
 ```text
 POST /{page-id}/feed
@@ -216,111 +231,43 @@ message = rendered UK AQ Facebook text
 link    = canonical publisher article URL
 ```
 
-Do not initially copy the Bluesky thumbnail-fetch -> uploadBlob -> explicit external-card pipeline into Facebook.
+Meta builds the article preview from the canonical publisher URL. Do not copy the Bluesky thumbnail-fetch -> uploadBlob -> explicit external-card pipeline into Facebook.
 
-That simplification is conditional on the targeted Phase 0 API check confirming the current Pages API still supports the intended link-post shape and that the result is acceptable for the Page.
-
-Facebook link-preview image availability should initially be treated as platform/publisher metadata behaviour rather than as a new UK AQ image-fetch entitlement.
+Facebook link-preview image availability should be treated as platform/publisher metadata behaviour rather than as a new UK AQ image-fetch entitlement.
 
 Do not broaden Media's image permissions merely to force a Facebook thumbnail.
 
-If Meta's current API requires a materially different supported posting shape, stop and update this plan/contract before implementing an unrelated image-upload workaround.
+If Meta changes the supported posting contract or the deployed API behaviour materially differs from the provider verification recorded on 20/09/2026, stop and update the authoritative Facebook contract and this plan before implementing an unrelated image-upload workaround.
 
-## 6. Phase 0: Stage 0 outcome and remaining provider checks
+## 6. Phase 0: completed foundation and provider decisions
 
-The repository-side structural review is complete. No speculative pre-implementation functional test suite is required.
+Stage 0 repository review, provider-independent schema/core work, dormant admin integration and Meta provider verification are complete. The remaining implementation begins with the server-side provider and dedicated Queue runtime.
 
-### 6.1 Repository-side findings complete
+### 6.1 Completed repository-side work
 
-The following are now established from the current Media implementation:
+Migration `0026`, Facebook settings/request/publication state, deterministic core rendering, independent admin intent and bounded DTO state are merged. The admin API intentionally refuses enablement with `facebook_publisher_not_configured` until the remote publisher exists. No automatic trigger or historical rows were added.
 
-- next migration: `0026` if no intervening migration lands first;
-- extend both durable admin request tables with `post_to_facebook INTEGER NOT NULL DEFAULT 0`;
-- add separate Facebook settings and publication tables;
-- add a Facebook settings-request idempotency table if Facebook settings PUT follows the existing Bluesky settings semantics;
-- do not create an automatic Facebook approval trigger in manual-only V1;
-- do not create historical Facebook publication rows;
-- do not add article-level uniqueness that would prevent deliberate later reposts;
-- use a dedicated `uk-aq-media-facebook` Queue;
-- keep the existing three-Worker topology;
-- `media-admin` is the Facebook Queue producer;
-- `media-discovery` is the Facebook Queue producer/consumer and secret holder;
-- visible dashboard work belongs in `UK-AQ/uk-aq-ops`;
-- Facebook eligibility is independent of Bluesky thumbnail eligibility.
+### 6.2 Confirmed provider operation
 
-### 6.2 Remaining current Meta Pages API checks
-
-Before the remote publisher implementation is finalised, use current official Meta documentation to confirm:
-
-1. the current Graph API endpoint and supported fields for publishing a normal link post to a Facebook Page, expected to be the current equivalent of `POST /{page-id}/feed` with `message` and canonical article `link`;
-2. whether App Review, Business Verification, Live mode or another Meta approval step is required for this exact single-Page unattended server-side automation;
-3. that Graph API `v26.0` is appropriate for the implementation and its relevant support/deprecation horizon;
-4. current request/rate restrictions relevant to a low-volume Page publisher;
-5. the exact returned published-post identity shape and supported read-back/reconciliation fields;
-6. whether Meta provides a supported client-supplied idempotency/request key for Page feed creation;
-7. the documented error categories needed to distinguish a definite rejection from an ambiguous possibly-accepted write.
-
-The following do not need to be rediscovered unless current Meta documentation contradicts the completed setup:
-
-- target Page ID/name;
-- granted Page permissions;
-- basic User-token -> Page-token acquisition flow;
-- the fact that the final Page token resolves to the UK AQ Page.
-
-Do not implement the remote Meta write from remembered or third-party API details if these official checks remain unresolved.
+Use Graph API v26.0 `POST /{page-id}/feed` with `message` and canonical article `link`. Validate and persist the successful response's exact `id`. Use `GET /{post-id}` for exact read-back. There is no supported client idempotency primitive. The present single-Page/self-admin development-mode arrangement has the review/access/mode position recorded in section 2.3; re-evaluate it before expanding to other users or Pages.
 
 ### 6.3 Established credential model
 
-The runtime credential model is established:
+The runtime credential is the Page access token, stored only as a Cloudflare Worker secret on `media-discovery`; the User access token is not a runtime dependency. The configured Page ID is the security identity and must be validated before every public mutation. A matching ID with a different name is configuration/name drift, not a wrong credential.
 
-- credential type: Facebook **Page access token**;
-- target Page ID: `1336337862891538`;
-- target Page name at setup: `UK AQ - ukaq.co.uk`;
-- token identity: manually verified against the Page;
-- token debugger status at setup: valid Page token, `Expires: Never`;
-- storage boundary: Cloudflare Worker secret on `media-discovery` only;
-- the long-lived User token is not a runtime dependency.
+The debugger's `Expires: Never` value and its separate Data Access Expiry must remain distinct. Operations must account for data-access re-authorisation, revocation, Page-task and permission changes; the credential must not be described as permanent.
 
-Before deployment, finalise only:
+### 6.4 Final remote-write and reconciliation rule
 
-- the Cloudflare secret name;
-- the exact supported Page-identity validation call;
-- revoked/invalid credential classification;
-- deliberate token replacement/rotation procedure;
-- whether an app secret is genuinely required by the supported server-side flow.
+Because creation has no client idempotency primitive:
 
-Do not store a personal Facebook password, interactive login cookie, User access token or Page access token outside the approved secret-management boundary.
-
-### 6.4 Remote-write idempotency and ambiguous failures
-
-This remains load-bearing.
-
-Bluesky retries are safe because the implementation persists a deterministic AT Protocol record key before the remote write and can read back that exact record.
-
-Facebook must not inherit that behaviour unless current official Meta documentation confirms an equivalent client-controlled idempotency primitive.
-
-If Meta provides a reliable supported idempotency mechanism, use it.
-
-If it does not, use this conservative model:
-
-- definite failures before the Page-post request can retry where appropriate;
-- definite API responses documented as transient and proving the post was not created may retry with bounded backoff;
-- once the Page-post request may have reached Meta, a timeout, connection reset, cancellation, truncated/unusable success response, or similar uncertainty becomes `unknown_remote_state`;
-- `unknown_remote_state` must never be silently or automatically requeued;
-- a stale `posting` claim that may have crossed the remote-dispatch boundary becomes `unknown_remote_state`, not `queued`;
-- if an exact validated remote post ID was durably captured, the officially supported read-back operation may reconcile it;
-- searching the Page feed for similar text/link/time is not sufficient proof of identity;
-- operator retry from `unknown_remote_state` is allowed only as an explicit duplicate-risk decision or after authoritative reconciliation proves absence.
-
-Retryable known-safe failures may remain represented durably as:
-
-```text
-status = queued
-last_error_code = <bounded code>
-next_attempt_at = <future timestamp>
-```
-
-and should be presented to the operator as **Retry scheduled**, rather than requiring a separate `retryable_failed` durable status.
+- a proven pre-dispatch failure may remain/re-enter `queued` under bounded retry rules;
+- a received validated error explicitly classified as safe, such as documented rate-limit code `80001`, may return to `queued` with bounded backoff;
+- input/auth/permission examples `100`, `190` and `200` must not blindly retry and should become `blocked` or another explicit non-automatic state;
+- once dispatch may have occurred, any timeout, reset/drop, aborted fetch, Worker termination, response-body failure, oversized response, invalid/truncated/unparseable success response or other outcome without a confirmed post ID becomes `unknown_remote_state`;
+- `unknown_remote_state` is excluded from automatic backlog selection;
+- a stale `posting` row with `remote_request_started_at IS NULL` may be requeued only when all durable evidence proves no dispatch; one with a non-null marker becomes `unknown_remote_state` unless exact authoritative reconciliation proves the result;
+- with an exact post ID, `GET /{post-id}` may reconcile authoritatively; without one, Page-feed similarity is operator evidence only and cannot prove identity, absence or automatic deduplication.
 
 ### 6.5 Admin idempotency rule
 
@@ -345,21 +292,9 @@ Required semantics:
 - Bluesky-only requests must not be rejected by Facebook availability rules;
 - if both platforms are requested, all pre-commit platform eligibility must pass before the combined transition is accepted.
 
-## 7. Phase 1: Facebook contract and D1 state
+## 7. Phase 1: Facebook contract and D1 state — complete
 
-Promote the accepted Stage 0 load-bearing behaviour into the dedicated authoritative contract. Provider-specific write/read-back details must remain explicitly provisional until confirmed from current official Meta documentation.
-
-Create:
-
-```text
-system_docs/media/media_facebook_contract.md
-```
-
-and add it to the Media documentation index.
-
-The contract should fix the final account, eligibility, manual-publication, message, failure-isolation, secret, retry and operational rules before Facebook is enabled.
-
-Then add a forward-only Media migration, expected to be `0026` if no intervening migration has landed. Do not hard-code that number without rechecking the migration directory immediately before implementation.
+The authoritative `system_docs/media/media_facebook_contract.md` and its Media README index entry are complete. Migration `0026` and the provider-independent D1/core foundation are also complete. This phase is retained as an implementation record; the contract now owns behaviour.
 
 ### 7.1 Facebook settings
 
@@ -437,7 +372,7 @@ unknown_remote_state
 
 Known-safe retryable failures should return to `queued` with bounded `last_error_code` and `next_attempt_at`. `unknown_remote_state` is a held state and must not be selected by automatic backlog processing.
 
-Treat `facebook_permalink_url` as nullable until the officially supported response/read-back semantics are confirmed. Do not construct a permalink from assumptions.
+Treat `facebook_permalink_url` as nullable. Persist a permalink only when an officially supported create response or exact-ID read-back supplies it; do not construct one from assumptions.
 
 Logical publication reasons for the initial manual-only V1 can remain narrow, for example:
 
@@ -471,7 +406,7 @@ For the same `Idempotency-Key`:
 - changing `post_to_facebook` under the same key is a conflict, not a second publication;
 - changing `post_to_bluesky` under the same key remains a conflict under the existing rule.
 
-## 8. Phase 2: shared social-publishing primitives
+## 8. Phase 2: shared social-publishing primitives — complete where required
 
 Do not generalise the whole codebase prematurely, but extract small shared primitives where Bluesky and Facebook genuinely need the same behaviour.
 
@@ -500,11 +435,11 @@ Do not create a giant `social.ts` with provider conditionals for unrelated AT Pr
 
 Do not introduce a shared `SocialPublicationResult` merely for symmetry. Bluesky URI/CID and Facebook post-ID/permalink/read-back semantics are different. Introduce a common type only if later implementation demonstrates a genuinely shared boundary without weakening provider-specific validation.
 
-## 9. Phase 3: Facebook renderer
+## 9. Phase 3: Facebook renderer — complete
 
 Add deterministic Facebook post rendering under the core package.
 
-The renderer should accept bounded Media fields rather than database rows or arbitrary HTML.
+The implemented renderer accepts bounded Media fields rather than database rows or arbitrary HTML.
 
 Conceptual input:
 
@@ -528,9 +463,9 @@ Facebook Page tagging behaviour and permissions are platform-specific and unnece
 
 If publisher tagging is desired later, add explicit configured Facebook identities rather than guessing from publisher names.
 
-## 10. Phase 4: Facebook publisher and Queue consumer
+## 10. Phase 4: Facebook publisher and Queue consumer — next
 
-Add a dedicated Facebook publication module, likely:
+The next stage adds a dedicated Facebook publication module, likely:
 
 ```text
 apps/media-discovery/src/facebook.ts
@@ -561,9 +496,9 @@ Queue messages must not contain:
 - image bytes;
 - large metadata payloads.
 
-## 11. Phase 5: Media admin API
+## 11. Phase 5: Media admin API — dormant integration complete
 
-Extend existing authenticated admin mutation surfaces rather than creating a separate browser-to-Facebook publishing endpoint.
+The existing authenticated admin mutation surfaces now carry dormant Facebook intent rather than creating a separate browser-to-Facebook publishing endpoint. They remain unable to enable or dispatch Facebook until Phase 4 is implemented.
 
 ### 11.1 Individual approval
 
@@ -830,65 +765,38 @@ Before Facebook publishing is considered established TEST behaviour:
 
 ## 20. Implementation sequence
 
-Recommended sequence, with the Ops repair allowed to run in parallel:
-
 ```text
 Completed
   Meta app/Page credential setup
   Stage 0 repository structural review
+  Meta Developer Assistant provider verification (20/09/2026)
+  authoritative Facebook contract and README index
+  migration 0026 and pure deterministic core foundation
+  dormant individual/bulk admin integration and bounded DTO state
 
-Remaining provider check
-  verify current official Meta write/read-back/idempotency/error contract
-  before finalising the remote publisher
-
-Parallel Ops workstream
-  repair/verify existing bulk Approved + Post to Bluesky path
-  in UK-AQ/uk-aq-ops
-  deploy to TEST and complete one real bulk Bluesky operation
-  this does not block provider-independent Media Facebook work
-
-Phase 1
-  promote Stage 0 decisions into media_facebook_contract.md
-  update this plan where provider verification changes assumptions
-
-Phase 2
-  forward-only D1 settings/publication/admin-intent migration
-  pure deterministic Facebook core renderer/types
-  no remote Meta write
-
-Phase 3
-  authenticated Media admin settings/mutation/status integration
-  individual + bulk Facebook intent
-  dedicated Facebook Queue producer binding
+Next implementation stage
+  server-side Graph API provider in media-discovery
+  dedicated uk-aq-media-facebook Queue producer/consumer bindings
+  durable remote_request_started_at dispatch boundary
+  conservative error classification and unknown_remote_state handling
   publishing remains disabled
-
-Phase 4
-  server-side Facebook publisher + Queue consumer
-  implement only officially verified Meta API behaviour
-  conservative unknown_remote_state boundary
 
 Parallel Ops Facebook workstream
   Facebook checkbox/settings/status/reconciliation UI
   in UK-AQ/uk-aq-ops
 
-Phase 5
-  Cloudflare TEST Queue/bindings/secret/migration/deployment
+Then
+  Cloudflare TEST Queue/bindings/secret/deployment
   publishing disabled initially
+  deployed identity check and TEST operational acceptance
+  one deliberate Facebook-only publication
+  one combined Bluesky + Facebook approval after bulk Bluesky verification
 
-Operational acceptance
-  deployed identity check
-  one deliberate Facebook-only Page publication
-  one combined Bluesky + Facebook approval
-  only after existing bulk Bluesky path is already verified
-
-Phase 6
-  separate decision on automatic auto-approved Facebook publishing
-
-Documentation handover
-  make accepted behaviour authoritative
+Deferred
+  separate product/contract decision on automatic Facebook publishing
 ```
 
-The first implementation should stop after manual publication is operating reliably unless automatic Facebook posting is explicitly approved.
+Facebook must remain disabled until the server-side stage and TEST acceptance are complete. The first implementation remains manual-only.
 
 ## 21. Definition of done for initial V1
 
