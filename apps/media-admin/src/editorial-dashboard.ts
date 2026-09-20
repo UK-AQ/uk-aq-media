@@ -5,7 +5,9 @@ import {
   reconcileHomepageLatestSix, sourcePresentationPlaceholderPath,
   remotePreviewUrl, z,
   SourceSchema,
+  type Status,
 } from '@uk-aq-media/core';
+import { directPublishState, facebookEligibility } from './direct-publish-eligibility';
 import {
   configuredPublisherRssRouteKeys, discoverPublisherRss, fetchArticleHeadMetadata,
 } from '@uk-aq-media/discovery';
@@ -408,6 +410,16 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
   const manualPostReason = article.status === 'pending' ? 'pending_approved'
     : article.status === 'rejected' ? 'rejected_repost'
     : article.status === 'hidden' ? 'unhidden_repost' : null;
+  const facebookCheck = article.status === 'approved'
+    ? await facebookEligibility(db, [{ id, title: String(article.title),
+      publisher: String(article.publisher), canonical_url: String(article.canonical_url) }])
+    : null;
+  const blueskyDirect = directPublishState('bluesky', article.status as Status,
+    String(blueskyPublications[0]?.status ?? '') || null, blueskyCount?.post_count ?? 0,
+    thumbnailEligible ? null : 'thumbnail_missing');
+  const facebookDirect = directPublishState('facebook', article.status as Status,
+    String(facebook.results[0]?.status ?? '') || null, facebookCount?.post_count ?? 0,
+    facebookCheck?.failures[0]?.error ?? null);
   const presentationImage = hasPermittedPresentationImage({
     source_key: String(article.source_key),
     og_image_url: typeof article.og_image_url === 'string' ? article.og_image_url : null,
@@ -420,6 +432,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     bluesky: { post_count: blueskyCount?.post_count ?? 0,
       publication_count: blueskyCount?.publication_count ?? 0,
       latest_status: blueskyPublications[0]?.status ?? null,
+      ...blueskyDirect,
       manual_post_available: manualPostReason !== null && thumbnailEligible,
       manual_post_reason: manualPostReason,
       manual_post_unavailable_reason: manualPostReason && !thumbnailEligible ? 'thumbnail_missing' : null,
@@ -427,6 +440,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     facebook: { post_count: facebookCount?.post_count ?? 0,
       publication_count: facebookCount?.publication_count ?? 0,
       latest_status: facebook.results[0]?.status ?? null,
+      ...facebookDirect,
       manual_post_reason: manualPostReason,
       publications: facebook.results } });
 }

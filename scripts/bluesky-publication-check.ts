@@ -122,9 +122,10 @@ class SqliteD1 {
   }
 }
 
-function applyMigrations(database: DatabaseSync): void {
+function applyMigrations(database: DatabaseSync, through = '9999'): void {
   database.exec('PRAGMA foreign_keys = ON');
-  for (const filename of readdirSync('migrations').filter(value => /^\d+.*\.sql$/u.test(value)).sort()) {
+  for (const filename of readdirSync('migrations').filter(value =>
+    /^\d+.*\.sql$/u.test(value) && value.slice(0, 4) <= through).sort()) {
     database.exec(readFileSync(`migrations/${filename}`, 'utf8'));
   }
 }
@@ -281,6 +282,7 @@ function statusRaceDatabase(): { sqlite: DatabaseSync; facade: SqliteD1; env: Me
   return { sqlite, facade, env: {
     MEDIA_DB: facade as unknown as D1Database,
     MEDIA_BLUESKY_QUEUE: queue,
+    MEDIA_FACEBOOK_QUEUE: queue,
     MEDIA_ADMIN_TOKEN: FIXTURE_ADMIN_TOKEN,
   } as MediaAdminEnv, wakes };
 }
@@ -336,6 +338,220 @@ async function invokeStatus(env: MediaAdminEnv, request: Request): Promise<{
 
 function scalar(sqlite: DatabaseSync, sql: string, ...values: SqlValue[]): number {
   return Number((sqlite.prepare(sql).get(...values) as { value: number }).value);
+}
+
+function checkPopulatedManualPublishMigration(): void {
+  const sqlite = new DatabaseSync(':memory:');
+  applyMigrations(sqlite, '0027');
+  const now = '2026-09-20T12:00:00.000Z';
+  sqlite.prepare(`INSERT INTO media_sources
+    (source_key, name, canonical_domain, source_type, enabled, publication_policy,
+     review_level, priority, discovery_method, discovery_config_json,
+     content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
+    VALUES ('bluesky-race-fixture', 'Fixture', 'fixture.example', 'publisher', 1,
+      'manual', 'standard', 50, 'deferred', '{}', 'discovery_metadata_only',
+      'disabled', 'remote_preview', ?, ?)`).run(now, now);
+  insertStatusFixture(sqlite, 300, 'approved');
+  sqlite.prepare(`INSERT INTO media_bluesky_publications
+    (id, article_id, publication_key, publication_reason, status, attempt_count,
+     record_key, last_error_code, next_attempt_at, created_at, last_attempted_at, updated_at)
+    VALUES (11, 300, 'migration-blue', 'pending_approved', 'failed', 2,
+      'record-key', 'fixture_error', ?, ?, ?, ?)`).run(now, now, now, now);
+  sqlite.prepare(`INSERT INTO media_facebook_publications
+    (id, article_id, publication_key, publication_reason, status, attempt_count,
+     remote_request_started_at, unknown_at, last_error_code, created_at, updated_at)
+    VALUES (12, 300, 'migration-facebook', 'pending_approved',
+      'unknown_remote_state', 1, ?, ?, 'ambiguous', ?, ?)`).run(now, now, now, now);
+  for (const table of ['media_bluesky_publications', 'media_facebook_publications']) {
+    sqlite.prepare(`INSERT INTO ${table}
+      (id, article_id, publication_key, publication_reason, status, created_at, updated_at)
+      VALUES (40, 300, ?, 'pending_approved', 'failed', ?, ?)`)
+      .run(`deleted-${table}`, now, now);
+    sqlite.prepare(`DELETE FROM ${table} WHERE id = 40`).run();
+  }
+  const rows = ['media_bluesky_publications', 'media_facebook_publications'].map(table =>
+    sqlite.prepare(`SELECT * FROM ${table} ORDER BY id`).all());
+  const columns = ['media_bluesky_publications', 'media_facebook_publications'].map(table =>
+    sqlite.prepare(`PRAGMA table_info(${table})`).all());
+  const indexes = ['media_bluesky_publications', 'media_facebook_publications'].map(table =>
+    sqlite.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ?
+      ORDER BY name`).all(table).map(row => String(row.name)));
+  const trigger = (sqlite.prepare(`SELECT sql FROM sqlite_master
+    WHERE name = 'media_bluesky_automatic_outbox'`).get() as { sql: string }).sql;
+  sqlite.exec(readFileSync('migrations/0028_manual_social_publish.sql', 'utf8'));
+  for (const [index, table] of ['media_bluesky_publications', 'media_facebook_publications'].entries()) {
+    assert.deepEqual(sqlite.prepare(`SELECT * FROM ${table} ORDER BY id`).all(), rows[index]);
+    assert.deepEqual(sqlite.prepare(`PRAGMA table_info(${table})`).all(), columns[index]);
+    assert.deepEqual(sqlite.prepare(`SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND tbl_name = ? ORDER BY name`).all(table)
+      .map(row => String(row.name)), indexes[index]);
+    assert.equal(scalar(sqlite, `SELECT seq AS value FROM sqlite_sequence WHERE name = ?`, table), 40);
+    const result = sqlite.prepare(`INSERT INTO ${table}
+      (article_id, publication_key, publication_reason, status, created_at, updated_at)
+      VALUES (300, ?, 'manual_repost', 'queued', ?, ?)`).run(`new-${table}`, now, now);
+    assert.equal(Number(result.lastInsertRowid), 41);
+  }
+  const afterTrigger = (sqlite.prepare(`SELECT sql FROM sqlite_master
+    WHERE name = 'media_bluesky_automatic_outbox'`).get() as { sql: string }).sql;
+  assert.equal(afterTrigger.replace(/\s+/gu, ' '), trigger.replace(/\s+/gu, ' '));
+  assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(), []);
+  sqlite.close();
+}
+
+function directRequest(ids: number[], key: string, bluesky: boolean, facebook: boolean,
+  bulk = false): Request {
+  return new Request(`https://media.example/admin/articles/${bulk ? 'bulk' : ids[0]}/publish`, {
+    method: 'POST', headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}`,
+      'Content-Type': 'application/json', 'Idempotency-Key': key },
+    body: JSON.stringify({ ...(bulk ? { article_ids: ids } : {}),
+      post_to_bluesky: bluesky, post_to_facebook: facebook }),
+  });
+}
+
+async function checkDirectPublishContract(): Promise<void> {
+  const { sqlite, env, wakes } = statusRaceDatabase();
+  sqlite.exec('UPDATE media_facebook_settings SET publishing_enabled = 1');
+  insertStatusFixture(sqlite, 301, 'approved');
+  insertStatusFixture(sqlite, 302, 'approved', false);
+  insertStatusFixture(sqlite, 303, 'pending');
+  insertStatusFixture(sqlite, 304, 'approved', false);
+  insertStatusFixture(sqlite, 305, 'approved', false);
+  insertStatusFixture(sqlite, 306, 'approved');
+  insertStatusFixture(sqlite, 307, 'approved');
+  insertStatusFixture(sqlite, 308, 'approved', false);
+  const initialEvents = scalar(sqlite,
+    'SELECT count(*) AS value FROM media_article_events WHERE article_id = 301');
+  const initialRevision = scalar(sqlite, 'SELECT revision AS value FROM media_articles WHERE id = 301');
+
+  const key = 'direct-publish-301-a';
+  const first = await invokeStatus(env, directRequest([301], key, true, true));
+  assert.equal(first.status, 200);
+  assert.equal(first.body.replayed, false);
+  assert.equal((first.body.bluesky_publication as { publication_reason: string }).publication_reason,
+    'manual_post');
+  assert.equal((first.body.facebook_publication as { publication_reason: string }).publication_reason,
+    'manual_post');
+  assert.equal(scalar(sqlite, 'SELECT count(*) AS value FROM media_article_events WHERE article_id = 301'),
+    initialEvents);
+  assert.equal(scalar(sqlite, 'SELECT revision AS value FROM media_articles WHERE id = 301'),
+    initialRevision);
+  assert.equal(wakes.length, 2);
+  const replay = await invokeStatus(env, directRequest([301], key, true, true));
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.replayed, true);
+  assert.deepEqual(replay.body.bluesky_publication, first.body.bluesky_publication);
+  assert.equal(scalar(sqlite, 'SELECT count(*) AS value FROM media_bluesky_publications WHERE article_id = 301'), 1);
+  assert.equal((await invokeStatus(env, directRequest([301], key, true, false))).body.error,
+    'idempotency_key_conflict');
+  assert.equal((await invokeStatus(env, directRequest([301], key, true, true, true))).body.error,
+    'idempotency_key_conflict');
+  const noKey = directRequest([301], 'direct-publish-301-no-key', true, false);
+  noKey.headers.delete('Idempotency-Key');
+  assert.equal((await invokeStatus(env, noKey)).body.error, 'idempotency_key_required');
+  assert.equal((await invokeStatus(env, directRequest([301], 'direct-publish-301-b', true, false))).body.error,
+    'publication_in_progress');
+  sqlite.exec(`UPDATE media_bluesky_publications SET status = 'posted',
+    post_uri = 'at://did:plc:fixture/app.bsky.feed.post/301', post_cid = 'cid-301',
+    posted_at = '2026-09-20T12:00:00.000Z' WHERE article_id = 301`);
+  sqlite.exec(`UPDATE media_facebook_publications SET status = 'posted',
+    facebook_post_id = 'fixture_301', posted_at = '2026-09-20T12:00:00.000Z'
+    WHERE article_id = 301`);
+  const repost = await invokeStatus(env, directRequest([301], 'direct-publish-301-c', true, true));
+  assert.equal(repost.status, 200);
+  assert.equal((repost.body.bluesky_publication as { publication_reason: string }).publication_reason,
+    'manual_repost');
+  assert.equal((repost.body.facebook_publication as { publication_reason: string }).publication_reason,
+    'manual_repost');
+  sqlite.prepare(`INSERT INTO media_bluesky_publications
+    (article_id, publication_key, publication_reason, status, post_uri, post_cid,
+     created_at, posted_at, updated_at)
+    VALUES (306, 'prior-blue-306', 'pending_approved', 'posted',
+      'at://did:plc:fixture/app.bsky.feed.post/306', 'cid-306', ?, ?, ?)`).run(
+      '2026-09-20T12:00:00.000Z', '2026-09-20T12:00:00.000Z', '2026-09-20T12:00:00.000Z');
+  const readyDetail = await invokeStatus(env,
+    new Request('https://media.example/admin/articles/306', {
+      headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}` },
+    }));
+  assert.equal((readyDetail.body.bluesky as { direct_publish_reason: string })
+    .direct_publish_reason, 'manual_repost');
+  assert.equal((readyDetail.body.facebook as { direct_publish_reason: string })
+    .direct_publish_reason, 'manual_post');
+  const mixed = await invokeStatus(env, directRequest([306], 'direct-publish-306-a', true, true));
+  assert.equal(mixed.status, 200);
+  assert.equal((mixed.body.bluesky_publication as { publication_reason: string }).publication_reason,
+    'manual_repost');
+  assert.equal((mixed.body.facebook_publication as { publication_reason: string }).publication_reason,
+    'manual_post');
+  sqlite.prepare(`INSERT INTO media_bluesky_publications
+    (article_id, publication_key, publication_reason, status, created_at, updated_at)
+    VALUES (307, 'prior-failed-307', 'pending_approved', 'failed', ?, ?)`).run(
+      '2026-09-20T12:00:00.000Z', '2026-09-20T12:00:00.000Z');
+  const failedPrior = await invokeStatus(env, directRequest([307], 'direct-publish-307-a',
+    true, false));
+  assert.equal((failedPrior.body.bluesky_publication as { publication_reason: string })
+    .publication_reason, 'manual_post');
+
+  const facebookOnly = await invokeStatus(env, directRequest([302], 'direct-publish-302-a', false, true));
+  assert.equal(facebookOnly.status, 200, 'Facebook must not require a thumbnail');
+  assert.equal(facebookOnly.body.bluesky_publication, null);
+  assert.equal((await invokeStatus(env, directRequest([302], 'direct-publish-302-b', true, false)))
+    .body.error, 'thumbnail_missing');
+  assert.equal((await invokeStatus(env, directRequest([303], 'direct-publish-303-a', false, true)))
+    .body.error, 'article_not_approved');
+  sqlite.exec(`UPDATE media_facebook_publications SET status = 'unknown_remote_state'
+    WHERE article_id = 302`);
+  assert.equal((await invokeStatus(env, directRequest([302], 'direct-publish-302-c', false, true)))
+    .body.error, 'unknown_remote_state');
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_facebook_publications
+    WHERE article_id = 302`), 1);
+
+  const bulkKey = 'direct-bulk-304-a';
+  const rejectedBulk = await invokeStatus(env, directRequest([304, 305], bulkKey, true, true, true));
+  assert.equal(rejectedBulk.status, 409);
+  assert.equal(rejectedBulk.body.error, 'bulk_publish_ineligible');
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_admin_publish_requests
+    WHERE request_key = ?`, bulkKey), 0);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_facebook_publications
+    WHERE article_id IN (304, 305)`), 0);
+  const bulk = await invokeStatus(env, directRequest([305, 304], bulkKey, false, true, true));
+  assert.equal(bulk.status, 200);
+  assert.deepEqual((bulk.body.facebook_publications as Array<{ article_id: number }> )
+    .map(row => row.article_id), [304, 305]);
+  assert.equal((await invokeStatus(env, directRequest([304, 305], bulkKey, false, true, true)))
+    .body.replayed, true);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_facebook_publications
+    WHERE article_id IN (304, 305)`), 2);
+  assert.equal((await invokeStatus(env, directRequest([304, 304], 'direct-bulk-304-b',
+    false, true, true))).body.error, 'duplicate_article_id');
+  assert.equal((await invokeStatus(env, directRequest([304], 'direct-no-platform-a',
+    false, false))).body.error, 'invalid_publish_body');
+
+  const detail = await invokeStatus(env, new Request('https://media.example/admin/articles/302', {
+    headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}` },
+  }));
+  assert.equal(detail.status, 200);
+  assert.equal((detail.body.bluesky as { direct_publish_unavailable_reason: string })
+    .direct_publish_unavailable_reason, 'thumbnail_missing');
+  assert.equal((detail.body.facebook as { direct_publish_unavailable_reason: string })
+    .direct_publish_unavailable_reason, 'unknown_remote_state');
+  const availableDetail = await invokeStatus(env,
+    new Request('https://media.example/admin/articles/306', {
+      headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}` },
+    }));
+  assert.equal((availableDetail.body.bluesky as { direct_publish_unavailable_reason: string })
+    .direct_publish_unavailable_reason, 'publication_in_progress');
+  assert.equal((availableDetail.body.facebook as { direct_publish_unavailable_reason: string })
+    .direct_publish_unavailable_reason, 'publication_in_progress');
+  sqlite.exec('UPDATE media_facebook_settings SET publishing_enabled = 0');
+  assert.equal((await invokeStatus(env, directRequest([308], 'direct-publish-308-a',
+    false, true))).body.error, 'facebook_publishing_disabled');
+  const disabledDetail = await invokeStatus(env,
+    new Request('https://media.example/admin/articles/308', {
+      headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}` },
+    }));
+  assert.equal((disabledDetail.body.facebook as { direct_publish_unavailable_reason: string })
+    .direct_publish_unavailable_reason, 'facebook_publishing_disabled');
+  sqlite.close();
 }
 
 async function checkConcurrentAdminIdempotency(): Promise<void> {
@@ -557,8 +773,10 @@ globalThis.fetch = (async () => {
 console.error = () => undefined;
 
 try {
+  checkPopulatedManualPublishMigration();
   await checkManualApprovalContract();
   await checkConcurrentAdminIdempotency();
+  await checkDirectPublishContract();
 
   const publisherSource = readFileSync('apps/media-discovery/src/bluesky.ts', 'utf8');
   assert.match(publisherSource,
