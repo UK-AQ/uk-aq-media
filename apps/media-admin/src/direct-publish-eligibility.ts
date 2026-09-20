@@ -34,16 +34,23 @@ export type DirectPublishState = {
   direct_publish_unavailable_reason: string | null;
 };
 
+export type DirectPublicationHistory = {
+  hasInProgress: boolean;
+  hasUnknownRemoteState: boolean;
+  postCount: number;
+};
+
 export function directPublishState(platform: 'bluesky' | 'facebook', status: Status,
-  latestStatus: string | null, postCount: number, platformError: string | null): DirectPublishState {
+  history: DirectPublicationHistory, platformError: string | null): DirectPublishState {
   let unavailable: string | null = null;
   if (status !== 'approved') unavailable = 'article_not_approved';
-  else if (platform === 'facebook' && latestStatus === 'unknown_remote_state') {
+  else if (platform === 'facebook' && history.hasUnknownRemoteState) {
     unavailable = 'unknown_remote_state';
-  } else if (latestStatus === 'queued' || latestStatus === 'posting') {
+  } else if (history.hasInProgress) {
     unavailable = 'publication_in_progress';
   } else unavailable = platformError;
   return { direct_publish_available: unavailable === null,
-    direct_publish_reason: unavailable === null ? (postCount > 0 ? 'manual_repost' : 'manual_post') : null,
+    direct_publish_reason: unavailable === null
+      ? (history.postCount > 0 ? 'manual_repost' : 'manual_post') : null,
     direct_publish_unavailable_reason: unavailable };
 }

@@ -389,18 +389,22 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       next_attempt_at, created_at FROM media_bluesky_publications WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
     db.prepare(`SELECT count(*) AS publication_count,
-      count(*) FILTER (WHERE status = 'posted') AS post_count
+      count(*) FILTER (WHERE status = 'posted') AS post_count,
+      count(*) FILTER (WHERE status IN ('queued', 'posting')) AS in_progress_count
       FROM media_bluesky_publications WHERE article_id = ?`)
-      .bind(id).first<{ publication_count: number; post_count: number }>(),
+      .bind(id).first<{ publication_count: number; post_count: number; in_progress_count: number }>(),
     db.prepare(`SELECT id, publication_reason, status, attempt_count, facebook_post_id,
       facebook_permalink_url, last_error_code, next_attempt_at, remote_request_started_at,
       unknown_at, reconciled_at, reconciliation_method, created_at, last_attempted_at,
       posted_at, updated_at FROM media_facebook_publications WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
     db.prepare(`SELECT count(*) AS publication_count,
-      count(*) FILTER (WHERE status = 'posted') AS post_count
+      count(*) FILTER (WHERE status = 'posted') AS post_count,
+      count(*) FILTER (WHERE status IN ('queued', 'posting')) AS in_progress_count,
+      count(*) FILTER (WHERE status = 'unknown_remote_state') AS unknown_remote_count
       FROM media_facebook_publications WHERE article_id = ?`)
-      .bind(id).first<{ publication_count: number; post_count: number }>(),
+      .bind(id).first<{ publication_count: number; post_count: number;
+        in_progress_count: number; unknown_remote_count: number }>(),
   ]);
   const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
     post_url: typeof row.post_uri === 'string' && row.post_uri.startsWith('at://')
@@ -415,10 +419,13 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       publisher: String(article.publisher), canonical_url: String(article.canonical_url) }])
     : null;
   const blueskyDirect = directPublishState('bluesky', article.status as Status,
-    String(blueskyPublications[0]?.status ?? '') || null, blueskyCount?.post_count ?? 0,
+    { hasInProgress: (blueskyCount?.in_progress_count ?? 0) > 0,
+      hasUnknownRemoteState: false, postCount: blueskyCount?.post_count ?? 0 },
     thumbnailEligible ? null : 'thumbnail_missing');
   const facebookDirect = directPublishState('facebook', article.status as Status,
-    String(facebook.results[0]?.status ?? '') || null, facebookCount?.post_count ?? 0,
+    { hasInProgress: (facebookCount?.in_progress_count ?? 0) > 0,
+      hasUnknownRemoteState: (facebookCount?.unknown_remote_count ?? 0) > 0,
+      postCount: facebookCount?.post_count ?? 0 },
     facebookCheck?.failures[0]?.error ?? null);
   const presentationImage = hasPermittedPresentationImage({
     source_key: String(article.source_key),

@@ -787,8 +787,9 @@ type BulkTargetRow = { id: number; status: Status; og_image_url: string | null;
   image_policy: string; source_image_policy: string; title: string; publisher: string;
   canonical_url: string };
 type DirectTargetRow = BulkTargetRow & {
-  bluesky_latest_status: string | null; bluesky_post_count: number;
-  facebook_latest_status: string | null; facebook_post_count: number;
+  bluesky_has_in_progress: number; bluesky_post_count: number;
+  facebook_has_in_progress: number; facebook_has_unknown_remote_state: number;
+  facebook_post_count: number;
 };
 type DirectRequestRow = { request_kind: 'single' | 'bulk'; article_ids_json: string;
   post_to_bluesky: number; post_to_facebook: number };
@@ -992,12 +993,14 @@ async function directPublish(request: Request, env: MediaAdminEnv,
   const placeholders = ids.map(() => '?').join(', ');
   const { results } = await db.prepare(`SELECT a.id, a.status, a.og_image_url,
     a.image_policy, s.image_policy AS source_image_policy, a.title, a.publisher, a.canonical_url,
-    (SELECT p.status FROM media_bluesky_publications p WHERE p.article_id = a.id
-      ORDER BY p.id DESC LIMIT 1) AS bluesky_latest_status,
+    EXISTS (SELECT 1 FROM media_bluesky_publications p WHERE p.article_id = a.id
+      AND p.status IN ('queued', 'posting')) AS bluesky_has_in_progress,
     (SELECT count(*) FROM media_bluesky_publications p WHERE p.article_id = a.id
       AND p.status = 'posted') AS bluesky_post_count,
-    (SELECT p.status FROM media_facebook_publications p WHERE p.article_id = a.id
-      ORDER BY p.id DESC LIMIT 1) AS facebook_latest_status,
+    EXISTS (SELECT 1 FROM media_facebook_publications p WHERE p.article_id = a.id
+      AND p.status IN ('queued', 'posting')) AS facebook_has_in_progress,
+    EXISTS (SELECT 1 FROM media_facebook_publications p WHERE p.article_id = a.id
+      AND p.status = 'unknown_remote_state') AS facebook_has_unknown_remote_state,
     (SELECT count(*) FROM media_facebook_publications p WHERE p.article_id = a.id
       AND p.status = 'posted') AS facebook_post_count
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
@@ -1015,14 +1018,19 @@ async function directPublish(request: Request, env: MediaAdminEnv,
     if (bluesky) {
       const eligibleImage = Boolean(row.og_image_url) && row.image_policy === 'remote_preview' &&
         row.source_image_policy === 'remote_preview';
-      const state = directPublishState('bluesky', row.status, row.bluesky_latest_status,
-        row.bluesky_post_count, eligibleImage ? null : 'thumbnail_missing');
+      const state = directPublishState('bluesky', row.status, {
+        hasInProgress: Boolean(row.bluesky_has_in_progress), hasUnknownRemoteState: false,
+        postCount: row.bluesky_post_count,
+      }, eligibleImage ? null : 'thumbnail_missing');
       if (!state.direct_publish_available) failures.push({ article_id: id, platform: 'bluesky',
         error: state.direct_publish_unavailable_reason! });
     }
     if (facebook) {
-      const state = directPublishState('facebook', row.status, row.facebook_latest_status,
-        row.facebook_post_count, facebookErrors.get(id) ?? null);
+      const state = directPublishState('facebook', row.status, {
+        hasInProgress: Boolean(row.facebook_has_in_progress),
+        hasUnknownRemoteState: Boolean(row.facebook_has_unknown_remote_state),
+        postCount: row.facebook_post_count,
+      }, facebookErrors.get(id) ?? null);
       if (!state.direct_publish_available) failures.push({ article_id: id, platform: 'facebook',
         error: state.direct_publish_unavailable_reason! });
     }
@@ -1046,9 +1054,7 @@ async function directPublish(request: Request, env: MediaAdminEnv,
         OR s.image_policy <> 'remote_preview'))`);
     guardBindings.push(...ids);
     guard.push(`NOT EXISTS (SELECT 1 FROM media_bluesky_publications p
-      WHERE p.article_id IN (${placeholders}) AND p.status IN ('queued', 'posting')
-        AND p.id = (SELECT max(q.id) FROM media_bluesky_publications q
-          WHERE q.article_id = p.article_id))`);
+      WHERE p.article_id IN (${placeholders}) AND p.status IN ('queued', 'posting'))`);
     guardBindings.push(...ids);
   }
   if (facebook) {
@@ -1057,9 +1063,7 @@ async function directPublish(request: Request, env: MediaAdminEnv,
     guardBindings.push(facebookCheck.template);
     guard.push(`NOT EXISTS (SELECT 1 FROM media_facebook_publications p
       WHERE p.article_id IN (${placeholders})
-        AND p.status IN ('queued', 'posting', 'unknown_remote_state')
-        AND p.id = (SELECT max(q.id) FROM media_facebook_publications q
-          WHERE q.article_id = p.article_id))`);
+        AND p.status IN ('queued', 'posting', 'unknown_remote_state'))`);
     guardBindings.push(...ids);
   }
   const idsJson = JSON.stringify(ids);
