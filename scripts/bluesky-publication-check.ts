@@ -496,11 +496,16 @@ async function checkFacebookAutomaticContract(): Promise<void> {
   assert.equal((result.body.settings as { activation_event_id: number }).activation_event_id, watermark);
 
   insertStatusFixture(sqlite, 352, 'approved', false);
-  const automatic = sqlite.prepare(`SELECT approval_event_id, publication_key,
-    publication_reason, status, created_at, updated_at FROM media_facebook_publications
-    WHERE article_id = 352`).get() as Record<string, unknown>;
+  sqlite.prepare(`INSERT INTO media_article_events
+    (article_id, event_key, event_type, actor_type, from_status, to_status,
+     revision, created_at) VALUES (352, 'author-auto:facebook-automatic-352',
+      'auto_approved', 'discovery', 'pending', 'approved', 2,
+      '2026-09-20T12:01:00.000Z')`).run();
   const event = sqlite.prepare(`SELECT id, created_at FROM media_article_events
     WHERE article_id = 352 AND event_type = 'auto_approved'`).get() as { id: number; created_at: string };
+  const automatic = { ...sqlite.prepare(`SELECT approval_event_id, publication_key,
+    publication_reason, status, created_at, updated_at FROM media_facebook_publications
+    WHERE article_id = 352`).get() as Record<string, unknown> };
   assert.deepEqual(automatic, { approval_event_id: event.id,
     publication_key: `approval-event:${event.id}`, publication_reason: 'auto_approved',
     status: 'queued', created_at: event.created_at, updated_at: event.created_at });
