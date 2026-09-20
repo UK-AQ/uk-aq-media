@@ -415,6 +415,120 @@ function checkPopulatedManualPublishMigration(): void {
   sqlite.close();
 }
 
+function checkFacebookAutomaticMigration(): void {
+  const sqlite = new DatabaseSync(':memory:');
+  applyMigrations(sqlite, '0028');
+  const now = '2026-09-20T12:00:00.000Z';
+  sqlite.prepare(`INSERT INTO media_sources
+    (source_key, name, canonical_domain, source_type, enabled, publication_policy,
+     review_level, priority, discovery_method, discovery_config_json,
+     content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
+    VALUES ('facebook-auto-fixture', 'Fixture', 'fixture.example', 'publisher', 1,
+      'auto_approve', 'standard', 50, 'deferred', '{}', 'discovery_metadata_only',
+      'disabled', 'blocked', ?, ?)`).run(now, now);
+  sqlite.prepare(`INSERT INTO media_articles
+    (id, source_key, canonical_url, canonical_url_hash, original_url, title, publisher,
+     discovered_at, last_seen_at, status, review_level, approval_method, image_policy,
+     approved_at, created_at, updated_at)
+    VALUES (350, 'facebook-auto-fixture', 'https://fixture.example/350', ?,
+      'https://fixture.example/350', 'Fixture 350', 'Fixture', ?, ?, 'approved',
+      'standard', 'trusted_source_auto', 'blocked', ?, ?, ?)`).run(
+      'a'.repeat(64), now, now, now, now, now);
+  const migrationWatermark = scalar(sqlite,
+    'SELECT max(id) AS value FROM media_article_events');
+  sqlite.exec('UPDATE media_facebook_settings SET publishing_enabled = 1');
+  sqlite.prepare(`INSERT INTO media_facebook_publications
+    (id, article_id, publication_key, publication_reason, status, attempt_count,
+     facebook_post_id, facebook_permalink_url, last_error_code, next_attempt_at,
+     remote_request_started_at, unknown_at, reconciled_at, reconciliation_method,
+     created_at, last_attempted_at, posted_at, updated_at)
+    VALUES (12, 350, 'preserved-facebook', 'pending_approved', 'posted', 3,
+      'page_post', 'https://facebook.example/post', 'old_error', ?, ?, ?, ?,
+      'exact_post_id', ?, ?, ?, ?)`).run(now, now, now, now, now, now, now, now);
+  sqlite.prepare(`INSERT INTO media_facebook_publications
+    (id, article_id, publication_key, publication_reason, status, created_at, updated_at)
+    VALUES (40, 350, 'deleted-facebook', 'pending_approved', 'failed', ?, ?)`).run(now, now);
+  sqlite.exec(`DELETE FROM media_facebook_publications WHERE id = 40`);
+  const before = sqlite.prepare(`SELECT * FROM media_facebook_publications ORDER BY id`).all();
+  const indexes = sqlite.prepare(`SELECT name FROM sqlite_master
+    WHERE type = 'index' AND tbl_name = 'media_facebook_publications' ORDER BY name`).all();
+  sqlite.exec(readFileSync('migrations/0029_facebook_automatic_publications.sql', 'utf8'));
+  assert.deepEqual(sqlite.prepare(`SELECT * FROM media_facebook_publications ORDER BY id`).all(), before);
+  assert.deepEqual(sqlite.prepare(`SELECT name FROM sqlite_master
+    WHERE type = 'index' AND tbl_name = 'media_facebook_publications' ORDER BY name`).all(), indexes);
+  assert.equal(scalar(sqlite, `SELECT seq AS value FROM sqlite_sequence
+    WHERE name = 'media_facebook_publications'`), 40);
+  assert.equal(scalar(sqlite, `SELECT activation_event_id AS value
+    FROM media_facebook_settings WHERE id = 1`), migrationWatermark);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_facebook_publications
+    WHERE publication_reason = 'auto_approved'`), 0,
+  'migration must not backfill historical automatic approvals');
+  assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(), []);
+  const inserted = sqlite.prepare(`INSERT INTO media_facebook_publications
+    (article_id, publication_key, publication_reason, status, created_at, updated_at)
+    VALUES (350, 'after-migration', 'auto_approved', 'queued', ?, ?)`).run(now, now);
+  assert.equal(Number(inserted.lastInsertRowid), 41);
+  sqlite.close();
+}
+
+function facebookSettingsRequest(key: string, publishingEnabled: boolean): Request {
+  return new Request('https://media.example/admin/facebook/settings', {
+    method: 'PUT', headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}`,
+      'Content-Type': 'application/json', 'Idempotency-Key': key },
+    body: JSON.stringify({ publishing_enabled: publishingEnabled, cooldown_minutes: 10,
+      default_message_template: 'From {publisher}' }),
+  });
+}
+
+async function checkFacebookAutomaticContract(): Promise<void> {
+  const { sqlite, env } = statusRaceDatabase();
+  assert.equal((sqlite.prepare(`SELECT activation_event_id FROM media_facebook_settings
+    WHERE id = 1`).get() as { activation_event_id: number | null }).activation_event_id, null);
+  insertStatusFixture(sqlite, 351, 'pending', false);
+  const watermark = scalar(sqlite, 'SELECT max(id) AS value FROM media_article_events');
+  sqlite.exec(`UPDATE media_facebook_settings SET last_identity_verified_at =
+    '2026-09-20T12:00:00.000Z', last_identity_error_code = NULL`);
+  let result = await invokeStatus(env, facebookSettingsRequest('facebook-settings-enable-001', true));
+  assert.equal(result.status, 200);
+  assert.equal((result.body.settings as { activation_event_id: number }).activation_event_id, watermark);
+  result = await invokeStatus(env, facebookSettingsRequest('facebook-settings-enable-001', true));
+  assert.equal(result.body.replayed, true);
+  assert.equal((result.body.settings as { activation_event_id: number }).activation_event_id, watermark);
+
+  insertStatusFixture(sqlite, 352, 'approved', false);
+  const automatic = sqlite.prepare(`SELECT approval_event_id, publication_key,
+    publication_reason, status, created_at, updated_at FROM media_facebook_publications
+    WHERE article_id = 352`).get() as Record<string, unknown>;
+  const event = sqlite.prepare(`SELECT id, created_at FROM media_article_events
+    WHERE article_id = 352 AND event_type = 'auto_approved'`).get() as { id: number; created_at: string };
+  assert.deepEqual(automatic, { approval_event_id: event.id,
+    publication_key: `approval-event:${event.id}`, publication_reason: 'auto_approved',
+    status: 'queued', created_at: event.created_at, updated_at: event.created_at });
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_facebook_publications
+    WHERE article_id = 352`), 1, 'approval-event publication key must remain idempotent');
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_facebook_publications
+    WHERE approval_event_id <= ?`, watermark), 0);
+
+  for (const [id, type, fromStatus] of [[353, 'approved', 'pending'],
+    [354, 'approved', 'rejected'], [355, 'unhidden', 'hidden']] as const) {
+    insertStatusFixture(sqlite, id, fromStatus === 'pending' ? 'pending' :
+      fromStatus === 'rejected' ? 'rejected' : 'hidden', false);
+    sqlite.prepare(`INSERT INTO media_article_events
+      (article_id, event_key, event_type, actor_type, from_status, to_status,
+       revision, created_at) VALUES (?, ?, ?, 'admin', ?, 'approved', 2, ?)`)
+      .run(id, `manual-facebook-${id}`, type, fromStatus, '2026-09-20T12:01:00.000Z');
+  }
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_facebook_publications
+    WHERE article_id IN (353, 354, 355)`), 0);
+
+  await invokeStatus(env, facebookSettingsRequest('facebook-settings-disable-01', false));
+  await invokeStatus(env, facebookSettingsRequest('facebook-settings-reenable-1', true));
+  assert.equal(scalar(sqlite, `SELECT activation_event_id AS value
+    FROM media_facebook_settings WHERE id = 1`), watermark,
+  'disable and re-enable must preserve the original activation watermark');
+  sqlite.close();
+}
+
 function directRequest(ids: number[], key: string, bluesky: boolean, facebook: boolean,
   bulk = false): Request {
   return new Request(`https://media.example/admin/articles/${bulk ? 'bulk' : ids[0]}/publish`, {
@@ -888,6 +1002,8 @@ console.error = () => undefined;
 
 try {
   checkPopulatedManualPublishMigration();
+  checkFacebookAutomaticMigration();
+  await checkFacebookAutomaticContract();
   await checkManualApprovalContract();
   await checkConcurrentAdminIdempotency();
   await checkDirectPublishContract();

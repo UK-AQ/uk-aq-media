@@ -647,7 +647,8 @@ async function facebookSettings(request: Request, env: MediaAdminEnv): Promise<R
   const select = `SELECT publishing_enabled, page_id, page_name, graph_api_version,
     default_message_template, cooldown_seconds, last_identity_checked_at, last_identity_verified_at,
     last_identity_observed_name, last_identity_name_drift, last_identity_error_code,
-    last_successful_post_at, updated_at FROM media_facebook_settings WHERE id = 1`;
+    activation_event_id, last_successful_post_at, updated_at
+    FROM media_facebook_settings WHERE id = 1`;
   if (request.method === 'GET') return json(present(await env.MEDIA_DB.prepare(select).first()));
   if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
   const key = request.headers.get('Idempotency-Key');
@@ -688,9 +689,12 @@ async function facebookSettings(request: Request, env: MediaAdminEnv): Promise<R
   const now = new Date().toISOString();
   await env.MEDIA_DB.batch([
     env.MEDIA_DB.prepare(`UPDATE media_facebook_settings SET publishing_enabled = ?,
-      cooldown_seconds = ?, default_message_template = ?, updated_at = ? WHERE id = 1`)
+      cooldown_seconds = ?, default_message_template = ?,
+      activation_event_id = CASE WHEN ? = 1 THEN coalesce(activation_event_id,
+        (SELECT coalesce(max(id), 0) FROM media_article_events)) ELSE activation_event_id END,
+      updated_at = ? WHERE id = 1`)
       .bind(Number(parsed.data.publishing_enabled), parsed.data.cooldown_minutes * 60,
-        parsed.data.default_message_template, now),
+        parsed.data.default_message_template, Number(parsed.data.publishing_enabled), now),
     env.MEDIA_DB.prepare(`INSERT INTO media_facebook_settings_requests
       (request_key, request_json, created_at) VALUES (?, ?, ?)`)
       .bind(key, requestJson, now),
