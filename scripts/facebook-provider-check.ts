@@ -17,6 +17,10 @@ const errorKind = async (operation: () => Promise<unknown>) => {
   assert.fail('expected FacebookProviderError');
 };
 
+const oversizedError = new FacebookProviderError('x'.repeat(101), 'blocked');
+assert.equal(oversizedError.code, 'facebook_provider_error');
+assert.equal(oversizedError.message, 'facebook_provider_error');
+
 let request: { url: string; init?: RequestInit } | undefined;
 const identity = await validateFacebookIdentity(token, async (url, init) => {
   request = { url, init };
@@ -32,6 +36,15 @@ assert.deepEqual(await errorKind(() => validateFacebookIdentity(token,
 { code: 'facebook_identity_mismatch', kind: 'blocked' });
 assert.equal((await validateFacebookIdentity(token,
   async () => json({ id: '1336337862891538', name: 'Renamed Page' }))).nameDrift, true);
+assert.deepEqual(await errorKind(() => validateFacebookIdentity(token, async () => {
+  throw new Error('timeout');
+})), { code: 'facebook_transport_failure', kind: 'definite_pre_dispatch' });
+assert.deepEqual(await errorKind(() => validateFacebookIdentity(token,
+  async () => new Response('{'))),
+{ code: 'facebook_response_invalid', kind: 'definite_pre_dispatch' });
+assert.deepEqual(await errorKind(() => validateFacebookIdentity(token,
+  async () => json({ error: { code: 80001, message: 'Too many calls' } }, 429))),
+{ code: 'facebook_error_80001', kind: 'known_safe_retry' });
 
 const createInput = { token, title: 'Headline', publisher: 'Publisher',
   canonical_url: 'https://publisher.example/article', template: 'From {publisher}',
@@ -54,6 +67,9 @@ assert.deepEqual(await errorKind(() => createFacebookPost(createInput, async () 
   throw new Error('timeout');
 })), { code: 'facebook_transport_failure', kind: 'unknown_remote_state' });
 assert.deepEqual(await errorKind(() => createFacebookPost(createInput,
+  async () => new Response('{'))),
+{ code: 'facebook_response_invalid', kind: 'unknown_remote_state' });
+assert.deepEqual(await errorKind(() => createFacebookPost(createInput,
   async () => json({ error: { code: 80001, message: 'Too many calls' } }, 429))),
 { code: 'facebook_error_80001', kind: 'known_safe_retry' });
 for (const code of [100, 190, 200]) {
@@ -70,6 +86,17 @@ assert.deepEqual(await readFacebookPost('1336337862891538_123', token,
 assert.deepEqual(await errorKind(() => readFacebookPost('expected', token,
   async () => json({ id: 'different' }))),
 { code: 'facebook_post_id_mismatch', kind: 'blocked' });
+assert.deepEqual(await errorKind(() => readFacebookPost('expected', token, async () => {
+  throw new Error('timeout');
+})), { code: 'facebook_transport_failure', kind: 'known_safe_retry' });
+assert.deepEqual(await errorKind(() => readFacebookPost('expected', token,
+  async () => new Response('{'))),
+{ code: 'facebook_response_invalid', kind: 'known_safe_retry' });
+for (const code of [100, 190, 200]) {
+  assert.deepEqual(await errorKind(() => readFacebookPost('expected', token,
+    async () => json({ error: { code, message: 'Rejected' } }, 400))),
+  { code: `facebook_error_${code}`, kind: 'blocked' });
+}
 
 assert.equal(classifyStaleFacebookPosting(null), 'queued');
 assert.equal(classifyStaleFacebookPosting('2026-09-20T00:00:00.000Z'), 'unknown_remote_state');

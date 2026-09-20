@@ -16,8 +16,12 @@ export type FacebookFailureKind = 'definite_pre_dispatch' | 'known_safe_retry' |
   'unknown_remote_state' | 'local_state_conflict';
 
 export class FacebookProviderError extends Error {
-  constructor(readonly code: string, readonly kind: FacebookFailureKind) {
-    super(boundCode(code));
+  readonly code: string;
+
+  constructor(code: string, readonly kind: FacebookFailureKind) {
+    const boundedCode = boundCode(code);
+    super(boundedCode);
+    this.code = boundedCode;
     this.name = 'FacebookProviderError';
   }
 }
@@ -96,6 +100,7 @@ function metaError(body: unknown): FacebookProviderError {
 }
 
 async function request(fetchImpl: FacebookFetch, path: string, token: string,
+  safeFailureKind: 'definite_pre_dispatch' | 'known_safe_retry',
   init: RequestInit = {}): Promise<{ response: Response; body: unknown }> {
   let response: Response;
   try {
@@ -103,13 +108,13 @@ async function request(fetchImpl: FacebookFetch, path: string, token: string,
     headers.set('Authorization', `Bearer ${token}`);
     response = await fetchImpl(`${GRAPH_API_BASE}${path}`, { ...init, headers });
   } catch {
-    throw new FacebookProviderError('facebook_transport_failure', 'blocked');
+    throw new FacebookProviderError('facebook_transport_failure', safeFailureKind);
   }
   let body: unknown;
   try { body = await boundedJson(response); }
   catch (error) {
     throw new FacebookProviderError(error instanceof Error ? error.message : 'facebook_response_invalid',
-      'blocked');
+      safeFailureKind);
   }
   if (!response.ok) throw metaError(body);
   return { response, body };
@@ -118,7 +123,7 @@ async function request(fetchImpl: FacebookFetch, path: string, token: string,
 export async function validateFacebookIdentity(token: string, fetchImpl: FacebookFetch = fetch): Promise<{
   id: string; name: string | null; nameDrift: boolean;
 }> {
-  const { body } = await request(fetchImpl, '/me?fields=id%2Cname', token);
+  const { body } = await request(fetchImpl, '/me?fields=id%2Cname', token, 'definite_pre_dispatch');
   const record = body && typeof body === 'object' ? body as Record<string, unknown> : {};
   const id = boundedString(record.id, MAX_ID_LENGTH, 'facebook_identity_invalid');
   if (id !== FACEBOOK_PAGE_ID) {
@@ -184,7 +189,8 @@ export async function readFacebookPost(postId: string, token: string,
   fetchImpl: FacebookFetch = fetch): Promise<{ facebookPostId: string; permalinkUrl: string | null }> {
   const expected = validPostId(postId, 'definite_pre_dispatch');
   const fields = encodeURIComponent('id,permalink_url');
-  const { body } = await request(fetchImpl, `/${encodeURIComponent(expected)}?fields=${fields}`, token);
+  const { body } = await request(fetchImpl, `/${encodeURIComponent(expected)}?fields=${fields}`,
+    token, 'known_safe_retry');
   const record = body && typeof body === 'object' ? body as Record<string, unknown> : {};
   const actual = validPostId(record.id, 'blocked');
   if (actual !== expected) throw new FacebookProviderError('facebook_post_id_mismatch', 'blocked');
