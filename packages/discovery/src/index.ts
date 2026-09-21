@@ -1,5 +1,6 @@
 import {
-  z, loadAuthorRules, loadSource, permitsAi,
+  z, deleteArticleBodyTerms, feedBodySearchTerms, loadAuthorRules, loadSource, permitsAi,
+  replaceArticleBodyTerms,
   reconcileHomepageLatestSix, type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
@@ -381,6 +382,28 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
     await db.batch(statements);
+    // Body indexing is separately permission-gated and best effort: discovery remains valid if
+    // derived-index refresh fails. Feed HTML is never written to durable storage.
+    if (source.search_index_policy === 'feed_body_text') {
+      for (const article of acceptedArticles) {
+        if (article.feed_body_html === null || article.feed_body_html === undefined) continue;
+        try {
+          const row = await db.prepare('SELECT id FROM media_articles WHERE canonical_url_hash = ?')
+            .bind(article.canonical_url_hash).first<{ id: number }>();
+          if (row) await replaceArticleBodyTerms(db, row.id, source.source_key,
+            feedBodySearchTerms(article.feed_body_html));
+        } catch {
+          console.warn(JSON.stringify({ event: 'article_body_search_index_failed',
+            source_key: source.source_key, article_hash: article.canonical_url_hash }));
+        }
+      }
+    } else {
+      try { await deleteArticleBodyTerms(db, { source_key: source.source_key }); }
+      catch {
+        console.warn(JSON.stringify({ event: 'article_body_search_index_revoke_failed',
+          source_key: source.source_key }));
+      }
+    }
     await reconcileHomepageLatestSixAfterSourceCommit(() => reconcileHomepageLatestSix(db), {
       run_id: runId, source_key: sourceKey, route_key: routeKey,
     });

@@ -16,10 +16,11 @@ const sources = z.array(SourceSchema).parse(JSON.parse(
   readFileSync('config/sources.seed.json', 'utf8'),
 ));
 const publisherSources = sources.filter(source =>
-  ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org']
+  ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org',
+    'mums-for-lungs']
     .includes(source.source_key));
-assert.equal(PUBLISHER_RSS_ROUTES.length, 16);
-assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 28);
+assert.equal(PUBLISHER_RSS_ROUTES.length, 17);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 29);
 for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
@@ -44,6 +45,28 @@ for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org']) {
   assert.deepEqual(configuredPublisherRssRouteKeys({ ...configured,
     publication_policy: 'auto_approve' }), []);
 }
+const mumsForLungs = publisherSources.find(candidate => candidate.source_key === 'mums-for-lungs')!;
+const mumsImage = 'https://images.squarespace-cdn.com/content/v1/60fe62a6c0eb074f99a31664/' +
+  '1783674678917-example/M4L+diesel.png?format=1500w';
+const mumsParsed = await parsePublisherRssFeed(`<?xml version="1.0"?>
+<rss version="2.0"><channel><item><title>Air pollution affects children</title>
+  <link>https://www.mumsforlungs.org/news/air-pollution-affects-children</link>
+  <dc:creator>Jane Dutton</dc:creator><pubDate>Fri, 10 Jul 2026 09:12:51 +0000</pubDate>
+  <category>Diesel</category><media:content medium="image" type="image/png"
+    width="1500" height="847" url="${mumsImage}" />
+  <content:encoded><![CDATA[<p>Permission-gated body must be discarded.</p>]]></content:encoded>
+</item></channel></rss>`, mumsForLungs, 'mums-for-lungs-news');
+assert.equal(mumsParsed.articles[0]?.author, 'Jane Dutton');
+assert.equal(mumsParsed.articles[0]?.published_at, '2026-07-10T09:12:51.000Z');
+assert.deepEqual(mumsParsed.articles[0]?.categories, ['Diesel']);
+assert.equal(mumsParsed.articles[0]?.preview_url, mumsImage);
+assert.equal(mumsParsed.articles[0]?.feed_body_html, null);
+assert.equal(remotePreviewUrl(mumsImage, mumsForLungs), mumsImage);
+for (const rejected of [
+  'https://images.squarespace-cdn.com/content/v1/another-site/image.png',
+  'https://nested.images.squarespace-cdn.com/content/v1/60fe62a6c0eb074f99a31664/image.png',
+  'https://images.squarespace-cdn.com:443/content/v1/60fe62a6c0eb074f99a31664/image.png',
+]) assert.equal(remotePreviewUrl(rejected, mumsForLungs), null);
 const source = publisherSources.find(candidate => candidate.source_key === 'bbc-news')!;
 const bbcPreview =
   'https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/example/live/article.jpg';

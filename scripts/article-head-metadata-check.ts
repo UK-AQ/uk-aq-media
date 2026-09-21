@@ -40,6 +40,7 @@ const source: Source = {
     retain_excerpt: false },
   content_fetch_policy: 'discovery_metadata_only', ai_content_policy: 'disabled',
   image_policy: 'remote_preview',
+  search_index_policy: 'metadata_only',
 };
 const article: DiscoveredArticle = {
   canonical_url: 'https://publisher.example/article', canonical_url_hash: 'hash',

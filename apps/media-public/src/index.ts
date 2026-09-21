@@ -1,4 +1,4 @@
-import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, reconcileHomepageLatestSix, remotePreviewUrl, sourcePresentationPlaceholderPath,
+import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, meaningfulSearchTerms, MAX_SEARCH_QUERY_CHARACTERS, reconcileHomepageLatestSix, remotePreviewUrl, sourcePresentationPlaceholderPath,
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 
@@ -18,6 +18,8 @@ type ImageRow = {
   article_image_policy: string;
   source_image_policy: string;
 };
+const SEARCH_FIELDS = ['title', 'publication', 'author', 'content'] as const;
+type SearchField = typeof SEARCH_FIELDS[number];
 
 const IMAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -60,6 +62,70 @@ export function decodeArticleCursor(raw: string | null): [string, number] | null
         typeof value[1] !== 'number' || !Number.isSafeInteger(value[1]) || value[1] < 1) throw new Error();
     return [value[0], value[1]];
   } catch { throw new HttpError(400, 'invalid_before_cursor'); }
+}
+
+function searchRequest(url: URL): { terms: string[]; fields: SearchField[] } {
+  for (const key of url.searchParams.keys()) {
+    if (!['q', 'fields', 'limit', 'before'].includes(key)) throw new HttpError(400, 'invalid_search_query');
+  }
+  if (url.searchParams.getAll('q').length !== 1) throw new HttpError(400, 'invalid_search_query');
+  const query = url.searchParams.get('q')?.trim() ?? '';
+  if (!query || [...query].length > MAX_SEARCH_QUERY_CHARACTERS) {
+    throw new HttpError(400, 'invalid_search_query');
+  }
+  const rawFields = url.searchParams.get('fields');
+  if (url.searchParams.getAll('fields').length > 1) throw new HttpError(400, 'invalid_search_fields');
+  const fields = rawFields === null ? [...SEARCH_FIELDS] : rawFields.split(',') as SearchField[];
+  if (!fields.length || fields.some(field => !SEARCH_FIELDS.includes(field)) ||
+      new Set(fields).size !== fields.length || fields.some(field => field.trim() !== field)) {
+    throw new HttpError(400, 'invalid_search_fields');
+  }
+  return { terms: meaningfulSearchTerms(query), fields };
+}
+
+async function publicArticles(origin: string, rows: FeedRow[]): Promise<unknown[]> {
+  return Promise.all(rows.map(async ({ feed_sort_at: _sort, topics_json,
+    pollutants_json, locations_json, featured, article_image_policy,
+    source_image_policy, ...article }) => ({ ...article,
+    preview_image_url: await publicPreviewImageUrl(origin, {
+      ...article, article_image_policy, source_image_policy,
+    }),
+    featured: featured === 1,
+    topics: JSON.parse(topics_json), pollutants: JSON.parse(pollutants_json),
+    locations: JSON.parse(locations_json) })));
+}
+
+async function articleSearch(url: URL, env: MediaPublicEnv): Promise<Response> {
+  const { terms, fields } = searchRequest(url);
+  const limit = boundedLimit(url);
+  const before = decodeArticleCursor(url.searchParams.get('before'));
+  if (terms.length === 0) return json({ articles: [], next_before: null }, 200, 'no-store');
+  const selected = new Set(fields);
+  const clauses = [
+    selected.has('title') ? "instr(lower(a.title), term.value) > 0 OR instr(lower(coalesce(a.display_title, '')), term.value) > 0" : '',
+    selected.has('publication') ? 'instr(lower(a.publisher), term.value) > 0' : '',
+    selected.has('author') ? "instr(lower(coalesce(a.author, '')), term.value) > 0" : '',
+    selected.has('content') ? `EXISTS (SELECT 1 FROM media_article_search_terms st
+      WHERE st.article_id = a.id AND st.term = term.value)` : '',
+  ].filter(Boolean).join(' OR ');
+  const statement = env.MEDIA_DB.prepare(`SELECT a.id, a.source_key, a.canonical_url,
+    a.title, a.display_title, a.display_title_origin, a.publisher, a.author,
+    a.published_at, a.discovered_at, a.feed_sort_at,
+    a.summary, a.why_it_matters, a.editorial_content_origin, a.featured,
+    a.topics_json, a.pollutants_json, a.locations_json, a.og_image_url,
+    a.image_policy AS article_image_policy, s.image_policy AS source_image_policy
+    FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    WHERE a.status = 'approved'
+      AND NOT EXISTS (SELECT 1 FROM json_each(?) term WHERE NOT (${clauses}))
+      ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
+    ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT ?`);
+  const bindings = [JSON.stringify(terms), ...(before ?? []), limit + 1];
+  const { results } = await statement.bind(...bindings).all<FeedRow>();
+  const page = results.slice(0, limit);
+  const last = page.at(-1);
+  return json({ articles: await publicArticles(url.origin, page),
+    next_before: results.length > limit && last
+      ? btoa(JSON.stringify([last.feed_sort_at, last.id])) : null }, 200, 'no-store');
 }
 
 function homepageGeneration(url: URL): number {
@@ -289,6 +355,10 @@ export default {
         if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
         return await homepageFeed(request, env, context);
       }
+      if (url.pathname === '/articles/search') {
+        if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+        return await articleSearch(url, env);
+      }
       if (url.pathname !== '/articles') return json({ error: 'not_found' }, 404);
       if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
       const limit = boundedLimit(url);
@@ -307,15 +377,7 @@ export default {
         statement.bind(limit + 1)).all<FeedRow>();
       const page = results.slice(0, limit);
       const last = page.at(-1);
-      const articles = await Promise.all(page.map(async ({ feed_sort_at: _sort, topics_json,
-        pollutants_json, locations_json, featured, article_image_policy,
-        source_image_policy, ...article }) => ({ ...article,
-        preview_image_url: await publicPreviewImageUrl(url.origin, {
-          ...article, article_image_policy, source_image_policy,
-        }),
-        featured: featured === 1,
-        topics: JSON.parse(topics_json), pollutants: JSON.parse(pollutants_json),
-        locations: JSON.parse(locations_json) })));
+      const articles = await publicArticles(url.origin, page);
       return json({ articles, next_before: results.length > limit && last ?
         btoa(JSON.stringify([last.feed_sort_at, last.id])) : null }, 200,
       'public, max-age=300, s-maxage=300, must-revalidate');

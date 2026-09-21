@@ -16,7 +16,8 @@
     },
     "content_fetch_policy": "article_head_allowed",
     "ai_content_policy": "metadata_only",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "bbc-news",
@@ -55,7 +56,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "the-guardian",
@@ -129,7 +131,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "metadata_only",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "sky-news",
@@ -168,7 +171,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "the-independent",
@@ -212,7 +216,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "carbon-brief",
@@ -236,7 +241,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "metadata_only",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "openaq",
@@ -260,7 +266,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "metadata_only",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "phys-org",
@@ -284,7 +291,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "dsawsp",
@@ -308,7 +316,8 @@
     },
     "content_fetch_policy": "article_head_allowed",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "communities-against-woodsmoke",
@@ -332,7 +341,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "metadata_only",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "the-times",
@@ -349,7 +359,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "the-telegraph",
@@ -366,7 +377,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "daily-mail",
@@ -383,7 +395,8 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   },
   {
     "source_key": "the-sun",
@@ -400,6 +413,32 @@
     },
     "content_fetch_policy": "discovery_metadata_only",
     "ai_content_policy": "disabled",
-    "image_policy": "remote_preview"
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
+    "source_key": "mums-for-lungs",
+    "name": "Mums for Lungs",
+    "canonical_domain": "mumsforlungs.org",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "mums-for-lungs-news",
+          "url": "https://www.mumsforlungs.org/news?format=rss",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   }
 ]

@@ -18,6 +18,7 @@ export interface DiscoveredArticle {
   display_title: string | null;
   display_title_origin: 'publisher' | null;
   preview_metadata_checked_at: string | null;
+  feed_body_html?: string | null;
 }
 
 export interface DiscoveryRoute {
@@ -47,7 +48,8 @@ export interface PublicArticle {
 export async function loadSource(db: D1Database, key: string): Promise<Source | null> {
   const row = await db.prepare(`SELECT source_key, name, canonical_domain, source_type,
     enabled, publication_policy, review_level, priority, discovery_method,
-    discovery_config_json, content_fetch_policy, ai_content_policy, image_policy
+    discovery_config_json, content_fetch_policy, ai_content_policy, image_policy,
+    search_index_policy
     FROM media_sources WHERE source_key = ? AND retired_at IS NULL`).bind(key).first<{
       discovery_config_json: string; enabled: number; [key: string]: unknown;
     }>();

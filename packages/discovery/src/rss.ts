@@ -107,6 +107,7 @@ export interface ParsedRssItem {
   title_context: string | null;
   preview_candidates: RssPreviewCandidate[];
   content_encoded_preview_url: string | null;
+  content_encoded_html: string | null;
 }
 
 export type RssPreviewCandidateKind = 'media:thumbnail' | 'media:content' | 'enclosure';
@@ -253,6 +254,7 @@ export function parseRssItems(xml: string, maxItems: number,
     allow_untyped_image_media_content?: boolean;
     title_context?: TitleContextMode;
     content_encoded_preview?: ContentEncodedPreviewOptions;
+    retain_content_encoded?: boolean;
   } = {}): {
   items: ParsedRssItem[];
   items_seen: number;
@@ -273,7 +275,8 @@ export function parseRssItems(xml: string, maxItems: number,
     htmlEntities: true, maxNestedTags: 32,
     isArray: name => ['item', 'category', 'dc:creator', 'media:content',
       'media:thumbnail', 'enclosure'].includes(name),
-    updateTag: name => (name === 'content:encoded' && !contentEncodedPreview) ||
+    updateTag: name => (name === 'content:encoded' && !contentEncodedPreview &&
+      !options.retain_content_encoded) ||
       (name === 'description' && !options.title_context) ? false : name,
   });
   let parsed: unknown;
@@ -317,6 +320,8 @@ export function parseRssItems(xml: string, maxItems: number,
         previewCandidate(kind, candidate, rssOrder)),
       content_encoded_preview_url: contentEncodedPreviewUrl(
         item['content:encoded'], contentEncodedPreview),
+      content_encoded_html: options.retain_content_encoded
+        ? rawDescription(item['content:encoded']) : null,
     });
   }
   return { items, items_seen: rawItems.length, items_invalid: invalid };

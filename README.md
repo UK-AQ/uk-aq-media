@@ -26,6 +26,14 @@ still permit remote previews, the public feed instead uses the bundled Media pub
 `/source-images/communities-against-woodsmoke-default.png`. This is a presentation-only
 fallback and is never stored in `media_articles.og_image_url`.
 
+## Mums for Lungs publisher source
+
+Mums for Lungs is an enabled manual/Standard publisher source discovered through its single,
+bounded first-party News RSS route. Author, publication date, categories and publisher-selected
+image metadata use the generic RSS adapter and normal AQ relevance filter. Its policy remains
+`search_index_policy='metadata_only'`; feed-body indexing must not be enabled until explicit
+publisher permission is obtained.
+
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
 Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, a bounded
@@ -148,6 +156,10 @@ Public:
 
 - `GET /articles?limit=20` — default 20, maximum 50; newest first by publication
   time (discovery time when absent), then descending ID.
+- `GET /articles/search?q=...&fields=title,publication,author,content&limit=20` — approved
+  article metadata only, using the normal bounded cursor and `no-store`. Metadata fields use
+  case-insensitive substring matching. Content uses only a private, permission-gated derived
+  term index and never returns bodies, snippets or index terms.
 - `GET /articles/homepage/version` — no-store generation discovery for the homepage's
   exact current six approved articles. `GET /articles/homepage?generation=<n>` serves
   that fixed snapshot only when `n` is current; it returns 409 otherwise and uses an

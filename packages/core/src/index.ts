@@ -8,4 +8,5 @@ export * from './facebook';
 export * from './db';
 export * from './http';
 export * from './article-author';
+export * from './search-terms';
 export { z } from 'zod';

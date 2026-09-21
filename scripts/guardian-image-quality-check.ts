@@ -96,6 +96,7 @@ const guardianSource: Source = {
   content_fetch_policy: 'discovery_metadata_only',
   ai_content_policy: 'metadata_only',
   image_policy: 'remote_preview',
+  search_index_policy: 'metadata_only',
 };
 const lookup = await guardianPreviewForArticleFromFeed(`<?xml version="1.0"?>
   <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">

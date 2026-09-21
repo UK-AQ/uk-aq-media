@@ -47,6 +47,9 @@ export const PUBLISHER_RSS_ROUTES = [
   { source_key: 'phys-org', route_key: 'phys-org-environment',
     url: 'https://phys.org/rss-feed/earth-news/environment/', canonical_domain: 'phys.org',
     max_items: 20 },
+  { source_key: 'mums-for-lungs', route_key: 'mums-for-lungs-news',
+    url: 'https://www.mumsforlungs.org/news?format=rss', canonical_domain: 'mumsforlungs.org',
+    max_items: 20 },
 ] as const;
 
 export type PublisherRssSourceKey = typeof PUBLISHER_RSS_ROUTES[number]['source_key'];
@@ -74,6 +77,7 @@ function configuredRoute(source: Source, routeKey: string): {
       source.content_fetch_policy !== 'discovery_metadata_only' ||
       source.ai_content_policy !== expectedAiContentPolicy(source.source_key) ||
       source.image_policy !== 'remote_preview' ||
+      !['metadata_only', 'feed_body_text'].includes(source.search_index_policy) ||
       route.url !== expected.url || route.max_items !== expected.max_items) {
     throw new ScanError('publisher_rss_config_mismatch');
   }
@@ -105,11 +109,12 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
   const expected = expectedRoute(source.source_key, routeKey)!;
   const contentEncodedPreviewScanBytes = 'content_encoded_preview_scan_bytes' in expected
     ? expected.content_encoded_preview_scan_bytes : null;
-  const parsed = parseRssItems(xml, route.max_items, contentEncodedPreviewScanBytes === null
-    ? {} : { content_encoded_preview: {
+  const parsed = parseRssItems(xml, route.max_items, {
+    ...(contentEncodedPreviewScanBytes === null ? {} : { content_encoded_preview: {
       max_scan_bytes: contentEncodedPreviewScanBytes,
       validate_url: candidate => remotePreviewUrl(candidate, source),
-    } });
+    } }), retain_content_encoded: source.search_index_policy === 'feed_body_text',
+  });
   const articles: DiscoveredArticle[] = [];
   let invalid = parsed.items_invalid;
   for (const item of parsed.items) {
@@ -124,7 +129,7 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
       original_url: item.raw_url, title: item.title, author: item.author,
       published_at: item.published_at, categories: item.categories, title_context: null,
       preview_url: preview, display_title: null, display_title_origin: null,
-      preview_metadata_checked_at: null });
+      preview_metadata_checked_at: null, feed_body_html: item.content_encoded_html });
   }
   return { articles, items_seen: parsed.items_seen, items_invalid: invalid };
 }

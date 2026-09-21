@@ -8,6 +8,7 @@ export const ContentFetchPolicy = z.enum([
 ]);
 export const AiContentPolicy = z.enum(['disabled', 'metadata_only', 'article_body_allowed']);
 export const ImagePolicy = z.enum(['remote_preview', 'blocked', 'local_copy_permitted']);
+export const SearchIndexPolicy = z.enum(['metadata_only', 'feed_body_text']);
 
 export const DiscoveryRouteSchema = z.object({
   route_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
@@ -43,6 +44,7 @@ export const SourceSchema = z.object({
   content_fetch_policy: ContentFetchPolicy,
   ai_content_policy: AiContentPolicy,
   image_policy: ImagePolicy,
+  search_index_policy: SearchIndexPolicy,
 }).strict().superRefine((source, context) => {
   const hasRssConfig = Boolean(source.discovery_config.url || source.discovery_config.routes);
   if (source.discovery_method === 'rss' && !hasRssConfig) {

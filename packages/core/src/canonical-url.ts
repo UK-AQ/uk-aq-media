@@ -109,7 +109,14 @@ export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): st
     ...(sourcePreviewImageHostnames[source.source_key] ?? []),
     ...(publisherDomainPreviewImageHostnames[normaliseDomain(source.canonical_domain)] ?? []),
   ];
-  return exactPreviewImageUrl(raw, additionalHostnames);
+  const external = exactPreviewImageUrl(raw, additionalHostnames);
+  if (source.source_key === 'mums-for-lungs') {
+    const squarespace = exactPreviewImageUrl(raw, ['images.squarespace-cdn.com']);
+    if (!squarespace) return external;
+    return new URL(squarespace).pathname.startsWith('/content/v1/60fe62a6c0eb074f99a31664/')
+      ? squarespace : null;
+  }
+  return external;
 }
 
 export function guardianRemotePreviewUrl(raw: unknown): string | null {
