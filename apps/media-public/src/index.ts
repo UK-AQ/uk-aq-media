@@ -105,8 +105,9 @@ async function articleSearch(url: URL, env: MediaPublicEnv): Promise<Response> {
     selected.has('title') ? "instr(lower(a.title), term.value) > 0 OR instr(lower(coalesce(a.display_title, '')), term.value) > 0" : '',
     selected.has('publication') ? 'instr(lower(a.publisher), term.value) > 0' : '',
     selected.has('author') ? "instr(lower(coalesce(a.author, '')), term.value) > 0" : '',
-    selected.has('content') ? `EXISTS (SELECT 1 FROM media_article_search_terms st
-      WHERE st.article_id = a.id AND st.term = term.value)` : '',
+    selected.has('content') ? `s.search_index_policy = 'feed_body_text' AND EXISTS (
+      SELECT 1 FROM media_article_search_terms st WHERE st.article_id = a.id
+        AND st.source_key = a.source_key AND st.term = term.value)` : '',
   ].filter(Boolean).join(' OR ');
   const statement = env.MEDIA_DB.prepare(`SELECT a.id, a.source_key, a.canonical_url,
     a.title, a.display_title, a.display_title_origin, a.publisher, a.author,

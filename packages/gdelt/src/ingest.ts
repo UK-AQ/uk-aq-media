@@ -102,7 +102,8 @@ Promise<{ sources: Source[]; scopes: ScopeRow[] }> {
   const [sourceRows, scopeRows] = await Promise.all([
     db.prepare(`SELECT source_key, name, canonical_domain, source_type, enabled,
       publication_policy, review_level, priority, discovery_method, discovery_config_json,
-      content_fetch_policy, ai_content_policy, image_policy FROM media_sources
+      content_fetch_policy, ai_content_policy, image_policy, search_index_policy
+      FROM media_sources
       WHERE retired_at IS NULL AND (canonical_domain IN (${placeholders})
         OR source_key = 'the-independent')
       ORDER BY length(canonical_domain) DESC, source_key LIMIT 50`).bind(...suffixes)
@@ -142,6 +143,7 @@ async function dynamicPublisherSource(domain: string): Promise<Source> {
     content_fetch_policy: 'discovery_metadata_only',
     ai_content_policy: 'disabled',
     image_policy: 'remote_preview',
+    search_index_policy: 'metadata_only',
   });
 }
 
@@ -175,12 +177,14 @@ function insertDynamicSource(db: D1Database, source: Source, now: string): D1Pre
   return db.prepare(`INSERT OR IGNORE INTO media_sources
     (source_key, name, canonical_domain, source_type, enabled, publication_policy,
       review_level, priority, discovery_method, discovery_config_json,
-      content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      content_fetch_policy, ai_content_policy, image_policy, search_index_policy,
+      created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
       source.source_key, source.name, source.canonical_domain, source.source_type,
       Number(source.enabled), source.publication_policy, source.review_level, source.priority,
       source.discovery_method, JSON.stringify(source.discovery_config),
-      source.content_fetch_policy, source.ai_content_policy, source.image_policy, now, now);
+      source.content_fetch_policy, source.ai_content_policy, source.image_policy,
+      source.search_index_policy, now, now);
 }
 
 function persistCandidate(db: D1Database, candidate: PreparedCandidate, fileStamp: string,

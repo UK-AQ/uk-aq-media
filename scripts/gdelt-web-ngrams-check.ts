@@ -327,7 +327,7 @@ assert.equal(sqlite.prepare(`SELECT count(*) AS count FROM media_article_discove
 // A publisher-native overlap fills genuine metadata but preserves one identity and both providers.
 const sourceColumns = `source_key, name, canonical_domain, source_type, enabled, publication_policy,
   review_level, priority, discovery_method, discovery_config_json, content_fetch_policy,
-  ai_content_policy, image_policy`;
+  ai_content_policy, image_policy, search_index_policy`;
 const aqnSourceRow = sqlite.prepare(`SELECT ${sourceColumns} FROM media_sources
   WHERE source_key = 'air-quality-news'`).get()!;
 const { discovery_config_json: aqnConfig, enabled: aqnEnabled, ...aqnFields } = aqnSourceRow;

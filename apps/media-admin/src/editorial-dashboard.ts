@@ -88,6 +88,7 @@ type SourceRow = {
   content_fetch_policy: 'discovery_metadata_only' | 'article_head_allowed' | 'article_body_allowed';
   ai_content_policy: string;
   image_policy: 'remote_preview' | 'blocked' | 'local_copy_permitted';
+  search_index_policy: 'metadata_only' | 'feed_body_text';
   created_at: string; updated_at: string;
 };
 
@@ -377,7 +378,8 @@ function conservativeManualSource(domain: string, name: string, sourceKey: strin
     publication_policy: 'manual', review_level: 'enhanced', priority: 50,
     discovery_method: 'deferred', discovery_config_json: '{"retain_excerpt":false}',
     content_fetch_policy: 'article_head_allowed', ai_content_policy: 'disabled',
-    image_policy: 'remote_preview', created_at: now, updated_at: now };
+    image_policy: 'remote_preview', search_index_policy: 'metadata_only',
+    created_at: now, updated_at: now };
 }
 
 async function articleDetail(db: D1Database, id: number): Promise<Response> {
@@ -714,9 +716,11 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
     statements.push(db.prepare(`INSERT OR IGNORE INTO media_sources
       (source_key, name, canonical_domain, source_type, enabled, publication_policy,
        review_level, priority, discovery_method, discovery_config_json,
-       content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
+       content_fetch_policy, ai_content_policy, image_policy, search_index_policy,
+       created_at, updated_at)
       VALUES (?, ?, ?, 'publisher', 0, 'manual', 'enhanced', 50, 'deferred',
-        '{"retain_excerpt":false}', 'article_head_allowed', 'disabled', 'remote_preview', ?, ?)`)
+        '{"retain_excerpt":false}', 'article_head_allowed', 'disabled', 'remote_preview',
+        'metadata_only', ?, ?)`)
       .bind(sourceKey, parsed.data.publisher, identity.domain, now, now));
   }
   const approved = parsed.data.initial_status === 'approved';
@@ -869,6 +873,7 @@ function sourceCanEnable(source: SourceRow): boolean {
       discovery_method: source.discovery_method, discovery_config: config,
       content_fetch_policy: source.content_fetch_policy,
       ai_content_policy: source.ai_content_policy, image_policy: source.image_policy,
+      search_index_policy: source.search_index_policy,
     });
     if (!parsed.success || parsed.data.discovery_method !== 'rss') return false;
     return source.source_key === 'air-quality-news'
@@ -927,10 +932,12 @@ async function addSource(request: Request, db: D1Database): Promise<Response> {
       db.prepare(`INSERT INTO media_sources
         (source_key, name, canonical_domain, source_type, enabled, publication_policy,
          review_level, priority, discovery_method, discovery_config_json,
-        content_fetch_policy, ai_content_policy, image_policy, created_at, updated_at)
+        content_fetch_policy, ai_content_policy, image_policy, search_index_policy,
+        created_at, updated_at)
         VALUES (?, ?, ?, ?, 0, 'manual', 'standard', 50, 'deferred',
           '{"retain_excerpt":false}', 'discovery_metadata_only', 'disabled',
-          CASE WHEN ? = 'publisher' THEN 'remote_preview' ELSE 'blocked' END, ?, ?)`)
+          CASE WHEN ? = 'publisher' THEN 'remote_preview' ELSE 'blocked' END,
+          'metadata_only', ?, ?)`)
         .bind(parsed.data.source_key, cleanText(parsed.data.name, 200), host,
           parsed.data.source_type, parsed.data.source_type, now, now),
       db.prepare(`INSERT INTO media_configuration_events
@@ -940,7 +947,8 @@ async function addSource(request: Request, db: D1Database): Promise<Response> {
           canonical_domain: host, enabled: false, publication_policy: 'manual',
           review_level: 'standard', discovery_method: 'deferred',
           content_fetch_policy: 'discovery_metadata_only', ai_content_policy: 'disabled',
-          image_policy: parsed.data.source_type === 'publisher' ? 'remote_preview' : 'blocked' }), now),
+          image_policy: parsed.data.source_type === 'publisher' ? 'remote_preview' : 'blocked',
+          search_index_policy: 'metadata_only' }), now),
     ]);
   }
   const source = await db.prepare('SELECT * FROM media_sources WHERE source_key = ?')

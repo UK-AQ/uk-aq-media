@@ -39,7 +39,9 @@ WHERE source_key IN (
     AND (source_key LIKE 'manual-%' OR source_key LIKE 'discovered-publisher-%')
 )
 AND EXISTS (SELECT 1 FROM media_sources WHERE source_key = 'mums-for-lungs'
-  AND canonical_domain = 'mumsforlungs.org' AND retired_at IS NULL);
+  AND canonical_domain = 'mumsforlungs.org' AND retired_at IS NULL)
+AND (canonical_url LIKE 'https://mumsforlungs.org/%'
+  OR canonical_url LIKE 'https://www.mumsforlungs.org/%');
 
 UPDATE media_article_discovery_evidence
 SET source_key = 'mums-for-lungs'
@@ -48,6 +50,13 @@ WHERE source_key IN (
   WHERE canonical_domain IN ('mumsforlungs.org', 'www.mumsforlungs.org')
     AND source_key != 'mums-for-lungs'
     AND (source_key LIKE 'manual-%' OR source_key LIKE 'discovered-publisher-%')
+)
+AND EXISTS (
+  SELECT 1 FROM media_articles a
+  WHERE a.id = media_article_discovery_evidence.article_id
+    AND a.source_key = 'mums-for-lungs'
+    AND (a.canonical_url LIKE 'https://mumsforlungs.org/%'
+      OR a.canonical_url LIKE 'https://www.mumsforlungs.org/%')
 );
 
 UPDATE media_sources
@@ -58,4 +67,15 @@ WHERE canonical_domain IN ('mumsforlungs.org', 'www.mumsforlungs.org')
   AND (source_key LIKE 'manual-%' OR source_key LIKE 'discovered-publisher-%')
   AND NOT EXISTS (SELECT 1 FROM media_articles a WHERE a.source_key = media_sources.source_key)
   AND NOT EXISTS (SELECT 1 FROM media_article_discovery_evidence e
-    WHERE e.source_key = media_sources.source_key);
+    WHERE e.source_key = media_sources.source_key)
+  AND NOT EXISTS (SELECT 1 FROM media_article_search_terms st
+    WHERE st.source_key = media_sources.source_key);
+
+INSERT INTO media_publisher_domain_scope
+  (publisher_domain, publisher_scope, classification_reason, created_at, updated_at)
+VALUES ('mumsforlungs.org', 'uk', 'configured_uk_publisher',
+  strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT(publisher_domain) DO UPDATE SET
+  publisher_scope = excluded.publisher_scope,
+  classification_reason = excluded.classification_reason,
+  updated_at = excluded.updated_at;
