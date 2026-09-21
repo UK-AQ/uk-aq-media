@@ -39,6 +39,68 @@ function metaAttributes(tag: string): Map<string, string> {
   return attributes;
 }
 
+function jsonLdRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function jsonLdArticleType(value: unknown): boolean {
+  const types = (Array.isArray(value) ? value : [value])
+    .filter((candidate): candidate is string => typeof candidate === 'string');
+  return types.some(type => type.toLowerCase().endsWith('article'));
+}
+
+function jsonLdAuthor(value: unknown): string | null {
+  const names = (Array.isArray(value) ? value : [value]).flatMap(candidate => {
+    if (typeof candidate === 'string') return [candidate];
+    const record = jsonLdRecord(candidate);
+    return typeof record?.name === 'string' ? [record.name] : [];
+  }).map(normaliseMetadataText).filter(Boolean);
+  if (!names.length) return null;
+  return normaliseMetadataText([...new Set(names)].join(' and ')) || null;
+}
+
+function structuredArticleMetadata(htmlHead: string): {
+  author: string | null;
+  publishedAt: string | null;
+} {
+  let author: string | null = null;
+  let publishedAt: string | null = null;
+  for (const match of htmlHead.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
+    const attributes = metaAttributes(`<script${match[1] ?? ''}>`);
+    if (attributes.get('type')?.trim().toLowerCase() !== 'application/ld+json') continue;
+    const raw = match[2]?.trim();
+    if (!raw) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { continue; }
+
+    const roots = Array.isArray(parsed) ? parsed : [parsed];
+    const candidates: Record<string, unknown>[] = [];
+    for (const root of roots) {
+      const record = jsonLdRecord(root);
+      if (!record) continue;
+      candidates.push(record);
+      if (Array.isArray(record['@graph'])) {
+        for (const graphValue of record['@graph']) {
+          const graphRecord = jsonLdRecord(graphValue);
+          if (graphRecord) candidates.push(graphRecord);
+        }
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (!jsonLdArticleType(candidate['@type'])) continue;
+      if (!publishedAt && typeof candidate.datePublished === 'string') {
+        publishedAt = normaliseMetadataText(candidate.datePublished) || null;
+      }
+      if (!author) author = jsonLdAuthor(candidate.author);
+      if (author && publishedAt) return { author, publishedAt };
+    }
+  }
+  return { author, publishedAt };
+}
+
 export type ArticleHeadMetadata = {
   ogImage: string | null;
   twitterImage: string | null;
@@ -54,6 +116,7 @@ export type ArticleHeadMetadata = {
 };
 
 export function extractArticleHeadMetadata(htmlHead: string): ArticleHeadMetadata {
+  const structured = structuredArticleMetadata(htmlHead);
   const metadata = new Map<string, string>();
   for (const tag of htmlHead.match(/<meta\b[^>]*>/gi) ?? []) {
     const attributes = metaAttributes(tag);
@@ -76,8 +139,10 @@ export function extractArticleHeadMetadata(htmlHead: string): ArticleHeadMetadat
     twitterDescription: title('twitter:description'),
     htmlDescription: title('description'),
     publisher: title('og:site_name'),
-    author: title('author') ?? title('article:author'),
-    publishedAt: title('article:published_time'),
+    author: title('author') ?? title('article:author') ?? title('og:article:author') ??
+      structured.author,
+    publishedAt: title('article:published_time') ?? title('og:article:published_time') ??
+      structured.publishedAt,
   };
 }
 
