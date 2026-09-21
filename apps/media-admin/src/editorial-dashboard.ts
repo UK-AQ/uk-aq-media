@@ -349,9 +349,21 @@ async function sourceForUrl(db: D1Database, rawUrl: string): Promise<{
   source: SourceRow | null; domain: string; canonicalUrl: string; hash: string;
 }> {
   const domain = safeHostname(rawUrl);
+
+  // Only load sources whose configured domain can own this hostname. Explicit
+  // configured sources win same-domain ties over GDELT/manual definitions, while
+  // publisherHttpsUrl remains the final source/domain authority (including the
+  // existing Independent legacy-domain alias).
   const { results } = await db.prepare(`SELECT * FROM media_sources
-    WHERE retired_at IS NULL ORDER BY length(canonical_domain) DESC, source_key LIMIT 100`)
-    .all<SourceRow>();
+    WHERE retired_at IS NULL
+      AND (? = lower(canonical_domain)
+        OR ? LIKE '%.' || lower(canonical_domain)
+        OR source_key = 'the-independent')
+    ORDER BY length(canonical_domain) DESC,
+      CASE WHEN source_key LIKE 'manual-%' THEN 2
+        WHEN source_key LIKE 'discovered-publisher-%' THEN 1 ELSE 0 END,
+      source_key`)
+    .bind(domain, domain).all<SourceRow>();
   const source = results.find(candidate => publisherHttpsUrl(rawUrl, candidate)) ?? null;
   let canonicalUrl: string;
   try { canonicalUrl = canonicalizeUrl(rawUrl, source ?? domain); }
