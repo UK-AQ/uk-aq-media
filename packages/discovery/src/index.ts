@@ -342,7 +342,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
       const publisherRelevant = ![
-        'air-quality-news', 'the-guardian', 'dsawsp', 'communities-against-woodsmoke',
+        'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp', 'communities-against-woodsmoke',
       ].includes(sourceKey)
         ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
           canonical_url: article.canonical_url, categories: article.categories }).relevant : true;
