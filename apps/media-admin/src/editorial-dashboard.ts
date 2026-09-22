@@ -56,7 +56,19 @@ const AddAuthorRuleBody = z.object({
 }).strict();
 const LookupBody = z.object({ url: z.url().max(2048) }).strict();
 const ArticleAuthorBody = z.object({ author: z.string().max(500).nullable() }).strict();
-const ArticlePublishedAtBody = z.object({ published_at: z.string().nullable() }).strict();
+const DATE_ONLY_PUBLISHED_AT = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DateOnlyPublishedAt = z.string().regex(DATE_ONLY_PUBLISHED_AT).refine(value => {
+  const match = DATE_ONLY_PUBLISHED_AT.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1]!;
+});
+const StoredPublishedAt = z.union([DateOnlyPublishedAt, z.iso.datetime({ offset: true })]);
+const ArticlePublishedAtBody = z.object({ published_at: StoredPublishedAt.nullable() }).strict();
 const ManualArticleBody = z.object({
   initial_status: z.enum(['pending', 'approved']),
   url: z.url().max(2048),
@@ -66,12 +78,12 @@ const ManualArticleBody = z.object({
   published_at: z.iso.datetime({ offset: true }).nullable().optional(),
   preview_image_url: z.url().max(2048).nullable().optional(),
 }).strict();
-const MetadataApplyBody = z.object({
+export const MetadataApplyBody = z.object({
   expected_current_image_url: z.string().max(2048).nullable(),
   expected_proposed_image_url: z.url().max(2048).nullable(),
   replace_existing_image: z.boolean(),
   apply_publisher_display_title: z.boolean().default(true),
-  expected_current_published_at: z.iso.datetime({ offset: true }).nullable().optional(),
+  expected_current_published_at: StoredPublishedAt.nullable().optional(),
   expected_proposed_published_at: z.iso.datetime({ offset: true }).nullable().optional(),
   apply_publisher_published_at: z.boolean().default(false),
 }).strict().superRefine((value, context) => {
@@ -154,19 +166,9 @@ function requireIdempotencyKey(request: Request): string {
 
 export function normaliseManualPublishedAt(value: string | null): string | null {
   if (value === null) return null;
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (dateOnly) {
-    const year = Number(dateOnly[1]);
-    const month = Number(dateOnly[2]);
-    const day = Number(dateOnly[3]);
-    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-    const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    if (month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1]!) return value;
-    throw new HttpError(400, 'invalid_article_published_at_body');
-  }
-  const datetime = z.iso.datetime({ offset: true }).safeParse(value);
-  if (!datetime.success) throw new HttpError(400, 'invalid_article_published_at_body');
-  return new Date(datetime.data).toISOString();
+  const stored = StoredPublishedAt.safeParse(value);
+  if (!stored.success) throw new HttpError(400, 'invalid_article_published_at_body');
+  return DATE_ONLY_PUBLISHED_AT.test(stored.data) ? stored.data : new Date(stored.data).toISOString();
 }
 
 function csvValues(search: URLSearchParams, key: string, max = 20): string[] {

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { HttpError, SourceSchema, z } from '@uk-aq-media/core';
 import { parsePublisherRssFeed } from '@uk-aq-media/discovery';
 import {
-  metadataFromOpenAqRss, metadataProviderFor, metadataPublishedAtChange,
+  MetadataApplyBody, metadataFromOpenAqRss, metadataProviderFor, metadataPublishedAtChange,
   metadataPublishedAtProposal, normaliseManualPublishedAt, normalisePublisherPublishedAt,
   requireOpenAqRssMetadata,
 } from '../apps/media-admin/src/editorial-dashboard';
@@ -52,6 +52,22 @@ for (const invalid of ['2026-02-29', '2026-02-31', '2026-9-17',
     error => error instanceof HttpError && error.status === 400 &&
       error.message === 'invalid_article_published_at_body');
 }
+assert.equal(MetadataApplyBody.safeParse({
+  expected_current_image_url: null,
+  expected_proposed_image_url: null,
+  replace_existing_image: false,
+  apply_publisher_display_title: true,
+  expected_current_published_at: '2026-09-17',
+  apply_publisher_published_at: false,
+}).success, true);
+assert.equal(MetadataApplyBody.safeParse({
+  expected_current_image_url: null,
+  expected_proposed_image_url: null,
+  replace_existing_image: false,
+  expected_current_published_at: null,
+  expected_proposed_published_at: '2026-09-17',
+  apply_publisher_published_at: false,
+}).success, false);
 assert.deepEqual(metadataPublishedAtProposal(null, publisherPublishedAt), {
   current: null, proposed: '2026-09-13T13:08:11.000Z',
 });
