@@ -284,6 +284,8 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
         ? guardianRemotePreviewUrl(value)
         : remotePreviewUrl(value, source)).find(Boolean) ?? null;
     if (!preview) {
+      // Pending/manual review benefits from a plausible visible article image when social metadata
+      // is absent; the image still has to pass the existing publisher/CDN allow-list.
       try { preview = await fetchArticleVisiblePreviewImage(canonicalUrl, source); }
       catch { /* Optional visible-article image fallback must not block metadata reload. */ }
     }
