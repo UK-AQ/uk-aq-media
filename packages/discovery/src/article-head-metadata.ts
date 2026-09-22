@@ -10,16 +10,25 @@ const HEAD_TIMEOUT_MS = 10_000;
 const MAX_HEAD_REDIRECTS = 3;
 const HEAD_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+const HTML_METADATA_ENTITIES: Readonly<Record<string, string>> = {
+  amp: '&', apos: "'", bull: '•', cent: '¢', copy: '©', deg: '°', euro: '€',
+  gt: '>', hellip: '…', laquo: '«', ldquo: '“', lsquo: '‘', lt: '<', mdash: '—',
+  middot: '·', nbsp: ' ', ndash: '–', pound: '£', quot: '"', raquo: '»',
+  rdquo: '”', reg: '®', rsquo: '’', trade: '™', yen: '¥',
+};
+
 function decodeHtmlEntities(value: string): string {
-  const named: Record<string, string> = {
-    amp: '&', apos: "'", gt: '>', lt: '<', nbsp: ' ', quot: '"',
-  };
-  return value.replace(/&(#(?:x[0-9a-f]+|\d+)|[a-z]+);/gi, (entity, key: string) => {
-    if (key[0] !== '#') return named[key.toLowerCase()] ?? entity;
+  return value.replace(/&(#(?:x[0-9a-f]+|\d+)|[a-z][a-z0-9]+);/gi, (entity, key: string) => {
+    if (key[0] !== '#') return HTML_METADATA_ENTITIES[key.toLowerCase()] ?? entity;
     const hexadecimal = key[1]?.toLowerCase() === 'x';
     const codePoint = Number.parseInt(key.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
-    try { return Number.isSafeInteger(codePoint) ? String.fromCodePoint(codePoint) : entity; }
-    catch { return entity; }
+    try {
+      return Number.isSafeInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+        ? String.fromCodePoint(codePoint)
+        : entity;
+    } catch {
+      return entity;
+    }
   });
 }
 
