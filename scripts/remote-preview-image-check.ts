@@ -13,6 +13,10 @@ const cambridgeNews: PublisherDomainIdentity = {
   source_key: 'discovered-publisher-7d08f774ec420c35',
   canonical_domain: 'cambridge-news.co.uk',
 };
+const cleanAirFund: PublisherDomainIdentity = {
+  source_key: 'manual-clean-air-fund',
+  canonical_domain: 'cleanairfund.org',
+};
 const unrelatedDynamicSource: PublisherDomainIdentity = {
   source_key: 'discovered-publisher-c592df415547ae79',
   canonical_domain: 'unrelated-news.example',
@@ -47,6 +51,9 @@ async function redirectFailure(location: string): Promise<void> {
 assert.equal(remotePreviewUrl(initialUrl, openaq), initialUrl);
 assert.equal(remotePreviewUrl(resolvedUrl, openaq), resolvedUrl);
 assert.equal(remotePreviewUrl(cambridgeImageUrl, cambridgeNews), cambridgeImageUrl);
+assert.equal(remotePreviewUrl(
+  'https://s40026.pcdn.co/wp-content/uploads/article-1200x875.jpeg.webp', cleanAirFund),
+'https://s40026.pcdn.co/wp-content/uploads/article-1200x875.jpeg.webp');
 assert.equal(remotePreviewUrl(cambridgeImageUrl, unrelatedDynamicSource), null);
 for (const rejected of [
   'http://i2-prod.liverpoolecho.co.uk/article/example.jpg',

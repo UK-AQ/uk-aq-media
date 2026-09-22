@@ -8,7 +8,7 @@ const TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 3;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const EXCLUDED_TAGS = new Set(['aside', 'footer', 'header', 'nav']);
-const EXCLUDED_HINT = /(?:^|[\s_-])(ad|ads|advert|advertisement|author|avatar|badge|brand|cookie|footer|header|headshot|icon|logo|menu|nav|profile|promo|recommend|related|share|sidebar|social|sponsor|sprite|tracking|widget)(?:$|[\s_-])/i;
+const EXCLUDED_HINT = /(?:^|[\s_-])(ad|ads|advert|advertisement|author|avatar|badge|brand|cookie|footer|headshot|icon|logo|menu|nav|profile|promo|recommend|related|share|sidebar|social|sponsor|sprite|tracking|widget)(?:$|[\s_-])/i;
 
 type PreviewSource = Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>;
 type Element = { tag: string; semantic: boolean; excluded: boolean };

@@ -153,6 +153,42 @@ try {
   assert.equal(visibleImageRequests, 2);
 } finally { globalThis.fetch = originalFetch; }
 
+const reclCodeSource: Source = {
+  ...source,
+  source_key: 'manual-reclamecode',
+  name: 'reclamecode.nl',
+  canonical_domain: 'reclamecode.nl',
+};
+let reclCodeRequests = 0;
+globalThis.fetch = async () => {
+  reclCodeRequests++;
+  return reclCodeRequests === 1
+    ? new Response('<head><title>Heating responsibly?</title></head>',
+      { headers: { 'Content-Type': 'text/html' } })
+    : new Response(`<main><div class="article-header">
+        <img src="/media/ixsnrzjq/thumb-houtkachel.jpg?height=720&width=1280"
+          alt="Houtkachel">
+      </div></main>`, { headers: { 'Content-Type': 'text/html' } });
+};
+try {
+  const reclCode = await fetchArticleHeadMetadata(
+    'https://www.reclamecode.nl/nieuws-agenda/nieuws/verantwoord-stoken-niet-zonder-onderbouwing/',
+    reclCodeSource);
+  assert.equal(reclCode.previewUrl,
+    'https://www.reclamecode.nl/media/ixsnrzjq/thumb-houtkachel.jpg?height=720&width=1280');
+  assert.equal(reclCodeRequests, 2);
+} finally { globalThis.fetch = originalFetch; }
+
+const cleanAirFundSource: Source = {
+  ...source,
+  source_key: 'manual-clean-air-fund',
+  name: 'Clean Air Fund',
+  canonical_domain: 'cleanairfund.org',
+};
+const cleanAirFundPreview =
+  'https://s40026.pcdn.co/wp-content/uploads/example-1200x875.jpeg.webp';
+assert.equal(remotePreviewUrl(cleanAirFundPreview, cleanAirFundSource), cleanAirFundPreview);
+
 const physOrgSource: Source = {
   ...source,
   source_key: 'phys-org',

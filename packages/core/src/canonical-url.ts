@@ -90,6 +90,7 @@ const publisherDomainPreviewImageHostnames: Readonly<Record<string, readonly str
   'cambridge-news.co.uk': ['i2-prod.liverpoolecho.co.uk'],
   'bbc.co.uk': ['ichef.bbci.co.uk'],
   'bbc.com': ['ichef.bbci.co.uk'],
+  'cleanairfund.org': ['s40026.pcdn.co'],
 };
 
 function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): string | null {
