@@ -21,9 +21,7 @@ export function publisherDomains(source: PublisherDomainInput): readonly string[
     typeof source === 'string' ? source : source.canonical_domain,
   );
   if (typeof source === 'string') return [canonicalDomain];
-  const aliases = source.source_key === 'the-independent' &&
-      canonicalDomain === 'the-independent.com'
-    ? sourceDomainAliases[source.source_key] ?? [] : [];
+  const aliases = sourceDomainAliases[source.source_key] ?? [];
   return [canonicalDomain, ...aliases];
 }
 
