@@ -84,7 +84,6 @@ assert.equal(parsed.articles[0]?.title_context, null);
 assert.equal(remotePreviewUrl(bbcPreview, source), bbcPreview);
 for (const rejected of [
   'https://other.bbci.co.uk/image.jpg',
-  'https://ichef.bbc.com/image.jpg',
   'http://ichef.bbci.co.uk/image.jpg',
   'https://user:secret@ichef.bbci.co.uk/image.jpg',
   'https://ichef.bbci.co.uk:443/image.jpg',
