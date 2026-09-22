@@ -32,7 +32,7 @@ function hasExplicitPort(raw: string): boolean {
     ? /^\[[^\]]+\]:\d+$/.test(hostAndPort) : /:\d+$/.test(hostAndPort)));
 }
 
-// Follow a small number of image redirects only when every hop remains inside the
+// Follow at most three image redirects only when every hop remains inside the
 // source's existing publisher/CDN allow-list. This permits normal same-publisher image
 // canonicalisation without weakening the remote-preview boundary.
 export async function fetchRemotePreviewImage(imageUrl: string, source: PublisherDomainIdentity,
