@@ -77,10 +77,13 @@ const secondRedirect = await fetchRemotePreviewImage(initialUrl, openaq, new Abo
   sequentialFetcher([
     new Response(null, { status: 301, headers: { Location: '/v2/resize:fit:1024/1*SzapuwhysObdfvnB2Es4rw.png' } }),
     new Response(null, { status: 302, headers: { Location: '/another-image.png' } }),
+    new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'image/png' } }),
   ], secondRedirectRequests));
-assert.equal(secondRedirect.response, null);
-assert.equal(secondRedirect.failure, 'redirect');
-assert.deepEqual(secondRedirectRequests, [initialUrl, resolvedUrl]);
+assert.equal(secondRedirect.response?.status, 200);
+assert.equal(secondRedirect.failure, null);
+assert.deepEqual(secondRedirectRequests, [
+  initialUrl, resolvedUrl, 'https://cdn-images-1.medium.com/another-image.png',
+]);
 
 for (const location of [
   'https://cdn-images-2.medium.com/image.png',
