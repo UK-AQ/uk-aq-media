@@ -7,6 +7,8 @@ export type PublisherDomainIdentity = {
 
 type PublisherDomainInput = string | PublisherDomainIdentity;
 
+// Alternate publisher domains accepted for article URLs. Image URLs are still validated
+// through remotePreviewUrl and the publisher/CDN allow-list below.
 const sourceDomainAliases: Readonly<Record<string, readonly string[]>> = {
   'the-independent': ['independent.co.uk'],
   'bbc-news': ['bbc.com'],
