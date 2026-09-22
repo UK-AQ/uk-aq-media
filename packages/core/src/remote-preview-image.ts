@@ -32,39 +32,37 @@ function hasExplicitPort(raw: string): boolean {
     ? /^\[[^\]]+\]:\d+$/.test(hostAndPort) : /:\d+$/.test(hostAndPort)));
 }
 
-// OpenAQ's permitted Medium image CDN currently emits one relative resize redirect.
-// Keep this exception source-specific and revalidate its resolved target before fetch.
+// Follow a small number of image redirects only when every hop remains inside the
+// source's existing publisher/CDN allow-list. This permits normal same-publisher image
+// canonicalisation without weakening the remote-preview boundary.
 export async function fetchRemotePreviewImage(imageUrl: string, source: PublisherDomainIdentity,
   signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<RemotePreviewImageFetchResult> {
-  const initialUrl = source.source_key === 'openaq' ? remotePreviewUrl(imageUrl, source) : imageUrl;
-  if (!initialUrl) return { response: null, failure: 'redirect' };
-  const first = await requestImage(initialUrl, signal, fetcher);
-  if (!first.response || first.failure) return first;
-  if (first.response.status < 300 || first.response.status >= 400) return first;
-  if (source.source_key !== 'openaq') {
-    await cancel(first.response);
-    return { response: null, failure: 'redirect' };
+  let requestUrl = remotePreviewUrl(imageUrl, source);
+  if (!requestUrl) return { response: null, failure: 'redirect' };
+
+  for (let redirects = 0; redirects <= 3; redirects++) {
+    const result = await requestImage(requestUrl, signal, fetcher);
+    if (!result.response || result.failure) return result;
+    const response = result.response;
+    if (response.status < 300 || response.status >= 400) return result;
+
+    const location = response.headers.get('Location');
+    if (!location || location.trim() !== location || location.startsWith('//') ||
+        hasExplicitPort(location) || redirects === 3) {
+      await cancel(response);
+      return { response: null, failure: 'redirect' };
+    }
+
+    let redirectedUrl: string | null;
+    try {
+      redirectedUrl = remotePreviewUrl(new URL(location, requestUrl).href, source);
+    } catch {
+      redirectedUrl = null;
+    }
+    await cancel(response);
+    if (!redirectedUrl) return { response: null, failure: 'redirect' };
+    requestUrl = redirectedUrl;
   }
 
-  const location = first.response.headers.get('Location');
-  if (!location || location.trim() !== location || location.startsWith('//') || hasExplicitPort(location)) {
-    await cancel(first.response);
-    return { response: null, failure: 'redirect' };
-  }
-  let redirectedUrl: string | null;
-  try {
-    redirectedUrl = remotePreviewUrl(new URL(location, initialUrl).href, source);
-  } catch {
-    redirectedUrl = null;
-  }
-  await cancel(first.response);
-  if (!redirectedUrl) return { response: null, failure: 'redirect' };
-
-  const second = await requestImage(redirectedUrl, signal, fetcher);
-  if (!second.response || second.failure) return second;
-  if (second.response.status >= 300 && second.response.status < 400) {
-    await cancel(second.response);
-    return { response: null, failure: 'redirect' };
-  }
-  return second;
+  return { response: null, failure: 'redirect' };
 }

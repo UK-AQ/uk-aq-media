@@ -91,14 +91,26 @@ for (const location of [
   'https://[invalid',
 ]) await redirectFailure(location);
 
-const unrelatedRequests: string[] = [];
-const unrelated = await fetchRemotePreviewImage(bbcImageUrl, bbc,
+const samePublisherRedirectRequests: string[] = [];
+const samePublisherRedirect = await fetchRemotePreviewImage(bbcImageUrl, bbc,
   new AbortController().signal, sequentialFetcher([
     new Response(null, { status: 301, headers: { Location: '/new-image.png' } }),
-  ], unrelatedRequests));
-assert.equal(unrelated.response, null);
-assert.equal(unrelated.failure, 'redirect');
-assert.deepEqual(unrelatedRequests, [bbcImageUrl]);
+    new Response(new Uint8Array([1]), { status: 200, headers: { 'Content-Type': 'image/png' } }),
+  ], samePublisherRedirectRequests));
+assert.equal(samePublisherRedirect.response?.status, 200);
+assert.equal(samePublisherRedirect.failure, null);
+assert.deepEqual(samePublisherRedirectRequests, [
+  bbcImageUrl, 'https://ichef.bbci.co.uk/new-image.png',
+]);
+
+const offPublisherRedirectRequests: string[] = [];
+const offPublisherRedirect = await fetchRemotePreviewImage(bbcImageUrl, bbc,
+  new AbortController().signal, sequentialFetcher([
+    new Response(null, { status: 301, headers: { Location: 'https://images.example/image.png' } }),
+  ], offPublisherRedirectRequests));
+assert.equal(offPublisherRedirect.response, null);
+assert.equal(offPublisherRedirect.failure, 'redirect');
+assert.deepEqual(offPublisherRedirectRequests, [bbcImageUrl]);
 
 const directRequests: string[] = [];
 const direct = await fetchRemotePreviewImage(bbcImageUrl, bbc,
