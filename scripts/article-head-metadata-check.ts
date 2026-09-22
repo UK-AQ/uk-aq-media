@@ -4,7 +4,7 @@ import {
 } from '../packages/discovery/src/article-head-metadata';
 import { ScanError } from '../packages/discovery/src/rss';
 import {
-  canonicalizeUrl, remotePreviewUrl, type DiscoveredArticle, type Source,
+  canonicalizeUrl, publisherHttpsUrl, remotePreviewUrl, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { articleHeadHttpError, metadataImageChange } from
   '../apps/media-admin/src/editorial-dashboard';
@@ -113,6 +113,44 @@ try {
   const bbcMetadata = await fetchArticleHeadMetadata(
     'https://www.bbc.co.uk/news/articles/example', bbcSource);
   assert.equal(bbcMetadata.previewUrl, bbcPreview);
+} finally { globalThis.fetch = originalFetch; }
+
+assert.equal(publisherHttpsUrl(
+  'https://www.bbc.com/future/article/20260917-example', bbcSource),
+'https://www.bbc.com/future/article/20260917-example');
+assert.equal(canonicalizeUrl(
+  'https://www.bbc.com/future/article/20260917-example', bbcSource),
+'https://bbc.com/future/article/20260917-example');
+
+const manualBbcSource: Source = {
+  ...source,
+  source_key: 'manual-bbc',
+  name: 'bbc.com',
+  canonical_domain: 'bbc.com',
+};
+assert.equal(remotePreviewUrl(bbcPreview, manualBbcSource), bbcPreview);
+
+let visibleImageRequests = 0;
+globalThis.fetch = async () => {
+  visibleImageRequests++;
+  return visibleImageRequests === 1
+    ? new Response('<head><title>Article without social image</title></head>',
+      { headers: { 'Content-Type': 'text/html' } })
+    : new Response(`<body>
+        <header><img src="https://publisher.example/logo.png" width="40" height="40"></header>
+        <main><article>
+          <picture>
+            <source srcset="https://publisher.example/hero-640.jpg 640w, https://publisher.example/hero-1280.jpg 1280w">
+            <img src="https://publisher.example/hero.jpg" alt="Article photograph">
+          </picture>
+        </article></main>
+      </body>`, { headers: { 'Content-Type': 'text/html' } });
+};
+try {
+  const visible = await fetchArticleHeadMetadata(article.canonical_url, source);
+  assert.equal(visible.previewUrl, 'https://publisher.example/hero-1280.jpg');
+  assert.equal(visible.previewError, null);
+  assert.equal(visibleImageRequests, 2);
 } finally { globalThis.fetch = originalFetch; }
 
 const physOrgSource: Source = {

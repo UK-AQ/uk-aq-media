@@ -3,6 +3,7 @@ import {
   type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { ScanError } from './rss';
+import { fetchArticleVisiblePreviewImage } from './article-visible-image';
 import { fetchCawsArticlePreviewImage } from './caws-preview-image';
 import { fetchDsawspArticlePreviewImage } from './dsawsp';
 
@@ -283,6 +284,10 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
       .map(value => source.source_key === 'the-guardian'
         ? guardianRemotePreviewUrl(value)
         : remotePreviewUrl(value, source)).find(Boolean) ?? null;
+    if (!preview) {
+      try { preview = await fetchArticleVisiblePreviewImage(canonicalUrl, source); }
+      catch { /* Optional visible-article image fallback must not block metadata reload. */ }
+    }
     if (!preview && source.source_key === 'dsawsp') {
       try { preview = await fetchDsawspArticlePreviewImage(canonicalUrl, source); }
       catch { /* Optional DSAWSP visible-image fallback must not block metadata reload. */ }

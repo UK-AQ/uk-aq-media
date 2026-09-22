@@ -9,6 +9,7 @@ type PublisherDomainInput = string | PublisherDomainIdentity;
 
 const sourceDomainAliases: Readonly<Record<string, readonly string[]>> = {
   'the-independent': ['independent.co.uk'],
+  'bbc-news': ['bbc.com'],
 };
 
 function normaliseDomain(domain: string): string {
@@ -87,6 +88,8 @@ const sourcePreviewImageHostnames: Readonly<Record<string, readonly string[]>> =
 
 const publisherDomainPreviewImageHostnames: Readonly<Record<string, readonly string[]>> = {
   'cambridge-news.co.uk': ['i2-prod.liverpoolecho.co.uk'],
+  'bbc.co.uk': ['ichef.bbci.co.uk'],
+  'bbc.com': ['ichef.bbci.co.uk'],
 };
 
 function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): string | null {

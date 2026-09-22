@@ -359,7 +359,7 @@ async function sourceForUrl(db: D1Database, rawUrl: string): Promise<{
     WHERE retired_at IS NULL
       AND (? = lower(canonical_domain)
         OR ? LIKE '%.' || lower(canonical_domain)
-        OR source_key = 'the-independent')
+        OR source_key IN ('the-independent', 'bbc-news'))
     ORDER BY length(canonical_domain) DESC,
       CASE WHEN source_key LIKE 'manual-%' THEN 2
         WHEN source_key LIKE 'discovered-publisher-%' THEN 1 ELSE 0 END,
