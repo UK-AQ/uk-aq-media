@@ -93,7 +93,7 @@ export function extractDsawspNextIndexUrl(html: string, currentUrl: string,
 
 type DsawspPreviewSource = Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>;
 
-const DSAWSP_IMAGE_EXCLUDED_HINT = /(?:^|[\\s_-])(avatar|brand|cookie|footer|header|icon|logo|menu|nav|related|share|sidebar|social|tracking|widget)(?:$|[\\s_-])/i;
+const DSAWSP_IMAGE_EXCLUDED_HINT = /(?:^|[\s_-])(avatar|brand|cookie|footer|header|icon|logo|menu|nav|related|share|sidebar|social|tracking|widget)(?:$|[\s_-])/i;
 
 function dsawspImageCandidate(raw: string | null | undefined, articleUrl: string,
   source: DsawspPreviewSource): string | null {
@@ -137,7 +137,7 @@ function dsawspStructuredImageCandidates(value: unknown): string[] {
 export function extractDsawspArticlePreviewImage(html: string, articleUrl: string,
   source: DsawspPreviewSource): string | null {
   if (source.source_key !== 'dsawsp' || source.image_policy !== 'remote_preview') return null;
-  for (const match of html.matchAll(/<script\\b([^>]*)>([\\s\\S]*?)<\\/script\\s*>/gi)) {
+  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
     const attrs = match[1] ?? '';
     if (attribute(attrs, 'type')?.trim().toLowerCase() !== 'application/ld+json') continue;
     try {
@@ -148,7 +148,7 @@ export function extractDsawspArticlePreviewImage(html: string, articleUrl: strin
     } catch { /* Optional publisher metadata may be malformed. */ }
   }
 
-  for (const match of html.matchAll(/<img\\b([^>]*)>/gi)) {
+  for (const match of html.matchAll(/<img\b([^>]*)>/gi)) {
     const attrs = match[1] ?? '';
     const hint = [attribute(attrs, 'id'), attribute(attrs, 'class'), attribute(attrs, 'alt')]
       .filter(Boolean).join(' ');
@@ -157,7 +157,7 @@ export function extractDsawspArticlePreviewImage(html: string, articleUrl: strin
     const height = Number(attribute(attrs, 'height'));
     if ((width && width <= 2) || (height && height <= 2)) continue;
     const srcset = attribute(attrs, 'srcset')?.split(',').map(candidate =>
-      candidate.trim().split(/\\s+/, 1)[0]).filter(Boolean).reverse() ?? [];
+      candidate.trim().split(/\s+/, 1)[0]).filter(Boolean).reverse() ?? [];
     for (const raw of [attribute(attrs, 'src'), attribute(attrs, 'data-src'), ...srcset]) {
       const accepted = dsawspImageCandidate(raw, articleUrl, source);
       if (accepted) return accepted;
