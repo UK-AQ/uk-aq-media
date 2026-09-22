@@ -179,6 +179,28 @@ try {
   assert.equal(reclCodeRequests, 2);
 } finally { globalThis.fetch = originalFetch; }
 
+let reclCodeRawRequests = 0;
+globalThis.fetch = async () => {
+  reclCodeRawRequests++;
+  return reclCodeRawRequests === 1
+    ? new Response('<head><title>Heating responsibly?</title></head>',
+      { headers: { 'Content-Type': 'text/html' } })
+    : new Response(`<body>
+        <div data-background-image="/assets/site-logo.png"></div>
+        <script type="application/json">
+          {"hero":"/media/ixsnrzjq/thumb-houtkachel.jpg?height=720&amp;width=1280"}
+        </script>
+      </body>`, { headers: { 'Content-Type': 'text/html' } });
+};
+try {
+  const reclCodeRaw = await fetchArticleHeadMetadata(
+    'https://www.reclamecode.nl/nieuws-agenda/nieuws/verantwoord-stoken-niet-zonder-onderbouwing/',
+    reclCodeSource);
+  assert.equal(reclCodeRaw.previewUrl,
+    'https://www.reclamecode.nl/media/ixsnrzjq/thumb-houtkachel.jpg?height=720&width=1280');
+  assert.equal(reclCodeRawRequests, 2);
+} finally { globalThis.fetch = originalFetch; }
+
 const cleanAirFundSource: Source = {
   ...source,
   source_key: 'manual-clean-air-fund',

@@ -9,6 +9,9 @@ const MAX_REDIRECTS = 3;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const EXCLUDED_TAGS = new Set(['aside', 'footer', 'header', 'nav']);
 const EXCLUDED_HINT = /(?:^|[\s_-])(ad|ads|advert|advertisement|author|avatar|badge|brand|cookie|footer|headshot|icon|logo|menu|nav|profile|promo|recommend|related|share|sidebar|social|sponsor|sprite|tracking|widget)(?:$|[\s_-])/i;
+const EXCLUDED_IMAGE_URL_HINT =
+  /(?:^|[\/_-])(avatar|badge|brand|cookie|favicon|icon|logo|profile|share|social|sprite|tracking)(?:[\/_-]|\.|$)/i;
+const IMAGE_FILE = /\.(?:avif|gif|jpe?g|png|webp)(?:[?#]|$)/i;
 
 type PreviewSource = Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>;
 type Element = { tag: string; semantic: boolean; excluded: boolean };
@@ -21,10 +24,14 @@ function attributes(tag: string): Map<string, string> {
   return result;
 }
 
+function decodeUrlEntities(value: string): string {
+  return value.replace(/&amp;/gi, '&').replace(/&#38;/g, '&');
+}
+
 function permitted(raw: string | null | undefined, articleUrl: string,
   source: PreviewSource): string | null {
   if (!raw) return null;
-  try { return remotePreviewUrl(new URL(raw.trim(), articleUrl).href, source); }
+  try { return remotePreviewUrl(new URL(decodeUrlEntities(raw.trim()), articleUrl).href, source); }
   catch { return null; }
 }
 
@@ -140,12 +147,47 @@ function contentImage(html: string, articleUrl: string, source: PreviewSource,
   return null;
 }
 
+function rawImageScore(raw: string): number {
+  const decoded = decodeUrlEntities(raw);
+  if (!IMAGE_FILE.test(decoded) || EXCLUDED_IMAGE_URL_HINT.test(decoded)) return -1;
+  let score = 0;
+  if (/\/(?:media|uploads?|images?|photos?)\//i.test(decoded)) score += 4;
+  if (/(?:^|[?&])width=(?:[5-9]\d{2}|\d{4,})(?:&|$)/i.test(decoded)) score += 3;
+  if (/(?:^|[?&])height=(?:[4-9]\d{2}|\d{4,})(?:&|$)/i.test(decoded)) score += 2;
+  if (/(?:640|720|800|960|1024|1200|1280|1600|1920)/.test(decoded)) score += 1;
+  return score;
+}
+
+function rawPageImage(html: string, articleUrl: string, source: PreviewSource): string | null {
+  const candidates: Array<{ url: string; score: number; order: number }> = [];
+  let order = 0;
+  const seen = new Set<string>();
+
+  // Last-resort review candidate: inspect quoted image-looking URLs anywhere in the bounded HTML.
+  // This catches publisher templates that expose the hero image through background/lazy attributes
+  // rather than a conventional <img>, while the existing URL allow-list still prevents arbitrary
+  // third-party assets from being accepted.
+  for (const match of html.matchAll(/["']([^"'<>\s]+\.(?:avif|gif|jpe?g|png|webp)(?:\?[^"'<>\s]*)?)["']/gi)) {
+    const raw = match[1];
+    if (!raw) continue;
+    const accepted = permitted(raw, articleUrl, source);
+    if (!accepted || seen.has(accepted)) continue;
+    seen.add(accepted);
+    const score = rawImageScore(raw);
+    if (score >= 0) candidates.push({ url: accepted, score, order: order++ });
+  }
+  candidates.sort((left, right) => right.score - left.score || left.order - right.order);
+  return candidates[0]?.url ?? null;
+}
+
 export function extractArticleVisiblePreviewImage(html: string, articleUrl: string,
   source: PreviewSource, allowPageFallback = true): string | null {
   if (source.image_policy !== 'remote_preview') return null;
   return jsonLdImage(html, articleUrl, source) ??
     contentImage(html, articleUrl, source, true) ??
-    (allowPageFallback ? contentImage(html, articleUrl, source, false) : null);
+    (allowPageFallback
+      ? contentImage(html, articleUrl, source, false) ?? rawPageImage(html, articleUrl, source)
+      : null);
 }
 
 async function cancel(response: Response): Promise<void> {
