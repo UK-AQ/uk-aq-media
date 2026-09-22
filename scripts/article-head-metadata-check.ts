@@ -268,7 +268,8 @@ async function checkRedirects(responses: Map<string, Response>, startUrl: string
   } finally { globalThis.fetch = originalFetch; }
 }
 
-const finalHtml = () => new Response('<head><title>Redirected article</title></head>',
+const finalHtml = () => new Response(
+  '<head><title>Redirected article</title><meta property="og:image" content="https://publisher.example/redirected.jpg"></head>',
   { headers: { 'Content-Type': 'text/html' } });
 assert.deepEqual(await checkRedirects(new Map([
   ['https://publisher.example/www', new Response(null,
