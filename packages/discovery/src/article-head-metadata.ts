@@ -4,6 +4,7 @@ import {
 } from '@uk-aq-media/core';
 import { ScanError } from './rss';
 import { fetchCawsArticlePreviewImage } from './caws-preview-image';
+import { fetchDsawspArticlePreviewImage } from './dsawsp';
 
 const MAX_HEAD_BYTES = 256 * 1024;
 const HEAD_TIMEOUT_MS = 10_000;
@@ -278,10 +279,14 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
     const metadata = extractArticleHeadMetadata(await readHtmlHead(response, controller.signal));
     const candidates = [metadata.ogImage, metadata.twitterImage].filter(
       (value): value is string => Boolean(value));
-    const preview = candidates
+    let preview = candidates
       .map(value => source.source_key === 'the-guardian'
         ? guardianRemotePreviewUrl(value)
         : remotePreviewUrl(value, source)).find(Boolean) ?? null;
+    if (!preview && source.source_key === 'dsawsp') {
+      try { preview = await fetchDsawspArticlePreviewImage(canonicalUrl, source); }
+      catch { /* Optional DSAWSP visible-image fallback must not block metadata reload. */ }
+    }
     let previewError: string | null = null;
     if (!preview && candidates.length > 0) {
       try { previewError = `invalid_preview_image_host:${new URL(candidates[0]!).hostname}`; }

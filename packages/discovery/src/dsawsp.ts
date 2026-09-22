@@ -91,6 +91,81 @@ export function extractDsawspNextIndexUrl(html: string, currentUrl: string,
   return null;
 }
 
+type DsawspPreviewSource = Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>;
+
+const DSAWSP_IMAGE_EXCLUDED_HINT = /(?:^|[\\s_-])(avatar|brand|cookie|footer|header|icon|logo|menu|nav|related|share|sidebar|social|tracking|widget)(?:$|[\\s_-])/i;
+
+function dsawspImageCandidate(raw: string | null | undefined, articleUrl: string,
+  source: DsawspPreviewSource): string | null {
+  if (!raw) return null;
+  try { return remotePreviewUrl(new URL(raw.trim(), articleUrl).href, source); }
+  catch { return null; }
+}
+
+function dsawspStructuredImageCandidates(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(dsawspStructuredImageCandidates);
+  if (!value || typeof value !== 'object') return [];
+  const record = value as Record<string, unknown>;
+  const types = (Array.isArray(record['@type']) ? record['@type'] : [record['@type']])
+    .filter((candidate): candidate is string => typeof candidate === 'string');
+  const article = types.some(type => /^(?:Article|BlogPosting|NewsArticle)$/i.test(type));
+  const results: string[] = [];
+  if (article) {
+    for (const field of [record.image, record.thumbnailUrl]) {
+      if (typeof field === 'string') results.push(field);
+      else if (Array.isArray(field)) {
+        for (const item of field) {
+          if (typeof item === 'string') results.push(item);
+          else if (item && typeof item === 'object') {
+            const image = item as Record<string, unknown>;
+            for (const key of ['url', 'contentUrl']) {
+              if (typeof image[key] === 'string') results.push(image[key] as string);
+            }
+          }
+        }
+      } else if (field && typeof field === 'object') {
+        const image = field as Record<string, unknown>;
+        for (const key of ['url', 'contentUrl']) {
+          if (typeof image[key] === 'string') results.push(image[key] as string);
+        }
+      }
+    }
+  }
+  return results.concat(Object.values(record).flatMap(dsawspStructuredImageCandidates));
+}
+
+export function extractDsawspArticlePreviewImage(html: string, articleUrl: string,
+  source: DsawspPreviewSource): string | null {
+  if (source.source_key !== 'dsawsp' || source.image_policy !== 'remote_preview') return null;
+  for (const match of html.matchAll(/<script\\b([^>]*)>([\\s\\S]*?)<\\/script\\s*>/gi)) {
+    const attrs = match[1] ?? '';
+    if (attribute(attrs, 'type')?.trim().toLowerCase() !== 'application/ld+json') continue;
+    try {
+      for (const candidate of dsawspStructuredImageCandidates(JSON.parse(match[2] ?? ''))) {
+        const accepted = dsawspImageCandidate(candidate, articleUrl, source);
+        if (accepted) return accepted;
+      }
+    } catch { /* Optional publisher metadata may be malformed. */ }
+  }
+
+  for (const match of html.matchAll(/<img\\b([^>]*)>/gi)) {
+    const attrs = match[1] ?? '';
+    const hint = [attribute(attrs, 'id'), attribute(attrs, 'class'), attribute(attrs, 'alt')]
+      .filter(Boolean).join(' ');
+    if (DSAWSP_IMAGE_EXCLUDED_HINT.test(hint)) continue;
+    const width = Number(attribute(attrs, 'width'));
+    const height = Number(attribute(attrs, 'height'));
+    if ((width && width <= 2) || (height && height <= 2)) continue;
+    const srcset = attribute(attrs, 'srcset')?.split(',').map(candidate =>
+      candidate.trim().split(/\\s+/, 1)[0]).filter(Boolean).reverse() ?? [];
+    for (const raw of [attribute(attrs, 'src'), attribute(attrs, 'data-src'), ...srcset]) {
+      const accepted = dsawspImageCandidate(raw, articleUrl, source);
+      if (accepted) return accepted;
+    }
+  }
+  return null;
+}
+
 function dsawspDate(value: string): string | null {
   const match = /^([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})$/.exec(text(value));
   if (!match) return null;
@@ -105,7 +180,8 @@ function dsawspDate(value: string): string | null {
     checked.getUTCDate() === day ? candidate : null;
 }
 
-export function extractDsawspArticleMetadata(html: string, source: Source): {
+export function extractDsawspArticleMetadata(html: string, source: Source,
+  articleUrl: string = DSAWSP_INDEX_URL): {
   title: string | null; publishedAt: string | null; category: string | null;
   previewUrl: string | null;
 } {
@@ -121,12 +197,22 @@ export function extractDsawspArticleMetadata(html: string, source: Source): {
   const date = /<[^>]*\bclass\s*=\s*(?:"[^"]*\bblog-date\b[^"]*"|'[^']*\bblog-date\b[^']*')[^>]*>([\s\S]*?)<\/[^>]+>/i.exec(html)?.[1];
   const category = /<a\b[^>]*\bclass\s*=\s*(?:"[^"]*\bcategory-link\b[^"]*"|'[^']*\bcategory-link\b[^']*')[^>]*>([\s\S]*?)<\/a\s*>/i.exec(html)?.[1];
   const image = meta.get('og:image') ?? meta.get('twitter:image') ?? null;
+  const previewUrl = image ? remotePreviewUrl(image, source) : null;
   return { title, publishedAt: date ? dsawspDate(date) : null,
     category: category ? text(category).slice(0, 100) || null : null,
-    previewUrl: image ? remotePreviewUrl(image, source) : null };
+    previewUrl: previewUrl ?? extractDsawspArticlePreviewImage(html, articleUrl, source) };
 }
 
-async function fetchBoundedHtml(url: string, source: Source, maximumBytes: number,
+export async function fetchDsawspArticlePreviewImage(articleUrl: string,
+  source: DsawspPreviewSource, fetcher: typeof fetch = fetch): Promise<string | null> {
+  if (source.source_key !== 'dsawsp' || source.image_policy !== 'remote_preview') return null;
+  const html = await fetchBoundedHtml(articleUrl, source, ARTICLE_MAX_BYTES,
+    value => Boolean(extractDsawspArticlePreviewImage(value, articleUrl, source)), fetcher);
+  return extractDsawspArticlePreviewImage(html, articleUrl, source);
+}
+
+async function fetchBoundedHtml(url: string,
+  source: Pick<Source, 'source_key' | 'canonical_domain'>, maximumBytes: number,
   enough?: (html: string) => boolean, fetcher: typeof fetch = fetch): Promise<string> {
   const permitted = publisherHttpsUrl(url, source);
   if (!permitted) throw new ScanError('dsawsp_url_not_permitted');
@@ -209,10 +295,10 @@ export async function discoverDsawsp(source: Source, fetcher: typeof fetch = fet
   for (const canonical of urls) {
     try {
       const html = await fetchBoundedHtml(canonical, source, ARTICLE_MAX_BYTES, value => {
-        const metadata = extractDsawspArticleMetadata(value, source);
+        const metadata = extractDsawspArticleMetadata(value, source, canonical);
         return Boolean(metadata.title && metadata.publishedAt && metadata.category && metadata.previewUrl);
       }, fetcher);
-      const metadata = extractDsawspArticleMetadata(html, source);
+      const metadata = extractDsawspArticleMetadata(html, source, canonical);
       if (!metadata.title) { invalid++; continue; }
       articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
         original_url: canonical, title: metadata.title, author: null,
