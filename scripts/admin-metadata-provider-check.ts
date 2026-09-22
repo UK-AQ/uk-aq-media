@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { HttpError, SourceSchema, z } from '@uk-aq-media/core';
 import { parsePublisherRssFeed } from '@uk-aq-media/discovery';
 import {
-  metadataFromOpenAqRss, metadataProviderFor, metadataPublishedAtChange,
-  metadataPublishedAtProposal, normalisePublisherPublishedAt, requireOpenAqRssMetadata,
+  MetadataApplyBody, metadataFromOpenAqRss, metadataProviderFor, metadataPublishedAtChange,
+  metadataPublishedAtProposal, normaliseManualPublishedAt, normalisePublisherPublishedAt,
+  requireOpenAqRssMetadata,
 } from '../apps/media-admin/src/editorial-dashboard';
 
 const sources = z.array(SourceSchema).parse(JSON.parse(
@@ -40,6 +41,33 @@ error => error instanceof HttpError && error.status === 409 && error.message ===
 const publisherPublishedAt = normalisePublisherPublishedAt('2026-09-13T13:08:11Z');
 assert.equal(publisherPublishedAt, '2026-09-13T13:08:11.000Z');
 assert.equal(normalisePublisherPublishedAt('not-a-date'), null);
+assert.equal(normaliseManualPublishedAt('2026-09-17'), '2026-09-17');
+assert.equal(normaliseManualPublishedAt('2024-02-29'), '2024-02-29');
+assert.equal(normaliseManualPublishedAt('2026-09-17T12:34:56+01:00'),
+  '2026-09-17T11:34:56.000Z');
+assert.equal(normaliseManualPublishedAt(null), null);
+for (const invalid of ['2026-02-29', '2026-02-31', '2026-9-17',
+  '2026-09-17T12:34:56']) {
+  assert.throws(() => normaliseManualPublishedAt(invalid),
+    error => error instanceof HttpError && error.status === 400 &&
+      error.message === 'invalid_article_published_at_body');
+}
+assert.equal(MetadataApplyBody.safeParse({
+  expected_current_image_url: null,
+  expected_proposed_image_url: null,
+  replace_existing_image: false,
+  apply_publisher_display_title: true,
+  expected_current_published_at: '2026-09-17',
+  apply_publisher_published_at: false,
+}).success, true);
+assert.equal(MetadataApplyBody.safeParse({
+  expected_current_image_url: null,
+  expected_proposed_image_url: null,
+  replace_existing_image: false,
+  expected_current_published_at: null,
+  expected_proposed_published_at: '2026-09-17',
+  apply_publisher_published_at: false,
+}).success, false);
 assert.deepEqual(metadataPublishedAtProposal(null, publisherPublishedAt), {
   current: null, proposed: '2026-09-13T13:08:11.000Z',
 });
@@ -61,4 +89,8 @@ error => error instanceof HttpError && error.status === 409 &&
 const dashboardSource = readFileSync('apps/media-admin/src/editorial-dashboard.ts', 'utf8');
 assert.match(dashboardSource,
   /published_at = CASE WHEN \? AND published_at IS NULL THEN \? ELSE published_at END/);
+assert.match(dashboardSource,
+  /UPDATE media_articles SET published_at = \?, mutation_key = \?, revision = \?, updated_at = \?/);
+assert.match(dashboardSource,
+  /\/admin\\\/articles\\\/\(\[1-9\]\\d\*\)\\\/published-at/);
 console.log('Admin metadata provider checks passed');

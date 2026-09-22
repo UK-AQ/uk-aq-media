@@ -56,6 +56,19 @@ const AddAuthorRuleBody = z.object({
 }).strict();
 const LookupBody = z.object({ url: z.url().max(2048) }).strict();
 const ArticleAuthorBody = z.object({ author: z.string().max(500).nullable() }).strict();
+const DATE_ONLY_PUBLISHED_AT = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DateOnlyPublishedAt = z.string().regex(DATE_ONLY_PUBLISHED_AT).refine(value => {
+  const match = DATE_ONLY_PUBLISHED_AT.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1]!;
+});
+const StoredPublishedAt = z.union([DateOnlyPublishedAt, z.iso.datetime({ offset: true })]);
+const ArticlePublishedAtBody = z.object({ published_at: StoredPublishedAt.nullable() }).strict();
 const ManualArticleBody = z.object({
   initial_status: z.enum(['pending', 'approved']),
   url: z.url().max(2048),
@@ -65,12 +78,12 @@ const ManualArticleBody = z.object({
   published_at: z.iso.datetime({ offset: true }).nullable().optional(),
   preview_image_url: z.url().max(2048).nullable().optional(),
 }).strict();
-const MetadataApplyBody = z.object({
+export const MetadataApplyBody = z.object({
   expected_current_image_url: z.string().max(2048).nullable(),
   expected_proposed_image_url: z.url().max(2048).nullable(),
   replace_existing_image: z.boolean(),
   apply_publisher_display_title: z.boolean().default(true),
-  expected_current_published_at: z.iso.datetime({ offset: true }).nullable().optional(),
+  expected_current_published_at: StoredPublishedAt.nullable().optional(),
   expected_proposed_published_at: z.iso.datetime({ offset: true }).nullable().optional(),
   apply_publisher_published_at: z.boolean().default(false),
 }).strict().superRefine((value, context) => {
@@ -149,6 +162,13 @@ function requireIdempotencyKey(request: Request): string {
     throw new HttpError(400, 'idempotency_key_required');
   }
   return key;
+}
+
+export function normaliseManualPublishedAt(value: string | null): string | null {
+  if (value === null) return null;
+  const stored = StoredPublishedAt.safeParse(value);
+  if (!stored.success) throw new HttpError(400, 'invalid_article_published_at_body');
+  return DATE_ONLY_PUBLISHED_AT.test(stored.data) ? stored.data : new Date(stored.data).toISOString();
 }
 
 function csvValues(search: URLSearchParams, key: string, max = 20): string[] {
@@ -525,6 +545,66 @@ async function setArticleAuthor(request: Request, db: D1Database, id: number): P
   if (!event || event.article_id !== id) throw new HttpError(409, 'article_changed');
   return json({ article: { id, status: event.to_status, author, revision: event.revision },
     replayed: false, changed: true });
+}
+
+async function setArticlePublishedAt(request: Request, db: D1Database, id: number): Promise<Response> {
+  const eventKey = `admin:published-at:${requireIdempotencyKey(request)}`;
+  const parsed = ArticlePublishedAtBody.safeParse(await readJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_article_published_at_body');
+  const publishedAt = normaliseManualPublishedAt(parsed.data.published_at);
+  const replay = await db.prepare(`SELECT article_id, event_type, to_status, revision, metadata_json
+    FROM media_article_events WHERE event_key = ?`).bind(eventKey).first<{
+      article_id: number; event_type: string; to_status: string; revision: number;
+      metadata_json: string;
+    }>();
+  if (replay) {
+    let metadata: Record<string, unknown>;
+    try { metadata = JSON.parse(replay.metadata_json) as Record<string, unknown>; }
+    catch { throw new HttpError(409, 'idempotency_key_conflict'); }
+    if (replay.article_id !== id || replay.event_type !== 'edited' ||
+        metadata.field !== 'published_at' ||
+        (typeof metadata.requested_published_at !== 'string' &&
+          metadata.requested_published_at !== null) ||
+        (typeof metadata.after !== 'string' && metadata.after !== null) ||
+        metadata.requested_published_at !== publishedAt) {
+      throw new HttpError(409, 'idempotency_key_conflict');
+    }
+    return json({ article: { id, status: replay.to_status, published_at: metadata.after,
+      revision: replay.revision }, replayed: true, changed: true });
+  }
+  const current = await db.prepare(`SELECT id, status, published_at, revision
+    FROM media_articles WHERE id = ?`).bind(id).first<{
+      id: number; status: string; published_at: string | null; revision: number;
+    }>();
+  if (!current) throw new HttpError(404, 'article_not_found');
+  if (current.published_at === publishedAt) {
+    return json({ article: { id: current.id, status: current.status,
+      published_at: current.published_at, revision: current.revision },
+      replayed: false, changed: false });
+  }
+  const now = new Date().toISOString();
+  const nextRevision = current.revision + 1;
+  const metadata = JSON.stringify({ field: 'published_at', requested_published_at: publishedAt,
+    before: current.published_at, after: publishedAt });
+  await db.batch([
+    db.prepare(`UPDATE media_articles SET published_at = ?, mutation_key = ?, revision = ?, updated_at = ?
+      WHERE id = ? AND revision = ? AND published_at IS ?`)
+      .bind(publishedAt, eventKey, nextRevision, now, id, current.revision, current.published_at),
+    db.prepare(`INSERT INTO media_article_events
+      (article_id, event_key, event_type, actor_type, from_status, to_status, revision,
+       created_at, metadata_json)
+      SELECT id, ?, 'edited', 'admin', status, status, revision, ?, ?
+      FROM media_articles WHERE id = ? AND revision = ? AND mutation_key = ?`)
+      .bind(eventKey, now, metadata, id, nextRevision, eventKey),
+  ]);
+  const event = await db.prepare(`SELECT article_id, to_status, revision
+    FROM media_article_events WHERE event_key = ?`).bind(eventKey).first<{
+      article_id: number; to_status: string; revision: number;
+    }>();
+  if (!event || event.article_id !== id) throw new HttpError(409, 'article_changed');
+  await reconcileHomepageLatestSix(db);
+  return json({ article: { id, status: event.to_status, published_at: publishedAt,
+    revision: event.revision }, replayed: false, changed: true });
 }
 
 async function listArticles(db: D1Database, search: URLSearchParams): Promise<Response> {
@@ -1090,6 +1170,11 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
   if (articleAuthorMatch) {
     if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
     return setArticleAuthor(request, env.MEDIA_DB, Number(articleAuthorMatch[1]));
+  }
+  const articlePublishedAtMatch = /^\/admin\/articles\/([1-9]\d*)\/published-at$/.exec(url.pathname);
+  if (articlePublishedAtMatch) {
+    if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
+    return setArticlePublishedAt(request, env.MEDIA_DB, Number(articlePublishedAtMatch[1]));
   }
   const imageMatch = /^\/admin\/articles\/([1-9]\d*)\/image$/.exec(url.pathname);
   if (imageMatch) {
