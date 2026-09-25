@@ -34,10 +34,21 @@ image metadata use the generic RSS adapter and normal AQ relevance filter. Its p
 `search_index_policy='metadata_only'`; feed-body indexing must not be enabled until explicit
 publisher permission is obtained.
 
+## NCAS publisher source
+
+NCAS is an enabled manual/Standard publisher source using exactly three bounded first-party
+News & Events tag indexes: `air-pollution`, `digital-atmosphere` and `air-pollutants`.
+The adapter validates the complete three-route configuration before scheduling or consuming
+work, preserves the selected tag across redirects, and never scans the unfiltered News & Events
+index. A listing candidate is accepted only when its own publisher card contains the selected
+tag. Of NCAS's publisher tags, only those same three configured tags are stored as article
+topics. Article-head metadata remains bounded and may supply the existing remote-preview
+thumbnail; rediscovery does not replace a non-null stored thumbnail or editorial approval state.
+
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
 Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, a bounded
-DSAWSP and Communities Against Woodsmoke publisher-index adapters, and a
+DSAWSP, Communities Against Woodsmoke and NCAS publisher-index adapters, and a
 separate global GDELT Web NGrams batch that retains English AQ candidates globally but
 promotes only relevant UK-publisher candidates into the existing Media system.
 The public website reaches the approved homepage feed only through the sibling
@@ -100,7 +111,8 @@ run/file/chunk evidence, global candidate/family state and the conservative publ
 scope registry; `0015` adds separate malformed NGram accounting; and `0016` advances only
 still-blocked GDELT dynamic publisher sources to `remote_preview`. Migration `0023` adds the
 bounded CAWS Blog index with manual/Standard publication policy and publisher-index
-provenance. Four publisher adapters
+provenance. Migration `0032` adds NCAS with exactly the three configured tag-index routes,
+manual/Standard publication policy and publisher-index provenance. Four publisher adapters
 remain deferred.
 
 ## GDELT Web NGrams discovery
@@ -251,11 +263,11 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 30 }`
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 34 }`
   when all current routes and all three Guardian author rules are enabled: one AQN scan,
-  eleven Guardian routes, four BBC routes, four Sky routes, five Independent routes and
-  one route for each RSS specialist publisher, and one route for each of the DSAWSP and CAWS
-  publisher indexes.
+  eleven Guardian routes, four BBC routes, four Sky routes, five Independent routes,
+  one route for each RSS specialist publisher, one route for each of the DSAWSP and CAWS
+  publisher indexes, and the three exact NCAS tag-index routes.
   Disabled or structurally mismatched author rules omit only their profile route, so
   `queued` reports the actual bounded message count. The
   count reflects only enabled, internally configured supported work and may be zero.

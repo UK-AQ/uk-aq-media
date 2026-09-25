@@ -440,5 +440,40 @@
     "ai_content_policy": "disabled",
     "image_policy": "remote_preview",
     "search_index_policy": "metadata_only"
+  },
+  {
+    "source_key": "ncas",
+    "name": "NCAS",
+    "canonical_domain": "ncas.ac.uk",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "sitemap",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "ncas-air-pollution",
+          "url": "https://ncas.ac.uk/news-events/?category_name=&tag=air-pollution",
+          "max_items": 20
+        },
+        {
+          "route_key": "ncas-digital-atmosphere",
+          "url": "https://ncas.ac.uk/news-events/?category_name=&tag=digital-atmosphere",
+          "max_items": 20
+        },
+        {
+          "route_key": "ncas-air-pollutants",
+          "url": "https://ncas.ac.uk/news-events/?category_name=&tag=air-pollutants",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "article_head_allowed",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   }
 ]

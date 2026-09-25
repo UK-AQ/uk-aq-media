@@ -12,6 +12,7 @@ import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
 import { discoverAqn } from './aqn';
 import { CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, discoverCaws } from './caws';
 import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
+import { configuredNcasRouteKeys, discoverNcas, type NcasRouteKey } from './ncas';
 import {
   configuredPublisherRssRouteKeys, discoverPublisherRss,
 } from './publisher-rss';
@@ -45,6 +46,10 @@ export {
   extractDsawspIndexUrls, extractDsawspNextIndexUrl, DSAWSP_INDEX_ROUTE_KEY,
   DSAWSP_INDEX_URL, DSAWSP_MAX_INDEX_PAGES, DSAWSP_MAX_ITEMS,
 } from './dsawsp';
+export {
+  configuredNcasRouteKeys, discoverNcas, extractNcasIndexCandidates, NCAS_TAG_ROUTES,
+} from './ncas';
+export type { NcasRouteKey } from './ncas';
 export {
   configuredPublisherRssRouteKeys, discoverPublisherRss, parsePublisherRssFeed,
   PUBLISHER_RSS_ROUTES,
@@ -320,6 +325,9 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       result = await discoverCaws(source);
     } else if (sourceKey === 'dsawsp' && routeKey && configuredDsawspIndex(source)) {
       result = await discoverDsawsp(source);
+    } else if (sourceKey === 'ncas' && routeKey &&
+        configuredNcasRouteKeys(source).includes(routeKey as NcasRouteKey)) {
+      result = await discoverNcas(source, routeKey as NcasRouteKey);
     } else if (routeKey && configuredPublisherRssRouteKeys(source).includes(routeKey)) {
       result = await discoverPublisherRss(source, routeKey);
     } else {
@@ -342,7 +350,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
       const publisherRelevant = ![
-        'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp', 'communities-against-woodsmoke',
+        'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp',
+        'communities-against-woodsmoke', 'ncas',
       ].includes(sourceKey)
         ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
           canonical_url: article.canonical_url, categories: article.categories }).relevant : true;
@@ -369,7 +378,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const approvalObservationKey = selectedAutoRule
         ? `author-auto:${runId}:${article.canonical_url_hash}` : null;
       statements.push(persistArticle(db, source, article, matchedRules, approvalObservationKey, now));
-      const providerKey = ['dsawsp', 'communities-against-woodsmoke'].includes(sourceKey)
+      const providerKey = ['dsawsp', 'communities-against-woodsmoke', 'ncas'].includes(sourceKey)
         ? 'publisher_web_index' : 'publisher_rss';
       statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
         article, matchedRules, approvalObservationKey, now));
