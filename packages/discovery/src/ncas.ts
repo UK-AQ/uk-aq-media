@@ -199,7 +199,7 @@ async function fetchIndex(source: Source, routeKey: NcasRouteKey,
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    let requestUrl = route.url;
+    let requestUrl: string = route.url;
     let redirects = 0;
     let response: Response;
     for (;;) {
