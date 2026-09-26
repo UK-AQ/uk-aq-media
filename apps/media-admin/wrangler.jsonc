@@ -26,6 +26,12 @@
       "migrations_dir": "../../migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_IMAGES",
+      "bucket_name": "uk-aq-media-images"
+    }
+  ],
   "queues": {
     "producers": [
       {

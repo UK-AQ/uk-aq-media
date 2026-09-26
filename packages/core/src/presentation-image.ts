@@ -3,6 +3,8 @@ export type PresentationImageSelection = {
   og_image_url: string | null;
   article_image_policy: string;
   source_image_policy: string;
+  local_image_source_url?: string | null;
+  local_image_content_sha256?: string | null;
 };
 
 const SOURCE_PLACEHOLDER_PATHS: Readonly<Record<string, string>> = {
@@ -23,8 +25,14 @@ export function sourcePresentationPlaceholderPath(
 export function hasPermittedPresentationImage(
   article: PresentationImageSelection,
 ): boolean {
-  const publisherImage = article.og_image_url !== null &&
+  const remotePublisherImage = article.og_image_url !== null &&
     article.article_image_policy === 'remote_preview' &&
     article.source_image_policy === 'remote_preview';
-  return publisherImage || sourcePresentationPlaceholderPath(article) !== null;
+  const localPublisherImage = article.og_image_url !== null &&
+    article.article_image_policy === 'local_copy_permitted' &&
+    article.source_image_policy === 'local_copy_permitted' &&
+    article.local_image_source_url === article.og_image_url &&
+    Boolean(article.local_image_content_sha256);
+  return remotePublisherImage || localPublisherImage ||
+    sourcePresentationPlaceholderPath(article) !== null;
 }

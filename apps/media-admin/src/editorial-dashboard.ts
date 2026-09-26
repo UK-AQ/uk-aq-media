@@ -1,9 +1,10 @@
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, PublicationPolicy,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
-  hasPermittedPresentationImage, loadSource, normaliseArticleAuthorForStorage, publisherHttpsUrl,
-  reconcileHomepageLatestSix, sourcePresentationPlaceholderPath,
-  remotePreviewUrl, z,
+  hasPermittedPresentationImage, loadSource, MAX_LOCAL_IMAGE_BYTES,
+  normaliseArticleAuthorForStorage, publisherHttpsUrl,
+  readBoundedImageResponse, reconcileHomepageLatestSix, sourcePresentationPlaceholderPath,
+  remotePreviewUrl, storeLocalImage, validateLocalImageBytes, z,
   SourceSchema,
   type Status,
 } from '@uk-aq-media/core';
@@ -13,7 +14,7 @@ import {
 } from '@uk-aq-media/discovery';
 
 const MAX_BODY_BYTES = 16 * 1024;
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_BYTES = MAX_LOCAL_IMAGE_BYTES;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_LIMIT = 50;
 
@@ -150,7 +151,9 @@ async function readJson(request: Request): Promise<unknown> {
   }
   const declared = Number(request.headers.get('Content-Length') ?? 0);
   if (declared > MAX_BODY_BYTES) throw new HttpError(413, 'request_body_too_large');
-  const bytes = new Uint8Array(await request.arrayBuffer());
+  let bytes: Uint8Array;
+  try { bytes = await readBoundedImageResponse(request); }
+  catch (error) { return localImageFailure(error); }
   if (bytes.byteLength > MAX_BODY_BYTES) throw new HttpError(413, 'request_body_too_large');
   try { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)); }
   catch { throw new HttpError(400, 'invalid_json'); }
@@ -407,8 +410,15 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       s.canonical_domain, s.publication_policy AS source_publication_policy,
       s.content_fetch_policy AS source_content_fetch_policy,
       s.ai_content_policy AS source_ai_content_policy,
-      s.image_policy AS source_image_policy
+      s.image_policy AS source_image_policy,
+      li.source_image_url AS local_image_source_url,
+      li.content_sha256 AS local_image_content_sha256,
+      li.content_type AS local_image_content_type,
+      li.byte_size AS local_image_byte_size,
+      li.acquisition_method AS local_image_acquisition_method,
+      li.stored_at AS local_image_stored_at
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    LEFT JOIN media_article_local_images li ON li.article_id = a.id
     WHERE a.id = ?`).bind(id).first<Record<string, unknown>>();
   if (!article) throw new HttpError(404, 'article_not_found');
   const [events, evidence, bluesky, blueskyCount, facebook, facebookCount] = await Promise.all([
@@ -443,8 +453,14 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
   const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
     post_url: typeof row.post_uri === 'string' && row.post_uri.startsWith('at://')
       ? `https://bsky.app/profile/ukaq.co.uk/post/${row.post_uri.split('/').at(-1)}` : null }));
-  const thumbnailEligible = article.og_image_url !== null && article.image_policy === 'remote_preview' &&
-    article.source_image_policy === 'remote_preview';
+  const retainedLocalImage = article.image_policy === 'local_copy_permitted' &&
+    article.source_image_policy === 'local_copy_permitted' &&
+    article.local_image_source_url === article.og_image_url &&
+    typeof article.local_image_content_sha256 === 'string';
+  const thumbnailEligible = article.og_image_url !== null && (
+    (article.image_policy === 'remote_preview' && article.source_image_policy === 'remote_preview') ||
+    (article.image_policy === 'local_copy_permitted' &&
+      article.source_image_policy === 'local_copy_permitted'));
   const manualPostReason = article.status === 'pending' ? 'pending_approved'
     : article.status === 'rejected' ? 'rejected_repost'
     : article.status === 'hidden' ? 'unhidden_repost' : null;
@@ -466,9 +482,24 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     og_image_url: typeof article.og_image_url === 'string' ? article.og_image_url : null,
     article_image_policy: String(article.image_policy),
     source_image_policy: String(article.source_image_policy),
+    local_image_source_url: typeof article.local_image_source_url === 'string'
+      ? article.local_image_source_url : null,
+    local_image_content_sha256: typeof article.local_image_content_sha256 === 'string'
+      ? article.local_image_content_sha256 : null,
   });
-  return json({ article: { ...article, admin_preview_image_path: presentationImage
-    ? `/admin/articles/${id}/image` : null }, events: events.results,
+  const articleResponse = { ...article };
+  for (const key of ['local_image_source_url', 'local_image_content_sha256',
+    'local_image_content_type', 'local_image_byte_size', 'local_image_acquisition_method',
+    'local_image_stored_at']) delete articleResponse[key];
+  return json({ article: { ...articleResponse, local_image: {
+      exists: retainedLocalImage,
+      content_type: retainedLocalImage ? article.local_image_content_type : null,
+      byte_size: retainedLocalImage ? article.local_image_byte_size : null,
+      stored_at: retainedLocalImage ? article.local_image_stored_at : null,
+      acquisition_method: retainedLocalImage ? article.local_image_acquisition_method : null,
+    }, admin_preview_image_path: presentationImage ? `/admin/articles/${id}/image` : null,
+    admin_preview_image_version: retainedLocalImage
+      ? article.local_image_content_sha256 : article.updated_at }, events: events.results,
     discovery_evidence: evidence.results,
     bluesky: { post_count: blueskyCount?.post_count ?? 0,
       publication_count: blueskyCount?.publication_count ?? 0,
@@ -670,6 +701,8 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
       a.published_at, a.discovered_at, a.approved_at, a.updated_at, a.status,
       a.revision, a.approval_method, a.approval_author_rule_key, a.og_image_url,
       a.image_policy, s.image_policy AS source_image_policy,
+      li.source_image_url AS local_image_source_url,
+      li.content_sha256 AS local_image_content_sha256,
       (SELECT count(*) FROM media_bluesky_publications bp
         WHERE bp.article_id = a.id AND bp.status = 'posted')
         AS bluesky_post_count,
@@ -685,17 +718,30 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
         ORDER BY fp.id DESC LIMIT 1) AS facebook_latest_status,
       ${spec.expression} AS cursor_value
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    LEFT JOIN media_article_local_images li ON li.article_id = a.id
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY ${spec.expression} ${spec.direction}, a.id ${spec.direction} LIMIT ?`;
   const { results } = await db.prepare(sql).bind(...binds, limit + 1).all<Record<string, unknown>>();
   const hasMore = results.length > limit;
-  const rows: Array<Record<string, unknown>> = results.slice(0, limit).map(row => ({ ...row,
-    admin_preview_image_path: hasPermittedPresentationImage({
+  const rows: Array<Record<string, unknown>> = results.slice(0, limit).map(row => {
+    const { local_image_source_url: localSourceUrl,
+      local_image_content_sha256: localContentSha256, ...publicRow } = row;
+    return { ...publicRow, admin_preview_image_path: hasPermittedPresentationImage({
       source_key: String(row.source_key),
       og_image_url: typeof row.og_image_url === 'string' ? row.og_image_url : null,
       article_image_policy: String(row.image_policy),
       source_image_policy: String(row.source_image_policy),
-    }) ? `/admin/articles/${row.id}/image` : null }));
+      local_image_source_url: typeof localSourceUrl === 'string' ? localSourceUrl : null,
+      local_image_content_sha256: typeof localContentSha256 === 'string'
+        ? localContentSha256 : null,
+    }) ? `/admin/articles/${row.id}/image` : null,
+    local_image_exists: row.image_policy === 'local_copy_permitted' &&
+      row.source_image_policy === 'local_copy_permitted' &&
+      localSourceUrl === row.og_image_url && typeof localContentSha256 === 'string',
+    admin_preview_image_version: row.image_policy === 'local_copy_permitted' &&
+      row.source_image_policy === 'local_copy_permitted' &&
+      localSourceUrl === row.og_image_url ? localContentSha256 : row.updated_at };
+  });
   const last = rows.at(-1);
   return json({ articles: rows, page: { limit, has_more: hasMore,
     next_cursor: hasMore && last ? encodeCursor(String(last.cursor_value ?? ''), Number(last.id)) : null,
@@ -896,15 +942,169 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
   return articleDetail(db, id);
 }
 
+function requiredArticleRevision(request: Request): number {
+  const raw = request.headers.get('If-Match')?.trim() ?? '';
+  const unquoted = raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+  if (!/^\d+$/.test(unquoted)) throw new HttpError(428, 'article_revision_required');
+  const revision = Number(unquoted);
+  if (!Number.isSafeInteger(revision)) throw new HttpError(400, 'invalid_article_revision');
+  return revision;
+}
+
+function localImageFailure(error: unknown): never {
+  const code = error instanceof Error ? error.message : '';
+  if (code === 'local_image_stale_write') throw new HttpError(409, code);
+  if (code === 'local_copy_not_permitted') throw new HttpError(409, code);
+  if (code === 'image_too_large') throw new HttpError(413, code);
+  if (['invalid_image_content_type', 'image_signature_mismatch', 'image_empty'].includes(code)) {
+    throw new HttpError(415, code);
+  }
+  throw error;
+}
+
+async function uploadLocalImage(request: Request, env: MediaAdminEnv, id: number): Promise<Response> {
+  const requestKey = requireIdempotencyKey(request);
+  const revision = requiredArticleRevision(request);
+  const declared = request.headers.get('Content-Length');
+  if (declared && /^\d+$/.test(declared) && Number(declared) > MAX_LOCAL_IMAGE_BYTES) {
+    throw new HttpError(413, 'image_too_large');
+  }
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  let image;
+  try { image = await validateLocalImageBytes(bytes, request.headers.get('Content-Type')); }
+  catch (error) { return localImageFailure(error); }
+  const existingOperation = await env.MEDIA_DB.prepare(`SELECT article_id, operation,
+      article_revision, content_sha256 FROM media_article_local_image_operations
+    WHERE request_key = ?`).bind(requestKey).first<{
+      article_id: number; operation: string; article_revision: number; content_sha256: string | null;
+    }>();
+  if (existingOperation) {
+    if (existingOperation.article_id !== id || existingOperation.operation !== 'upload' ||
+        existingOperation.article_revision !== revision ||
+        existingOperation.content_sha256 !== image.contentSha256) {
+      throw new HttpError(409, 'idempotency_key_conflict');
+    }
+    return articleDetail(env.MEDIA_DB, id);
+  }
+  const article = await env.MEDIA_DB.prepare(`SELECT a.revision, a.og_image_url,
+      a.image_policy AS article_image_policy, s.image_policy AS source_image_policy
+    FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    WHERE a.id = ?`).bind(id).first<{
+      revision: number; og_image_url: string | null;
+      article_image_policy: string; source_image_policy: string;
+    }>();
+  if (!article) throw new HttpError(404, 'article_not_found');
+  if (article.revision !== revision) throw new HttpError(409, 'article_revision_changed');
+  if (!article.og_image_url || article.article_image_policy !== 'local_copy_permitted' ||
+      article.source_image_policy !== 'local_copy_permitted') {
+    throw new HttpError(409, 'local_copy_not_permitted');
+  }
+  try {
+    await storeLocalImage(env.MEDIA_DB, env.MEDIA_IMAGES, {
+      articleId: id, articleRevision: revision, sourceImageUrl: article.og_image_url,
+      articleImagePolicy: article.article_image_policy,
+      sourceImagePolicy: article.source_image_policy, image,
+      acquisitionMethod: 'admin_upload', requestKey,
+    });
+  } catch (error) {
+    const raced = await env.MEDIA_DB.prepare(`SELECT article_id, operation,
+        article_revision, content_sha256 FROM media_article_local_image_operations
+      WHERE request_key = ?`).bind(requestKey).first<{
+        article_id: number; operation: string; article_revision: number;
+        content_sha256: string | null;
+      }>();
+    if (!raced || raced.article_id !== id || raced.operation !== 'upload' ||
+        raced.article_revision !== revision || raced.content_sha256 !== image.contentSha256) {
+      if (raced) throw new HttpError(409, 'idempotency_key_conflict');
+      localImageFailure(error);
+    }
+  }
+  await reconcileHomepageLatestSix(env.MEDIA_DB);
+  return articleDetail(env.MEDIA_DB, id);
+}
+
+async function removeLocalImage(request: Request, env: MediaAdminEnv, id: number): Promise<Response> {
+  const requestKey = requireIdempotencyKey(request);
+  const revision = requiredArticleRevision(request);
+  const existingOperation = await env.MEDIA_DB.prepare(`SELECT article_id, operation,
+      article_revision FROM media_article_local_image_operations WHERE request_key = ?`)
+    .bind(requestKey).first<{ article_id: number; operation: string; article_revision: number }>();
+  if (existingOperation) {
+    if (existingOperation.article_id !== id || existingOperation.operation !== 'remove' ||
+        existingOperation.article_revision !== revision) {
+      throw new HttpError(409, 'idempotency_key_conflict');
+    }
+    return articleDetail(env.MEDIA_DB, id);
+  }
+  const current = await env.MEDIA_DB.prepare(`SELECT a.revision, li.object_key
+    FROM media_articles a LEFT JOIN media_article_local_images li ON li.article_id = a.id
+    WHERE a.id = ?`).bind(id).first<{ revision: number; object_key: string | null }>();
+  if (!current) throw new HttpError(404, 'article_not_found');
+  if (current.revision !== revision) throw new HttpError(409, 'article_revision_changed');
+  const now = new Date().toISOString();
+  let batchError: unknown = null;
+  try {
+    await env.MEDIA_DB.batch([
+      env.MEDIA_DB.prepare(`INSERT INTO media_article_local_image_operations
+          (request_key, article_id, operation, article_revision, created_at)
+        SELECT ?, id, 'remove', revision, ? FROM media_articles
+        WHERE id = ? AND revision = ?`).bind(requestKey, now, id, revision),
+      env.MEDIA_DB.prepare(`DELETE FROM media_article_local_images WHERE article_id = ?
+        AND EXISTS (SELECT 1 FROM media_article_local_image_operations
+          WHERE request_key = ? AND article_id = ? AND operation = 'remove'
+            AND article_revision = ?)`).bind(id, requestKey, id, revision),
+      env.MEDIA_DB.prepare(`UPDATE media_articles SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ? AND ? IS NOT NULL
+          AND EXISTS (SELECT 1 FROM media_article_local_image_operations
+            WHERE request_key = ? AND article_id = ? AND operation = 'remove'
+              AND article_revision = ?)`)
+        .bind(now, id, revision, current.object_key, requestKey, id, revision),
+    ]);
+  } catch (error) { batchError = error; }
+  const recorded = await env.MEDIA_DB.prepare(`SELECT article_id, operation, article_revision
+    FROM media_article_local_image_operations WHERE request_key = ?`).bind(requestKey)
+    .first<{ article_id: number; operation: string; article_revision: number }>();
+  if (!recorded) {
+    if (batchError) throw batchError;
+    throw new HttpError(409, 'article_revision_changed');
+  }
+  if (recorded.article_id !== id || recorded.operation !== 'remove' ||
+      recorded.article_revision !== revision) throw new HttpError(409, 'idempotency_key_conflict');
+  await reconcileHomepageLatestSix(env.MEDIA_DB);
+  if (current.object_key) {
+    try { await env.MEDIA_IMAGES.delete(current.object_key); }
+    catch { /* authoritative D1 removal makes an R2 orphan unreachable */ }
+  }
+  return articleDetail(env.MEDIA_DB, id);
+}
+
 async function adminImage(env: MediaAdminEnv, id: number): Promise<Response> {
   const row = await env.MEDIA_DB.prepare(`SELECT a.source_key, a.og_image_url,
       a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
-      s.canonical_domain FROM media_articles a JOIN media_sources s
-      ON s.source_key = a.source_key WHERE a.id = ?`).bind(id).first<{
+      s.canonical_domain, li.object_key, li.source_image_url, li.content_type,
+      li.byte_size FROM media_articles a JOIN media_sources s
+      ON s.source_key = a.source_key LEFT JOIN media_article_local_images li
+      ON li.article_id = a.id WHERE a.id = ?`).bind(id).first<{
         source_key: string; og_image_url: string | null; article_image_policy: string;
-        source_image_policy: string; canonical_domain: string;
+        source_image_policy: string; canonical_domain: string; object_key: string | null;
+        source_image_url: string | null; content_type: string | null; byte_size: number | null;
       }>();
-  if (!row || row.article_image_policy !== 'remote_preview' ||
+  if (!row) throw new HttpError(404, 'image_not_found');
+  if (row.article_image_policy === 'local_copy_permitted' &&
+      row.source_image_policy === 'local_copy_permitted') {
+    if (!row.object_key || row.source_image_url !== row.og_image_url || !row.content_type) {
+      throw new HttpError(404, 'image_not_found');
+    }
+    const object = await env.MEDIA_IMAGES.get(row.object_key);
+    if (!object) throw new HttpError(404, 'image_not_found');
+    return new Response(object.body, { headers: {
+      'Content-Type': row.content_type,
+      'Content-Length': String(row.byte_size ?? object.size),
+      'Cache-Control': 'private, max-age=300',
+      'Content-Security-Policy': "default-src 'none'", 'X-Content-Type-Options': 'nosniff',
+    } });
+  }
+  if (row.article_image_policy !== 'remote_preview' ||
       row.source_image_policy !== 'remote_preview') throw new HttpError(404, 'image_not_found');
   const imageUrl = row.source_key === 'the-guardian' ? guardianRemotePreviewUrl(row.og_image_url)
     : remotePreviewUrl(row.og_image_url, row);
@@ -1180,6 +1380,13 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
   if (imageMatch) {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     return adminImage(env, Number(imageMatch[1]));
+  }
+  const localImageMatch = /^\/admin\/articles\/([1-9]\d*)\/local-image$/.exec(url.pathname);
+  if (localImageMatch) {
+    const id = Number(localImageMatch[1]);
+    if (request.method === 'PUT') return uploadLocalImage(request, env, id);
+    if (request.method === 'DELETE') return removeLocalImage(request, env, id);
+    return json({ error: 'method_not_allowed' }, 405);
   }
   const metadataMatch = /^\/admin\/articles\/([1-9]\d*)\/metadata\/(preview|apply)$/.exec(url.pathname);
   if (metadataMatch) {

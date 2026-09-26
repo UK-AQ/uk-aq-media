@@ -23,5 +23,11 @@
       "database_id": "75b39d56-a8e2-48dc-9208-7ac0d199219c",
       "migrations_dir": "../../migrations"
     }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_IMAGES",
+      "bucket_name": "uk-aq-media-images"
+    }
   ]
 }

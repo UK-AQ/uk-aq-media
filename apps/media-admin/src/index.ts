@@ -795,6 +795,13 @@ type DirectTargetRow = BulkTargetRow & {
   facebook_has_in_progress: number; facebook_has_unknown_remote_state: number;
   facebook_post_count: number;
 };
+function blueskyImageEligible(row: Pick<BulkTargetRow, 'og_image_url' | 'image_policy' |
+  'source_image_policy'>): boolean {
+  return Boolean(row.og_image_url) && (
+    (row.image_policy === 'remote_preview' && row.source_image_policy === 'remote_preview') ||
+    (row.image_policy === 'local_copy_permitted' &&
+      row.source_image_policy === 'local_copy_permitted'));
+}
 type DirectRequestRow = { request_kind: 'single' | 'bulk'; article_ids_json: string;
   post_to_bluesky: number; post_to_facebook: number };
 type DirectPublicationRow = { id: number; article_id: number; status: string;
@@ -831,8 +838,7 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
       if (!['pending', 'rejected', 'hidden'].includes(row.status)) {
         return [{ article_id: id, error: 'invalid_state_transition' }];
       }
-      if (requestedBluesky && (!row.og_image_url || row.image_policy !== 'remote_preview' ||
-          row.source_image_policy !== 'remote_preview')) {
+      if (requestedBluesky && !blueskyImageEligible(row)) {
         return [{ article_id: id, error: 'thumbnail_missing' }];
       }
       return [];
@@ -842,8 +848,10 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
 
     const now = new Date().toISOString();
     const eligibleImages = requestedBluesky
-      ? `AND a.og_image_url IS NOT NULL AND a.image_policy = 'remote_preview'
-         AND s.image_policy = 'remote_preview'` : '';
+      ? `AND a.og_image_url IS NOT NULL AND (
+          (a.image_policy = 'remote_preview' AND s.image_policy = 'remote_preview')
+          OR (a.image_policy = 'local_copy_permitted'
+            AND s.image_policy = 'local_copy_permitted'))` : '';
     const statements: D1PreparedStatement[] = [env.MEDIA_DB.prepare(`
       INSERT INTO media_admin_bulk_status_requests
         (request_key, article_ids_json, post_to_bluesky, post_to_facebook, created_at)
@@ -1020,8 +1028,7 @@ async function directPublish(request: Request, env: MediaAdminEnv,
     const row = byId.get(id);
     if (!row) { failures.push({ article_id: id, platform: null, error: 'article_not_found' }); continue; }
     if (bluesky) {
-      const eligibleImage = Boolean(row.og_image_url) && row.image_policy === 'remote_preview' &&
-        row.source_image_policy === 'remote_preview';
+      const eligibleImage = blueskyImageEligible(row);
       const state = directPublishState('bluesky', row.status, {
         hasInProgress: Boolean(row.bluesky_has_in_progress), hasUnknownRemoteState: false,
         postCount: row.bluesky_post_count,
@@ -1054,8 +1061,10 @@ async function directPublish(request: Request, env: MediaAdminEnv,
   if (bluesky) {
     guard.push(`NOT EXISTS (SELECT 1 FROM media_articles a JOIN media_sources s
       ON s.source_key = a.source_key WHERE a.id IN (${placeholders})
-      AND (a.og_image_url IS NULL OR a.image_policy <> 'remote_preview'
-        OR s.image_policy <> 'remote_preview'))`);
+      AND (a.og_image_url IS NULL OR NOT (
+        (a.image_policy = 'remote_preview' AND s.image_policy = 'remote_preview')
+        OR (a.image_policy = 'local_copy_permitted'
+          AND s.image_policy = 'local_copy_permitted'))))`);
     guardBindings.push(...ids);
     guard.push(`NOT EXISTS (SELECT 1 FROM media_bluesky_publications p
       WHERE p.article_id IN (${placeholders}) AND p.status IN ('queued', 'posting'))`);
@@ -1151,8 +1160,7 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
     throw new HttpError(400, requestedBluesky
       ? 'post_to_bluesky_not_available' : 'post_to_facebook_not_available');
   }
-  if (requestedBluesky && (!before.og_image_url || before.image_policy !== 'remote_preview' ||
-      before.source_image_policy !== 'remote_preview')) {
+  if (requestedBluesky && !blueskyImageEligible(before)) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
       requestedBluesky, requestedFacebook);
     if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);

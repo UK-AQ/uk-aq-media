@@ -131,7 +131,7 @@ assert.equal(direct.response?.status, 200);
 assert.equal(direct.failure, null);
 assert.deepEqual(directRequests, [bbcImageUrl]);
 assert.equal(directHeaders[0]?.get('Referer'), null,
-  'non-Leicester publishers must not receive the Leicester Referer');
+  'publisher images must not receive a source-specific Referer');
 
 const leicesterImageUrl = 'https://le.ac.uk/-/media/uol/images/news/runner.jpg';
 const leicesterRequests: string[] = [];
@@ -143,6 +143,6 @@ const leicesterFetch = await fetchRemotePreviewImage(leicesterImageUrl, leiceste
 assert.equal(leicesterFetch.response?.status, 200);
 assert.equal(leicesterFetch.failure, null);
 assert.deepEqual(leicesterRequests, [leicesterImageUrl]);
-assert.equal(leicesterHeaders[0]?.get('Referer'), 'https://le.ac.uk/',
-  'Leicester publisher images must carry the first-party Leicester Referer');
+assert.equal(leicesterHeaders[0]?.get('Referer'), null,
+  'the ineffective Leicester-specific Referer workaround must remain removed');
 console.log('Remote preview image checks passed');

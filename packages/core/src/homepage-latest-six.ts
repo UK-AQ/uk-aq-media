@@ -42,8 +42,13 @@ const HOMEPAGE_SNAPSHOT_CTE = `
   WITH latest_six AS (
     SELECT a.id, a.canonical_url, a.title, a.display_title, a.publisher, a.published_at, a.feed_sort_at,
       CASE WHEN a.image_policy = 'remote_preview' AND s.image_policy = 'remote_preview'
-        THEN a.og_image_url ELSE NULL END AS preview_image_url
+        THEN a.og_image_url
+        WHEN a.image_policy = 'local_copy_permitted'
+          AND s.image_policy = 'local_copy_permitted'
+          AND li.source_image_url = a.og_image_url
+        THEN 'local:' || li.content_sha256 ELSE NULL END AS preview_image_url
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    LEFT JOIN media_article_local_images li ON li.article_id = a.id
     WHERE a.status = 'approved'
     ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT 6
   ), snapshot AS (

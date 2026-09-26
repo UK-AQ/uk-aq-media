@@ -1,6 +1,8 @@
 import {
   BLUESKY_HANDLE, BLUESKY_THUMBNAIL_BYTES, deterministicTid, fetchRemotePreviewImage,
-  isBlueskyWakeup, remotePreviewUrl, renderBlueskyPost, type BlueskyWakeup, type Source,
+  isBlueskyWakeup, readBoundedImageResponse, remotePreviewUrl, renderBlueskyPost,
+  reconcileHomepageLatestSix, storeLocalImage, validateLocalImageBytes,
+  type BlueskyWakeup, type Source,
 } from '@uk-aq-media/core';
 import { fetchArticleHeadMetadata, type ArticleHeadMetadata } from '@uk-aq-media/discovery';
 
@@ -11,7 +13,9 @@ type Publication = { id: number; article_id: number; publication_key: string; st
 type Article = { canonical_url: string; title: string;
   publisher: string; og_image_url: string | null; image_policy: string; source_key: string;
   canonical_domain: string; source_image_policy: Source['image_policy']; social_handle: string | null;
-  social_did: string | null };
+  social_did: string | null; id: number; revision: number;
+  local_image_object_key: string | null; local_image_source_url: string | null;
+  local_image_content_type: string | null };
 
 const XRPC = 'https://bsky.social/xrpc/';
 const MAX_ATTEMPTS = 5;
@@ -143,10 +147,33 @@ export async function authenticate(password: string): Promise<{ accessJwt: strin
   return { accessJwt: body.accessJwt, did: body.did };
 }
 
-async function loadThumbnail(article: Article): Promise<{ bytes: ArrayBuffer; type: string }> {
-  if (!article.og_image_url || article.image_policy !== 'remote_preview' ||
-      article.source_image_policy !== 'remote_preview' ||
-      !remotePreviewUrl(article.og_image_url, article)) throw new PublicationError('thumbnail_missing');
+export async function loadThumbnail(env: MediaDiscoveryEnv,
+  article: Article): Promise<{ bytes: ArrayBuffer; type: string }> {
+  if (!article.og_image_url || !remotePreviewUrl(article.og_image_url, article)) {
+    throw new PublicationError('thumbnail_missing');
+  }
+  const remotePreview = article.image_policy === 'remote_preview' &&
+    article.source_image_policy === 'remote_preview';
+  const localCopy = article.image_policy === 'local_copy_permitted' &&
+    article.source_image_policy === 'local_copy_permitted';
+  if (!remotePreview && !localCopy) throw new PublicationError('thumbnail_missing');
+  if (localCopy && article.local_image_object_key &&
+      article.local_image_source_url === article.og_image_url && article.local_image_content_type) {
+    const object = await env.MEDIA_IMAGES.get(article.local_image_object_key);
+    if (object) {
+      try {
+        const validated = await validateLocalImageBytes(
+          new Uint8Array(await object.arrayBuffer()), article.local_image_content_type);
+        if (validated.bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
+          throw new PublicationError('thumbnail_too_large');
+        }
+        return { bytes: validated.bytes.buffer as ArrayBuffer, type: validated.contentType };
+      } catch (error) {
+        if (error instanceof PublicationError) throw error;
+        throw new PublicationError('thumbnail_invalid');
+      }
+    }
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -158,21 +185,46 @@ async function loadThumbnail(article: Article): Promise<{ bytes: ArrayBuffer; ty
       throw new PublicationError(diagnostic.code, diagnostic.transient);
     }
     if (!fetched.response) throw new PublicationError('thumbnail_network_failed', true);
-    const type = fetched.response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() ?? '';
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) {
-      await fetched.response.body?.cancel();
+    if (remotePreview) {
+      const type = fetched.response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() ?? '';
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) {
+        await fetched.response.body?.cancel();
+        throw new PublicationError('thumbnail_invalid');
+      }
+      const declared = Number(fetched.response.headers.get('content-length') ?? 0);
+      if (declared > BLUESKY_THUMBNAIL_BYTES) {
+        await fetched.response.body?.cancel();
+        throw new PublicationError('thumbnail_too_large');
+      }
+      const bytes = await boundedBytes(fetched.response, BLUESKY_THUMBNAIL_BYTES);
+      if (!bytes.byteLength || bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
+        throw new PublicationError(bytes.byteLength ? 'thumbnail_too_large' : 'thumbnail_invalid');
+      }
+      return { bytes, type };
+    }
+    let validated;
+    try {
+      const bytes = await readBoundedImageResponse(fetched.response);
+      validated = await validateLocalImageBytes(bytes,
+        fetched.response.headers.get('content-type'));
+      await storeLocalImage(env.MEDIA_DB, env.MEDIA_IMAGES, {
+        articleId: article.id, articleRevision: article.revision,
+        sourceImageUrl: article.og_image_url,
+        articleImagePolicy: article.image_policy,
+        sourceImagePolicy: article.source_image_policy,
+        image: validated, acquisitionMethod: 'publisher_fetch',
+      });
+      await reconcileHomepageLatestSix(env.MEDIA_DB);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      if (code === 'image_too_large') throw new PublicationError('thumbnail_too_large');
+      if (code === 'local_image_stale_write') throw new PublicationError('publication_state_conflict');
       throw new PublicationError('thumbnail_invalid');
     }
-    const declared = Number(fetched.response.headers.get('content-length') ?? 0);
-    if (declared > BLUESKY_THUMBNAIL_BYTES) {
-      await fetched.response.body?.cancel();
+    if (validated.bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
       throw new PublicationError('thumbnail_too_large');
     }
-    const bytes = await boundedBytes(fetched.response, BLUESKY_THUMBNAIL_BYTES);
-    if (!bytes.byteLength || bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
-      throw new PublicationError(bytes.byteLength ? 'thumbnail_too_large' : 'thumbnail_invalid');
-    }
-    return { bytes, type };
+    return { bytes: validated.bytes.buffer as ArrayBuffer, type: validated.contentType };
   } catch (error) {
     if (controller.signal.aborted) throw new PublicationError('thumbnail_timeout', true);
     if (error instanceof PublicationError) throw error;
@@ -342,16 +394,19 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
   }
   let wakeSettings = settings;
   try {
-    const article = await env.MEDIA_DB.prepare(`SELECT a.canonical_url, a.title,
+    const article = await env.MEDIA_DB.prepare(`SELECT a.id, a.revision, a.canonical_url, a.title,
       a.publisher, a.og_image_url, a.image_policy, a.source_key, s.canonical_domain,
       s.image_policy AS source_image_policy, social.handle AS social_handle,
-      social.account_did AS social_did FROM media_articles a
+      social.account_did AS social_did, li.object_key AS local_image_object_key,
+      li.source_image_url AS local_image_source_url,
+      li.content_type AS local_image_content_type FROM media_articles a
       JOIN media_sources s ON s.source_key = a.source_key
+      LEFT JOIN media_article_local_images li ON li.article_id = a.id
       LEFT JOIN media_source_social_accounts social ON social.source_key = a.source_key
         AND social.platform = 'bluesky' AND social.mention_enabled = 1
       WHERE a.id = ?`).bind(publication.article_id).first<Article>();
     if (!article) throw new PublicationError('publication_state_conflict');
-    const thumbnail = await loadThumbnail(article);
+    const thumbnail = await loadThumbnail(env, article);
     const cardText = await loadExternalCardText(article);
     const auth = await authenticate(env.UK_AQ_MEDIA_BLUESKY_APP_PSWD);
     const blob = await uploadBlob(auth, thumbnail);

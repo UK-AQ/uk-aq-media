@@ -8,6 +8,8 @@ type PreviewSelection = {
   og_image_url: string | null;
   article_image_policy: string;
   source_image_policy: string;
+  local_image_source_url?: string | null;
+  local_image_content_sha256?: string | null;
 };
 type FeedRow = PublicArticle & PreviewSelection & { feed_sort_at: string; topics_json: string;
   pollutants_json: string; locations_json: string };
@@ -17,6 +19,11 @@ type ImageRow = {
   canonical_domain: string;
   article_image_policy: string;
   source_image_policy: string;
+  local_image_object_key: string | null;
+  local_image_source_url: string | null;
+  local_image_content_sha256: string | null;
+  local_image_content_type: string | null;
+  local_image_byte_size: number | null;
 };
 const SEARCH_FIELDS = ['title', 'publication', 'author', 'content'] as const;
 type SearchField = typeof SEARCH_FIELDS[number];
@@ -40,11 +47,27 @@ function permittedStoredImageUrl(article: PreviewSelection): string | null {
     article.source_image_policy === 'remote_preview' ? article.og_image_url : null;
 }
 
+function currentLocalImageVersion(article: Pick<PreviewSelection, 'og_image_url' |
+  'article_image_policy' | 'source_image_policy' | 'local_image_source_url' |
+  'local_image_content_sha256'>): string | null {
+  return article.article_image_policy === 'local_copy_permitted' &&
+    article.source_image_policy === 'local_copy_permitted' &&
+    article.og_image_url !== null && article.local_image_source_url === article.og_image_url &&
+    article.local_image_content_sha256
+    ? article.local_image_content_sha256.slice(0, 32) : null;
+}
+
 export async function publicPreviewImageUrl(origin: string,
   article: PreviewSelection): Promise<string | null> {
   const publisherImageUrl = permittedStoredImageUrl(article);
   if (publisherImageUrl) {
     return versionedArticleImageUrl(origin, article.id, publisherImageUrl);
+  }
+  const localVersion = currentLocalImageVersion(article);
+  if (localVersion) {
+    const url = new URL(`/article-images/${article.id}`, origin);
+    url.searchParams.set('v', localVersion);
+    return url.href;
   }
   const placeholderPath = sourcePresentationPlaceholderPath(article);
   return placeholderPath ? new URL(placeholderPath, origin).href : null;
@@ -86,9 +109,11 @@ function searchRequest(url: URL): { terms: string[]; fields: SearchField[] } {
 async function publicArticles(origin: string, rows: FeedRow[]): Promise<unknown[]> {
   return Promise.all(rows.map(async ({ feed_sort_at: _sort, topics_json,
     pollutants_json, locations_json, featured, article_image_policy,
-    source_image_policy, ...article }) => ({ ...article,
+    source_image_policy, local_image_source_url, local_image_content_sha256,
+    ...article }) => ({ ...article,
     preview_image_url: await publicPreviewImageUrl(origin, {
       ...article, article_image_policy, source_image_policy,
+      local_image_source_url, local_image_content_sha256,
     }),
     featured: featured === 1,
     topics: JSON.parse(topics_json), pollutants: JSON.parse(pollutants_json),
@@ -114,8 +139,11 @@ async function articleSearch(url: URL, env: MediaPublicEnv): Promise<Response> {
     a.published_at, a.discovered_at, a.feed_sort_at,
     a.summary, a.why_it_matters, a.editorial_content_origin, a.featured,
     a.topics_json, a.pollutants_json, a.locations_json, a.og_image_url,
-    a.image_policy AS article_image_policy, s.image_policy AS source_image_policy
+    a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
+    li.source_image_url AS local_image_source_url,
+    li.content_sha256 AS local_image_content_sha256
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    LEFT JOIN media_article_local_images li ON li.article_id = a.id
     WHERE a.status = 'approved'
       AND NOT EXISTS (SELECT 1 FROM json_each(?) term WHERE NOT (${clauses}))
       ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
@@ -147,8 +175,11 @@ function staleHomepageGeneration(generation: number): Response {
 async function homepageRows(db: D1Database): Promise<HomepageRow[]> {
   const { results } = await db.prepare(`SELECT a.id, a.canonical_url, a.title, a.display_title,
       a.publisher, a.published_at, a.source_key, a.og_image_url,
-      a.image_policy AS article_image_policy, s.image_policy AS source_image_policy
+      a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
+      li.source_image_url AS local_image_source_url,
+      li.content_sha256 AS local_image_content_sha256
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    LEFT JOIN media_article_local_images li ON li.article_id = a.id
     WHERE a.status = 'approved'
     ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT 6`).all<HomepageRow>();
   return results;
@@ -177,7 +208,8 @@ function homepageSnapshot(rows: HomepageRow[]): string {
     publisher: article.publisher,
     published_at: article.published_at,
     // Reconciliation tracks publisher-image state, not a deterministic presentation fallback.
-    preview_image_url: permittedStoredImageUrl(article),
+    preview_image_url: permittedStoredImageUrl(article) ??
+      (currentLocalImageVersion(article) ? `local:${article.local_image_content_sha256}` : null),
   })));
 }
 
@@ -266,17 +298,45 @@ async function articleImage(request: Request, env: MediaPublicEnv,
   context: ExecutionContext, id: number): Promise<Response> {
   const row = await env.MEDIA_DB.prepare(`SELECT a.source_key, a.og_image_url,
     a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
-    s.canonical_domain FROM media_articles a
+    s.canonical_domain, li.object_key AS local_image_object_key,
+    li.source_image_url AS local_image_source_url,
+    li.content_sha256 AS local_image_content_sha256,
+    li.content_type AS local_image_content_type, li.byte_size AS local_image_byte_size
+    FROM media_articles a
     JOIN media_sources s ON s.source_key = a.source_key
+    LEFT JOIN media_article_local_images li ON li.article_id = a.id
     WHERE a.id = ? AND a.status = 'approved'`).bind(id).first<ImageRow>();
-  if (!row || row.article_image_policy !== 'remote_preview' ||
+  if (!row) throw new HttpError(404, 'image_not_found');
+  const requestUrl = new URL(request.url);
+  const localVersion = currentLocalImageVersion(row);
+  if (localVersion) {
+    if (!row.local_image_object_key || !row.local_image_content_type) {
+      throw new HttpError(404, 'image_not_found');
+    }
+    const canonicalImageUrl = new URL(`/article-images/${id}`, requestUrl.origin);
+    canonicalImageUrl.searchParams.set('v', localVersion);
+    const suppliedVersion = requestUrl.searchParams.get('v');
+    if (suppliedVersion !== localVersion) {
+      return new Response(null, { status: 302, headers: {
+        'Cache-Control': 'no-store', Location: canonicalImageUrl.href,
+      } });
+    }
+    const object = await env.MEDIA_IMAGES.get(row.local_image_object_key);
+    if (!object) throw new HttpError(404, 'image_not_found');
+    return new Response(object.body, { status: 200, headers: {
+      'Cache-Control': `public, max-age=${IMAGE_CACHE_TTL_SECONDS}, immutable`,
+      'Content-Type': row.local_image_content_type,
+      'Content-Length': String(row.local_image_byte_size ?? object.size),
+      'X-Content-Type-Options': 'nosniff',
+    } });
+  }
+  if (row.article_image_policy !== 'remote_preview' ||
       row.source_image_policy !== 'remote_preview') throw new HttpError(404, 'image_not_found');
   const publisherUrl = row.source_key === 'the-guardian'
     ? guardianRemotePreviewUrl(row.og_image_url)
     : remotePreviewUrl(row.og_image_url, row);
   if (!publisherUrl || !row.og_image_url) throw new HttpError(404, 'image_not_found');
 
-  const requestUrl = new URL(request.url);
   const expectedVersion = await imageCacheVersion(row.og_image_url);
   const suppliedVersion = requestUrl.searchParams.get('v');
   const canonicalImageUrl = await versionedArticleImageUrl(requestUrl.origin, id,
@@ -369,8 +429,11 @@ export default {
         a.published_at, a.discovered_at, a.feed_sort_at,
         a.summary, a.why_it_matters, a.editorial_content_origin, a.featured,
         a.topics_json, a.pollutants_json, a.locations_json, a.og_image_url,
-        a.image_policy AS article_image_policy, s.image_policy AS source_image_policy
+        a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
+        li.source_image_url AS local_image_source_url,
+        li.content_sha256 AS local_image_content_sha256
         FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+        LEFT JOIN media_article_local_images li ON li.article_id = a.id
         WHERE a.status = 'approved'
         ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
         ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT ?`);
