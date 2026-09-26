@@ -24,6 +24,17 @@ export class PublicationError extends Error {
   constructor(readonly code: string, readonly transient = false) { super(code); }
 }
 
+export function thumbnailFetchDiagnostic(
+  failure: 'timeout' | 'failed' | 'redirect' | null,
+  httpStatus: number | null,
+): { code: string; transient: boolean } | null {
+  if (failure === 'redirect') return { code: 'thumbnail_redirect_rejected', transient: false };
+  if (failure === 'timeout') return { code: 'thumbnail_timeout', transient: true };
+  if (failure === 'failed') return { code: 'thumbnail_network_failed', transient: true };
+  if (httpStatus !== null) return { code: `thumbnail_http_${httpStatus}`, transient: true };
+  return null;
+}
+
 export function externalCardText(articleTitle: string,
   metadata?: ArticleHeadMetadata): { title: string; description: string } {
   return {
@@ -140,10 +151,13 @@ async function loadThumbnail(article: Article): Promise<{ bytes: ArrayBuffer; ty
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     const fetched = await fetchRemotePreviewImage(article.og_image_url, article, controller.signal);
-    if (!fetched.response || fetched.failure || !fetched.response.ok) {
+    const diagnostic = thumbnailFetchDiagnostic(fetched.failure,
+      fetched.response && !fetched.response.ok ? fetched.response.status : null);
+    if (diagnostic) {
       await fetched.response?.body?.cancel();
-      throw new PublicationError('thumbnail_fetch_failed', fetched.failure !== 'redirect');
+      throw new PublicationError(diagnostic.code, diagnostic.transient);
     }
+    if (!fetched.response) throw new PublicationError('thumbnail_network_failed', true);
     const type = fetched.response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() ?? '';
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) {
       await fetched.response.body?.cancel();
@@ -160,8 +174,9 @@ async function loadThumbnail(article: Article): Promise<{ bytes: ArrayBuffer; ty
     }
     return { bytes, type };
   } catch (error) {
-    if (controller.signal.aborted) throw new PublicationError('thumbnail_fetch_failed', true);
-    throw error;
+    if (controller.signal.aborted) throw new PublicationError('thumbnail_timeout', true);
+    if (error instanceof PublicationError) throw error;
+    throw new PublicationError('thumbnail_network_failed', true);
   } finally {
     clearTimeout(timeout);
   }

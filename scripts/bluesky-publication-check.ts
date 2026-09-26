@@ -4,7 +4,9 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { BLUESKY_POST_BYTES, graphemes, renderBlueskyPost } from '@uk-aq-media/core';
 import mediaAdminWorker from '../apps/media-admin/src/index';
-import { consumeBluesky, externalCardText } from '../apps/media-discovery/src/bluesky';
+import {
+  consumeBluesky, externalCardText, thumbnailFetchDiagnostic,
+} from '../apps/media-discovery/src/bluesky';
 
 type SqlValue = string | number | bigint | null | Uint8Array;
 
@@ -1035,6 +1037,20 @@ try {
   }), { title: 'Twitter title', description: 'HTML description' });
   assert.deepEqual(externalCardText('Stored publisher title'),
     { title: 'Stored publisher title', description: '' });
+
+  assert.deepEqual(thumbnailFetchDiagnostic('redirect', null),
+    { code: 'thumbnail_redirect_rejected', transient: false });
+  assert.deepEqual(thumbnailFetchDiagnostic('timeout', null),
+    { code: 'thumbnail_timeout', transient: true });
+  assert.deepEqual(thumbnailFetchDiagnostic('failed', null),
+    { code: 'thumbnail_network_failed', transient: true });
+  assert.deepEqual(thumbnailFetchDiagnostic(null, 403),
+    { code: 'thumbnail_http_403', transient: true });
+  assert.deepEqual(thumbnailFetchDiagnostic(null, 429),
+    { code: 'thumbnail_http_429', transient: true });
+  assert.deepEqual(thumbnailFetchDiagnostic(null, 503),
+    { code: 'thumbnail_http_503', transient: true });
+  assert.equal(thumbnailFetchDiagnostic(null, null), null);
 
   const rows: PublicationRow[] = [
     { id: 1, article_id: 1, publication_key: 'a', status: 'posting', attempt_count: 0,
