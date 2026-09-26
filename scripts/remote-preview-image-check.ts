@@ -21,14 +21,20 @@ const unrelatedDynamicSource: PublisherDomainIdentity = {
   source_key: 'discovered-publisher-c592df415547ae79',
   canonical_domain: 'unrelated-news.example',
 };
+const leicester: PublisherDomainIdentity = {
+  source_key: 'discovered-publisher-leicester',
+  canonical_domain: 'le.ac.uk',
+};
 const bbcImageUrl = 'https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/example.jpg';
 const cambridgeImageUrl = 'https://i2-prod.liverpoolecho.co.uk/article/example.jpg';
 const initialUrl = 'https://cdn-images-1.medium.com/max/1024/1*SzapuwhysObdfvnB2Es4rw.png';
 const resolvedUrl = 'https://cdn-images-1.medium.com/v2/resize:fit:1024/1*SzapuwhysObdfvnB2Es4rw.png';
 
-function sequentialFetcher(responses: Response[], requested: string[]): typeof fetch {
-  return (async (input: RequestInfo | URL): Promise<Response> => {
+function sequentialFetcher(responses: Response[], requested: string[],
+  requestHeaders?: Headers[]): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     requested.push(String(input));
+    if (requestHeaders) requestHeaders.push(new Headers(init?.headers));
     const response = responses.shift();
     if (!response) throw new Error('unexpected_fetch');
     return response;
@@ -116,11 +122,27 @@ assert.equal(offPublisherRedirect.failure, 'redirect');
 assert.deepEqual(offPublisherRedirectRequests, [bbcImageUrl]);
 
 const directRequests: string[] = [];
+const directHeaders: Headers[] = [];
 const direct = await fetchRemotePreviewImage(bbcImageUrl, bbc,
   new AbortController().signal, sequentialFetcher([
     new Response(new Uint8Array([1]), { status: 200, headers: { 'Content-Type': 'image/png' } }),
-  ], directRequests));
+  ], directRequests, directHeaders));
 assert.equal(direct.response?.status, 200);
 assert.equal(direct.failure, null);
 assert.deepEqual(directRequests, [bbcImageUrl]);
+assert.equal(directHeaders[0]?.get('Referer'), null,
+  'non-Leicester publishers must not receive the Leicester Referer');
+
+const leicesterImageUrl = 'https://le.ac.uk/-/media/uol/images/news/runner.jpg';
+const leicesterRequests: string[] = [];
+const leicesterHeaders: Headers[] = [];
+const leicesterFetch = await fetchRemotePreviewImage(leicesterImageUrl, leicester,
+  new AbortController().signal, sequentialFetcher([
+    new Response(new Uint8Array([1]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } }),
+  ], leicesterRequests, leicesterHeaders));
+assert.equal(leicesterFetch.response?.status, 200);
+assert.equal(leicesterFetch.failure, null);
+assert.deepEqual(leicesterRequests, [leicesterImageUrl]);
+assert.equal(leicesterHeaders[0]?.get('Referer'), 'https://le.ac.uk/',
+  'Leicester publisher images must carry the first-party Leicester Referer');
 console.log('Remote preview image checks passed');

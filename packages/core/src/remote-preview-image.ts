@@ -5,6 +5,11 @@ export const REMOTE_PREVIEW_IMAGE_HEADERS = {
   'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)',
 };
 
+function publisherImageReferer(source: PublisherDomainIdentity): string | null {
+  const domain = source.canonical_domain.toLowerCase().replace(/^www\./, '');
+  return domain === 'le.ac.uk' ? 'https://le.ac.uk/' : null;
+}
+
 export type RemotePreviewImageFetchResult =
   | { response: Response; failure: null }
   | { response: null; failure: 'timeout' | 'failed' | 'redirect' };
@@ -13,11 +18,14 @@ async function cancel(response: Response): Promise<void> {
   try { await response.body?.cancel(); } catch { /* best effort */ }
 }
 
-async function requestImage(url: string, signal: AbortSignal,
+async function requestImage(url: string, source: PublisherDomainIdentity, signal: AbortSignal,
   fetcher: typeof fetch): Promise<RemotePreviewImageFetchResult> {
   try {
+    const headers = new Headers(REMOTE_PREVIEW_IMAGE_HEADERS);
+    const referer = publisherImageReferer(source);
+    if (referer) headers.set('Referer', referer);
     const response = await fetcher(url, {
-      method: 'GET', redirect: 'manual', signal, headers: REMOTE_PREVIEW_IMAGE_HEADERS,
+      method: 'GET', redirect: 'manual', signal, headers,
     });
     return { response, failure: null };
   } catch {
@@ -41,7 +49,7 @@ export async function fetchRemotePreviewImage(imageUrl: string, source: Publishe
   if (!requestUrl) return { response: null, failure: 'redirect' };
 
   for (let redirects = 0; redirects <= 3; redirects++) {
-    const result = await requestImage(requestUrl, signal, fetcher);
+    const result = await requestImage(requestUrl, source, signal, fetcher);
     if (!result.response || result.failure) return result;
     const response = result.response;
     if (response.status < 300 || response.status >= 400) return result;
