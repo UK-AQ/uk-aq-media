@@ -324,7 +324,7 @@ async function articleImage(request: Request, env: MediaPublicEnv,
     const object = await env.MEDIA_IMAGES.get(row.local_image_object_key);
     if (!object) throw new HttpError(404, 'image_not_found');
     return new Response(object.body, { status: 200, headers: {
-      'Cache-Control': `public, max-age=${IMAGE_CACHE_TTL_SECONDS}, immutable`,
+      'Cache-Control': 'no-store',
       'Content-Type': row.local_image_content_type,
       'Content-Length': String(row.local_image_byte_size ?? object.size),
       'X-Content-Type-Options': 'nosniff',

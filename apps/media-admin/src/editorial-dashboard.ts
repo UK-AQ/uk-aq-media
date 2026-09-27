@@ -151,9 +151,7 @@ async function readJson(request: Request): Promise<unknown> {
   }
   const declared = Number(request.headers.get('Content-Length') ?? 0);
   if (declared > MAX_BODY_BYTES) throw new HttpError(413, 'request_body_too_large');
-  let bytes: Uint8Array;
-  try { bytes = await readBoundedImageResponse(request); }
-  catch (error) { return localImageFailure(error); }
+  const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > MAX_BODY_BYTES) throw new HttpError(413, 'request_body_too_large');
   try { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)); }
   catch { throw new HttpError(400, 'invalid_json'); }
@@ -965,11 +963,9 @@ function localImageFailure(error: unknown): never {
 async function uploadLocalImage(request: Request, env: MediaAdminEnv, id: number): Promise<Response> {
   const requestKey = requireIdempotencyKey(request);
   const revision = requiredArticleRevision(request);
-  const declared = request.headers.get('Content-Length');
-  if (declared && /^\d+$/.test(declared) && Number(declared) > MAX_LOCAL_IMAGE_BYTES) {
-    throw new HttpError(413, 'image_too_large');
-  }
-  const bytes = new Uint8Array(await request.arrayBuffer());
+  let bytes: Uint8Array;
+  try { bytes = await readBoundedImageResponse(request); }
+  catch (error) { return localImageFailure(error); }
   let image;
   try { image = await validateLocalImageBytes(bytes, request.headers.get('Content-Type')); }
   catch (error) { return localImageFailure(error); }
@@ -1100,7 +1096,7 @@ async function adminImage(env: MediaAdminEnv, id: number): Promise<Response> {
     return new Response(object.body, { headers: {
       'Content-Type': row.content_type,
       'Content-Length': String(row.byte_size ?? object.size),
-      'Cache-Control': 'private, max-age=300',
+      'Cache-Control': 'no-store',
       'Content-Security-Policy': "default-src 'none'", 'X-Content-Type-Options': 'nosniff',
     } });
   }
