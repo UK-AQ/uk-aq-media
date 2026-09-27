@@ -1,5 +1,6 @@
 import {
-  ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, PublicationPolicy,
+  ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, ImagePolicy,
+  PublicationPolicy,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
   hasPermittedPresentationImage, loadSource, MAX_LOCAL_IMAGE_BYTES,
   normaliseArticleAuthorForStorage, publisherHttpsUrl,
@@ -23,10 +24,28 @@ const ArticleSort = z.enum([
   'discovered_desc', 'updated_desc',
 ]);
 const SourceType = z.enum(['publisher', 'government']);
-const SourceMutation = z.object({
+const PermissionBasis = z.string().trim().min(1).max(1000);
+export const SourceMutation = z.object({
   publication_policy: PublicationPolicy.optional(),
   enabled: z.boolean().optional(),
-}).strict().refine(value => Object.keys(value).length > 0);
+  image_policy: ImagePolicy.optional(),
+  permission_basis: PermissionBasis.optional(),
+  confirm_local_copy_permitted: z.boolean().optional(),
+}).strict().superRefine((value, context) => {
+  if (value.publication_policy === undefined && value.enabled === undefined &&
+      value.image_policy === undefined) {
+    context.addIssue({ code: 'custom', message: 'source_mutation_required' });
+  }
+  if (value.image_policy === undefined &&
+      (value.permission_basis !== undefined || value.confirm_local_copy_permitted !== undefined)) {
+    context.addIssue({ code: 'custom', message: 'image_policy_required_for_permission_evidence' });
+  }
+});
+export const ArticleImagePolicyBody = z.object({
+  image_policy: ImagePolicy,
+  permission_basis: PermissionBasis.optional(),
+  confirm_local_copy_permitted: z.boolean().optional(),
+}).strict();
 const AddSourceBody = z.object({
   source_key: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(100),
   name: z.string().min(1).max(200),
@@ -106,6 +125,31 @@ type SourceRow = {
   created_at: string; updated_at: string;
 };
 
+type PermissionEvidence = { permission_basis: string; recorded_at: string };
+
+export function validateImagePolicyEvidence(imagePolicy: z.infer<typeof ImagePolicy>,
+  permissionBasis: string | undefined, confirmed: boolean | undefined): string | null {
+  const basis = permissionBasis?.trim() || null;
+  if (imagePolicy === 'local_copy_permitted') {
+    if (!basis) throw new HttpError(400, 'local_copy_permission_basis_required');
+    if (confirmed !== true) throw new HttpError(400, 'local_copy_confirmation_required');
+  }
+  return basis;
+}
+
+function permissionEvidence(createdAt: unknown, metadataJson: unknown): PermissionEvidence | null {
+  if (typeof createdAt !== 'string' || typeof metadataJson !== 'string') return null;
+  try {
+    const metadata = JSON.parse(metadataJson) as Record<string, unknown>;
+    const basis = typeof metadata.permission_basis === 'string'
+      ? metadata.permission_basis.trim() : '';
+    if (metadata.operation !== 'image_policy' ||
+        metadata.new_image_policy !== 'local_copy_permitted' ||
+        basis.length < 1 || basis.length > 1000) return null;
+    return { permission_basis: basis, recorded_at: createdAt };
+  } catch { return null; }
+}
+
 export function sourceImagePolicyDisplay(sourceKey: string,
   imagePolicy: SourceRow['image_policy']): string {
   if (sourceKey.startsWith('discovered-publisher-') && imagePolicy === 'remote_preview') {
@@ -117,10 +161,15 @@ export function sourceImagePolicyDisplay(sourceKey: string,
 }
 
 function presentSource(row: Record<string, unknown>): Record<string, unknown> {
+  const { local_copy_permission_event_json: evidenceJson,
+    local_copy_permission_recorded_at: evidenceRecordedAt, ...source } = row;
+  const evidence = row.image_policy === 'local_copy_permitted'
+    ? permissionEvidence(evidenceRecordedAt, evidenceJson) : null;
   return {
-    ...row,
+    ...source,
     image_policy_display: sourceImagePolicyDisplay(
       String(row.source_key), row.image_policy as SourceRow['image_policy']),
+    local_copy_permission_evidence: evidence,
   };
 }
 
@@ -419,7 +468,8 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     LEFT JOIN media_article_local_images li ON li.article_id = a.id
     WHERE a.id = ?`).bind(id).first<Record<string, unknown>>();
   if (!article) throw new HttpError(404, 'article_not_found');
-  const [events, evidence, bluesky, blueskyCount, facebook, facebookCount] = await Promise.all([
+  const [events, evidence, bluesky, blueskyCount, facebook, facebookCount,
+    localCopyPermissionEvent] = await Promise.all([
     db.prepare(`SELECT id, event_type, actor_type, from_status, to_status, revision,
       created_at, metadata_json FROM media_article_events WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
@@ -447,6 +497,11 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       FROM media_facebook_publications WHERE article_id = ?`)
       .bind(id).first<{ publication_count: number; post_count: number;
         in_progress_count: number; unknown_remote_count: number }>(),
+    db.prepare(`SELECT created_at, metadata_json FROM media_article_events
+      WHERE article_id = ? AND event_type = 'edited'
+        AND json_extract(metadata_json, '$.operation') = 'image_policy'
+      ORDER BY id DESC LIMIT 1`).bind(id)
+      .first<{ created_at: string; metadata_json: string }>(),
   ]);
   const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
     post_url: typeof row.post_uri === 'string' && row.post_uri.startsWith('at://')
@@ -495,7 +550,10 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       byte_size: retainedLocalImage ? article.local_image_byte_size : null,
       stored_at: retainedLocalImage ? article.local_image_stored_at : null,
       acquisition_method: retainedLocalImage ? article.local_image_acquisition_method : null,
-    }, admin_preview_image_path: presentationImage ? `/admin/articles/${id}/image` : null,
+    }, local_copy_permission_evidence: article.image_policy === 'local_copy_permitted'
+      ? permissionEvidence(localCopyPermissionEvent?.created_at,
+        localCopyPermissionEvent?.metadata_json) : null,
+    admin_preview_image_path: presentationImage ? `/admin/articles/${id}/image` : null,
     admin_preview_image_version: retainedLocalImage
       ? article.local_image_content_sha256 : article.updated_at }, events: events.results,
     discovery_evidence: evidence.results,
@@ -783,7 +841,15 @@ async function listSources(db: D1Database): Promise<Response> {
       (SELECT r.status FROM media_discovery_runs r WHERE r.source_key = s.source_key
         ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS recent_run_status,
       (SELECT r.started_at FROM media_discovery_runs r WHERE r.source_key = s.source_key
-        ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS recent_run_started_at
+        ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS recent_run_started_at,
+      (SELECT e.after_json FROM media_configuration_events e
+        WHERE e.entity_type = 'source' AND e.entity_key = s.source_key
+          AND json_extract(e.after_json, '$.operation') = 'image_policy'
+        ORDER BY e.id DESC LIMIT 1) AS local_copy_permission_event_json,
+      (SELECT e.created_at FROM media_configuration_events e
+        WHERE e.entity_type = 'source' AND e.entity_key = s.source_key
+          AND json_extract(e.after_json, '$.operation') = 'image_policy'
+        ORDER BY e.id DESC LIMIT 1) AS local_copy_permission_recorded_at
     FROM media_sources s WHERE s.retired_at IS NULL
     ORDER BY s.name, s.source_key LIMIT 100`).all<Record<string, unknown>>();
   const rules = await db.prepare(`SELECT ar.* FROM media_author_rules ar
@@ -947,6 +1013,88 @@ function requiredArticleRevision(request: Request): number {
   const revision = Number(unquoted);
   if (!Number.isSafeInteger(revision)) throw new HttpError(400, 'invalid_article_revision');
   return revision;
+}
+
+async function setArticleImagePolicy(request: Request, db: D1Database,
+  id: number): Promise<Response> {
+  const eventKey = `admin:image-policy:${requireIdempotencyKey(request)}`;
+  const requestedRevision = requiredArticleRevision(request);
+  const parsed = ArticleImagePolicyBody.safeParse(await readJson(request));
+  if (!parsed.success) throw new HttpError(400, 'invalid_article_image_policy_body');
+  const permissionBasis = validateImagePolicyEvidence(parsed.data.image_policy,
+    parsed.data.permission_basis, parsed.data.confirm_local_copy_permitted);
+  const replay = await db.prepare(`SELECT article_id, event_type, revision, metadata_json
+    FROM media_article_events WHERE event_key = ?`).bind(eventKey).first<{
+      article_id: number; event_type: string; revision: number; metadata_json: string;
+    }>();
+  if (replay) {
+    let metadata: Record<string, unknown>;
+    try { metadata = JSON.parse(replay.metadata_json) as Record<string, unknown>; }
+    catch { throw new HttpError(409, 'idempotency_key_conflict'); }
+    if (replay.article_id !== id || replay.event_type !== 'edited' ||
+        metadata.operation !== 'image_policy' ||
+        metadata.requested_revision !== requestedRevision ||
+        metadata.new_image_policy !== parsed.data.image_policy ||
+        (metadata.permission_basis ?? null) !== permissionBasis) {
+      throw new HttpError(409, 'idempotency_key_conflict');
+    }
+    return articleDetail(db, id);
+  }
+  const current = await db.prepare(`SELECT a.id, a.status, a.image_policy, a.revision,
+      s.image_policy AS source_image_policy
+    FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    WHERE a.id = ?`).bind(id).first<{
+      id: number; status: string; image_policy: z.infer<typeof ImagePolicy>;
+      revision: number; source_image_policy: z.infer<typeof ImagePolicy>;
+    }>();
+  if (!current) throw new HttpError(404, 'article_not_found');
+  if (current.revision !== requestedRevision) {
+    throw new HttpError(409, 'article_revision_changed');
+  }
+  if (parsed.data.image_policy === 'local_copy_permitted' &&
+      current.source_image_policy !== 'local_copy_permitted') {
+    throw new HttpError(409, 'source_local_copy_not_permitted');
+  }
+  const changed = current.image_policy !== parsed.data.image_policy;
+  if (!changed && current.image_policy !== 'local_copy_permitted') return articleDetail(db, id);
+  const now = new Date().toISOString();
+  const nextRevision = changed ? current.revision + 1 : current.revision;
+  const metadata = JSON.stringify({ operation: 'image_policy',
+    requested_revision: requestedRevision, previous_image_policy: current.image_policy,
+    new_image_policy: parsed.data.image_policy, permission_basis: permissionBasis,
+    evidence_only: !changed });
+  if (changed) {
+    await db.batch([
+      db.prepare(`UPDATE media_articles SET image_policy = ?, mutation_key = ?,
+          revision = ?, updated_at = ?
+        WHERE id = ? AND revision = ? AND image_policy = ?
+          AND (? != 'local_copy_permitted' OR EXISTS (
+            SELECT 1 FROM media_sources s WHERE s.source_key = media_articles.source_key
+              AND s.image_policy = 'local_copy_permitted'))`)
+        .bind(parsed.data.image_policy, eventKey, nextRevision, now, id, current.revision,
+          current.image_policy, parsed.data.image_policy),
+      db.prepare(`INSERT INTO media_article_events
+        (article_id, event_key, event_type, actor_type, from_status, to_status, revision,
+         created_at, metadata_json)
+        SELECT id, ?, 'edited', 'admin', status, status, revision, ?, ?
+        FROM media_articles WHERE id = ? AND revision = ? AND mutation_key = ?`)
+        .bind(eventKey, now, metadata, id, nextRevision, eventKey),
+    ]);
+  } else {
+    await db.prepare(`INSERT INTO media_article_events
+      (article_id, event_key, event_type, actor_type, from_status, to_status, revision,
+       created_at, metadata_json)
+      SELECT a.id, ?, 'edited', 'admin', a.status, a.status, a.revision, ?, ?
+      FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+      WHERE a.id = ? AND a.revision = ? AND a.image_policy = 'local_copy_permitted'
+        AND s.image_policy = 'local_copy_permitted'`)
+      .bind(eventKey, now, metadata, id, current.revision).run();
+  }
+  const event = await db.prepare(`SELECT article_id FROM media_article_events
+    WHERE event_key = ?`).bind(eventKey).first<{ article_id: number }>();
+  if (!event || event.article_id !== id) throw new HttpError(409, 'article_revision_changed');
+  if (changed) await reconcileHomepageLatestSix(db);
+  return articleDetail(db, id);
 }
 
 function localImageFailure(error: unknown): never {
@@ -1164,6 +1312,9 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
   const eventKey = `admin:source:${requireIdempotencyKey(request)}`;
   const parsed = SourceMutation.safeParse(await readJson(request));
   if (!parsed.success) throw new HttpError(400, 'invalid_source_mutation');
+  const permissionBasis = parsed.data.image_policy === undefined ? null
+    : validateImagePolicyEvidence(parsed.data.image_policy, parsed.data.permission_basis,
+      parsed.data.confirm_local_copy_permitted);
   const existing = await db.prepare(`SELECT * FROM media_sources
     WHERE source_key = ? AND retired_at IS NULL`)
     .bind(sourceKey).first<SourceRow>();
@@ -1171,25 +1322,64 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
   if (parsed.data.enabled === true && !sourceCanEnable(existing)) {
     throw new HttpError(409, 'unsupported_source_adapter');
   }
-  const replay = await db.prepare('SELECT event_key FROM media_configuration_events WHERE event_key = ?')
-    .bind(eventKey).first();
-  if (!replay) {
-    const nextPolicy = parsed.data.publication_policy ?? existing.publication_policy;
+  const replay = await db.prepare(`SELECT entity_key, after_json
+    FROM media_configuration_events WHERE event_key = ?`).bind(eventKey)
+    .first<{ entity_key: string; after_json: string }>();
+  if (replay) {
+    let recorded: Record<string, unknown>;
+    try { recorded = JSON.parse(replay.after_json) as Record<string, unknown>; }
+    catch { throw new HttpError(409, 'idempotency_key_conflict'); }
+    if (replay.entity_key !== sourceKey ||
+        (parsed.data.publication_policy !== undefined &&
+          recorded.publication_policy !== parsed.data.publication_policy) ||
+        (parsed.data.enabled !== undefined && recorded.enabled !== parsed.data.enabled) ||
+        (parsed.data.image_policy !== undefined &&
+          (recorded.operation !== 'image_policy' ||
+           recorded.new_image_policy !== parsed.data.image_policy ||
+           (recorded.permission_basis ?? null) !== permissionBasis))) {
+      throw new HttpError(409, 'idempotency_key_conflict');
+    }
+  } else {
+    const nextPublicationPolicy = parsed.data.publication_policy ?? existing.publication_policy;
     const nextEnabled = parsed.data.enabled === undefined ? existing.enabled : Number(parsed.data.enabled);
+    const nextImagePolicy = parsed.data.image_policy ?? existing.image_policy;
+    const before: Record<string, unknown> = {
+      publication_policy: existing.publication_policy,
+      enabled: Boolean(existing.enabled),
+      image_policy: existing.image_policy,
+    };
+    const after: Record<string, unknown> = {
+      publication_policy: nextPublicationPolicy,
+      enabled: Boolean(nextEnabled),
+      image_policy: nextImagePolicy,
+    };
+    if (parsed.data.image_policy !== undefined) {
+      Object.assign(after, { operation: 'image_policy',
+        previous_image_policy: existing.image_policy,
+        new_image_policy: nextImagePolicy, permission_basis: permissionBasis });
+    }
     const now = new Date().toISOString();
     await db.batch([
-      db.prepare(`UPDATE media_sources SET publication_policy = ?, enabled = ?, updated_at = ?
-        WHERE source_key = ? AND retired_at IS NULL`).bind(nextPolicy, nextEnabled, now, sourceKey),
+      db.prepare(`UPDATE media_sources SET publication_policy = ?, enabled = ?,
+          image_policy = ?, updated_at = ?
+        WHERE source_key = ? AND retired_at IS NULL`)
+        .bind(nextPublicationPolicy, nextEnabled, nextImagePolicy, now, sourceKey),
       db.prepare(`INSERT INTO media_configuration_events
         (event_key, entity_type, entity_key, action, actor_type, before_json, after_json, created_at)
         VALUES (?, 'source', ?, 'updated', 'admin', ?, ?, ?)`)
-        .bind(eventKey, sourceKey, JSON.stringify({ publication_policy: existing.publication_policy,
-          enabled: Boolean(existing.enabled) }), JSON.stringify({ publication_policy: nextPolicy,
-          enabled: Boolean(nextEnabled) }), now),
+        .bind(eventKey, sourceKey, JSON.stringify(before), JSON.stringify(after), now),
     ]);
   }
-  const source = await db.prepare(`SELECT * FROM media_sources
-    WHERE source_key = ? AND retired_at IS NULL`)
+  const source = await db.prepare(`SELECT s.*,
+      (SELECT e.after_json FROM media_configuration_events e
+        WHERE e.entity_type = 'source' AND e.entity_key = s.source_key
+          AND json_extract(e.after_json, '$.operation') = 'image_policy'
+        ORDER BY e.id DESC LIMIT 1) AS local_copy_permission_event_json,
+      (SELECT e.created_at FROM media_configuration_events e
+        WHERE e.entity_type = 'source' AND e.entity_key = s.source_key
+          AND json_extract(e.after_json, '$.operation') = 'image_policy'
+        ORDER BY e.id DESC LIMIT 1) AS local_copy_permission_recorded_at
+    FROM media_sources s WHERE s.source_key = ? AND s.retired_at IS NULL`)
     .bind(sourceKey).first();
   return json({ source: source ? presentSource(source) : source, replayed: Boolean(replay) });
 }
@@ -1371,6 +1561,11 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
   if (articlePublishedAtMatch) {
     if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
     return setArticlePublishedAt(request, env.MEDIA_DB, Number(articlePublishedAtMatch[1]));
+  }
+  const articleImagePolicyMatch = /^\/admin\/articles\/([1-9]\d*)\/image-policy$/.exec(url.pathname);
+  if (articleImagePolicyMatch) {
+    if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
+    return setArticleImagePolicy(request, env.MEDIA_DB, Number(articleImagePolicyMatch[1]));
   }
   const imageMatch = /^\/admin\/articles\/([1-9]\d*)\/image$/.exec(url.pathname);
   if (imageMatch) {

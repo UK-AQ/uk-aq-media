@@ -22,6 +22,7 @@
     "caws:check": "tsx scripts/caws-discovery-check.ts",
     "remote-preview-image:check": "tsx scripts/remote-preview-image-check.ts",
     "local-image:check": "tsx scripts/local-image-check.ts",
+    "image-policy-admin:check": "tsx scripts/image-policy-admin-check.ts",
     "admin-metadata-provider:check": "tsx scripts/admin-metadata-provider-check.ts",
     "homepage-latest-six:check": "tsx scripts/homepage-latest-six-check.ts",
     "public-feed-cursor:check": "tsx scripts/public-feed-cursor-check.ts",
@@ -30,7 +31,7 @@
     "facebook:check": "tsx scripts/facebook-provider-check.ts",
     "gdelt:run": "tsx scripts/gdelt-web-ngrams-batch.ts",
     "seed:generate": "tsx scripts/source-seed.ts",
-    "check": "npm run seed:check && npm run ai:check && npm run guardian-image:check && npm run article-head:check && npm run publisher-rss:check && npm run dsawsp:check && npm run caws:check && npm run remote-preview-image:check && npm run local-image:check && npm run admin-metadata-provider:check && npm run homepage-latest-six:check && npm run public-feed-cursor:check && npm run gdelt:check && npm run bluesky:check && npm run facebook:check && npm run typecheck && npm run build"
+    "check": "npm run seed:check && npm run ai:check && npm run guardian-image:check && npm run article-head:check && npm run publisher-rss:check && npm run dsawsp:check && npm run caws:check && npm run remote-preview-image:check && npm run local-image:check && npm run image-policy-admin:check && npm run admin-metadata-provider:check && npm run homepage-latest-six:check && npm run public-feed-cursor:check && npm run gdelt:check && npm run bluesky:check && npm run facebook:check && npm run typecheck && npm run build"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260907.1",
