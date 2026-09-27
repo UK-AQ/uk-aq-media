@@ -1343,6 +1343,7 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
     const nextPublicationPolicy = parsed.data.publication_policy ?? existing.publication_policy;
     const nextEnabled = parsed.data.enabled === undefined ? existing.enabled : Number(parsed.data.enabled);
     const nextImagePolicy = parsed.data.image_policy ?? existing.image_policy;
+    const imagePolicyChanged = nextImagePolicy !== existing.image_policy;
     const before: Record<string, unknown> = {
       publication_policy: existing.publication_policy,
       enabled: Boolean(existing.enabled),
@@ -1369,6 +1370,7 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
         VALUES (?, 'source', ?, 'updated', 'admin', ?, ?, ?)`)
         .bind(eventKey, sourceKey, JSON.stringify(before), JSON.stringify(after), now),
     ]);
+    if (imagePolicyChanged) await reconcileHomepageLatestSix(db);
   }
   const source = await db.prepare(`SELECT s.*,
       (SELECT e.after_json FROM media_configuration_events e

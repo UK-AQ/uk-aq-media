@@ -31,6 +31,14 @@ assert.match(sourceMutation, /UPDATE media_sources SET publication_policy = \?, 
 assert.match(sourceMutation, /INSERT INTO media_configuration_events/);
 assert.match(sourceMutation, /previous_image_policy/);
 assert.match(sourceMutation, /new_image_policy/);
+assert.match(sourceMutation,
+  /const imagePolicyChanged = nextImagePolicy !== existing\.image_policy;/,
+  'source reconciliation must be based on an effective image-policy change');
+assert.match(sourceMutation,
+  /await db\.batch\(\[[\s\S]*?INSERT INTO media_configuration_events[\s\S]*?\]\);\s+if \(imagePolicyChanged\) await reconcileHomepageLatestSix\(db\);/,
+  'a real source image-policy change must reconcile only after mutation and audit succeed');
+assert.equal(sourceMutation.match(/reconcileHomepageLatestSix\(db\)/g)?.length, 1,
+  'source mutation must contain exactly one guarded homepage reconciliation');
 assert.match(articleMutation, /admin:image-policy:/);
 assert.match(articleMutation, /requiredArticleRevision\(request\)/);
 assert.match(articleMutation, /source_local_copy_not_permitted/);
