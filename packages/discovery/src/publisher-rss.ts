@@ -54,10 +54,9 @@ export const PUBLISHER_RSS_ROUTES = [
 
 export type PublisherRssSourceKey = typeof PUBLISHER_RSS_ROUTES[number]['source_key'];
 
-const PUBLISHER_RSS_AUTHOR_POLICIES: Partial<Record<PublisherRssSourceKey, 'none'>> = {
-  'mums-for-lungs': 'none',
-};
-
+const PUBLISHER_RSS_AUTHOR_POLICIES = new Map<string, 'none'>([
+  ['mums-for-lungs', 'none'],
+]);
 
 function expectedRoute(sourceKey: string, routeKey: string) {
   return PUBLISHER_RSS_ROUTES.find(route => route.source_key === sourceKey &&
