@@ -54,6 +54,11 @@ export const PUBLISHER_RSS_ROUTES = [
 
 export type PublisherRssSourceKey = typeof PUBLISHER_RSS_ROUTES[number]['source_key'];
 
+const PUBLISHER_RSS_AUTHOR_POLICIES: Partial<Record<PublisherRssSourceKey, 'none'>> = {
+  'mums-for-lungs': 'none',
+};
+
+
 function expectedRoute(sourceKey: string, routeKey: string) {
   return PUBLISHER_RSS_ROUTES.find(route => route.source_key === sourceKey &&
     route.route_key === routeKey) ?? null;
@@ -126,7 +131,8 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
       item.content_encoded_preview_url,
     ].find(Boolean) ?? null : null;
     articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
-      original_url: item.raw_url, title: item.title, author: item.author,
+      original_url: item.raw_url, title: item.title,
+      author: PUBLISHER_RSS_AUTHOR_POLICIES[source.source_key] === 'none' ? null : item.author,
       published_at: item.published_at, categories: item.categories, title_context: null,
       preview_url: preview, display_title: null, display_title_origin: null,
       preview_metadata_checked_at: null, feed_body_html: item.content_encoded_html });

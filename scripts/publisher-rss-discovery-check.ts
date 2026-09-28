@@ -56,7 +56,8 @@ const mumsParsed = await parsePublisherRssFeed(`<?xml version="1.0"?>
     width="1500" height="847" url="${mumsImage}" />
   <content:encoded><![CDATA[<p>Permission-gated body must be discarded.</p>]]></content:encoded>
 </item></channel></rss>`, mumsForLungs, 'mums-for-lungs-news');
-assert.equal(mumsParsed.articles[0]?.author, 'Jane Dutton');
+assert.equal(mumsParsed.articles[0]?.author, null,
+  'Mums for Lungs source policy suppresses RSS bylines');
 assert.equal(mumsParsed.articles[0]?.published_at, '2026-07-10T09:12:51.000Z');
 assert.deepEqual(mumsParsed.articles[0]?.categories, ['Diesel']);
 assert.equal(mumsParsed.articles[0]?.preview_url, mumsImage);
