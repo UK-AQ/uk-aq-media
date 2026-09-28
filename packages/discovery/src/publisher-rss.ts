@@ -131,7 +131,7 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
     ].find(Boolean) ?? null : null;
     articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
       original_url: item.raw_url, title: item.title,
-      author: PUBLISHER_RSS_AUTHOR_POLICIES[source.source_key] === 'none' ? null : item.author,
+      author: PUBLISHER_RSS_AUTHOR_POLICIES.get(source.source_key) === 'none' ? null : item.author,
       published_at: item.published_at, categories: item.categories, title_context: null,
       preview_url: preview, display_title: null, display_title_origin: null,
       preview_metadata_checked_at: null, feed_body_html: item.content_encoded_html });
