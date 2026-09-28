@@ -55,7 +55,7 @@ export function configuredCawsIndex(source: Source): boolean {
     source.name === 'Communities Against Woodsmoke' &&
     source.canonical_domain === 'communitiesagainstwoodsmoke.com' &&
     source.source_type === 'publisher' && source.enabled &&
-    source.publication_policy === 'manual' && source.review_level === 'standard' &&
+    source.review_level === 'standard' &&
     source.priority === 50 && source.discovery_method === 'sitemap' &&
     source.content_fetch_policy === 'discovery_metadata_only' &&
     source.ai_content_policy === 'metadata_only' && source.image_policy === 'remote_preview' &&

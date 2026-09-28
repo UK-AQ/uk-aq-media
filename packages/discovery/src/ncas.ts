@@ -107,7 +107,7 @@ function exactConfiguredSource(source: Source): boolean {
   const routes = source.discovery_config.routes;
   return source.source_key === 'ncas' && source.name === 'NCAS' &&
     source.canonical_domain === 'ncas.ac.uk' && source.source_type === 'publisher' &&
-    source.enabled && source.publication_policy === 'manual' && source.review_level === 'standard' &&
+    source.enabled && source.review_level === 'standard' &&
     source.priority === 50 && source.discovery_method === 'sitemap' &&
     source.content_fetch_policy === 'article_head_allowed' && source.ai_content_policy === 'disabled' &&
     source.image_policy === 'remote_preview' && source.search_index_policy === 'metadata_only' &&

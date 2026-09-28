@@ -11,6 +11,7 @@ import {
 } from '@uk-aq-media/core';
 import { directPublishState, facebookEligibility } from './direct-publish-eligibility';
 import {
+  configuredCawsIndex, configuredDsawspIndex, configuredNcasRouteKeys,
   configuredPublisherRssRouteKeys, discoverPublisherRss, fetchArticleHeadMetadata,
 } from '@uk-aq-media/discovery';
 
@@ -1286,25 +1287,39 @@ async function adminImage(env: MediaAdminEnv, id: number): Promise<Response> {
   } finally { clearTimeout(timer); }
 }
 
-function sourceCanEnable(source: SourceRow): boolean {
+function sourceCanEnable(source: SourceRow,
+  mutation: z.infer<typeof SourceMutation>): boolean {
   try {
     const config = JSON.parse(source.discovery_config_json) as Record<string, unknown>;
     const parsed = SourceSchema.safeParse({
       source_key: source.source_key, name: source.name,
       canonical_domain: source.canonical_domain, source_type: source.source_type,
-      enabled: true, publication_policy: source.publication_policy,
+      enabled: true, publication_policy: mutation.publication_policy ?? source.publication_policy,
       review_level: source.review_level, priority: source.priority,
       discovery_method: source.discovery_method, discovery_config: config,
       content_fetch_policy: source.content_fetch_policy,
-      ai_content_policy: source.ai_content_policy, image_policy: source.image_policy,
+      ai_content_policy: source.ai_content_policy,
+      image_policy: mutation.image_policy ?? source.image_policy,
       search_index_policy: source.search_index_policy,
     });
-    if (!parsed.success || parsed.data.discovery_method !== 'rss') return false;
-    return source.source_key === 'air-quality-news'
-      ? config.url === 'https://airqualitynews.com/feed/'
-      : source.source_key === 'the-guardian'
-        ? Array.isArray(config.routes) && config.routes.length > 0
-        : configuredPublisherRssRouteKeys(parsed.data).length > 0;
+    if (!parsed.success) return false;
+    if (parsed.data.discovery_method === 'rss') {
+      return parsed.data.source_key === 'air-quality-news'
+        ? parsed.data.discovery_config.url === 'https://airqualitynews.com/feed/'
+        : parsed.data.source_key === 'the-guardian'
+          ? (parsed.data.discovery_config.routes?.length ?? 0) > 0
+          : configuredPublisherRssRouteKeys(parsed.data).length > 0;
+    }
+    if (parsed.data.discovery_method === 'sitemap') {
+      if (parsed.data.source_key === 'communities-against-woodsmoke') {
+        return configuredCawsIndex(parsed.data);
+      }
+      if (parsed.data.source_key === 'dsawsp') return configuredDsawspIndex(parsed.data);
+      if (parsed.data.source_key === 'ncas') {
+        return configuredNcasRouteKeys(parsed.data).length > 0;
+      }
+    }
+    return false;
   } catch { return false; }
 }
 
@@ -1319,7 +1334,8 @@ async function mutateSource(request: Request, db: D1Database, sourceKey: string)
     WHERE source_key = ? AND retired_at IS NULL`)
     .bind(sourceKey).first<SourceRow>();
   if (!existing) throw new HttpError(404, 'source_not_found');
-  if (parsed.data.enabled === true && !sourceCanEnable(existing)) {
+  if (parsed.data.enabled === true && !Boolean(existing.enabled) &&
+      !sourceCanEnable(existing, parsed.data)) {
     throw new HttpError(409, 'unsupported_source_adapter');
   }
   const replay = await db.prepare(`SELECT entity_key, after_json

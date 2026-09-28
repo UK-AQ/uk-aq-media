@@ -39,7 +39,7 @@ export function configuredDsawspIndex(source: Source): boolean {
   const route = source.discovery_config.routes?.[0];
   return source.source_key === 'dsawsp' && source.name === 'DSAWSP' &&
     source.canonical_domain === 'dsawsp.org' && source.source_type === 'publisher' &&
-    source.enabled && source.publication_policy === 'manual' && source.review_level === 'standard' &&
+    source.enabled && source.review_level === 'standard' &&
     source.priority === 50 && source.discovery_method === 'sitemap' &&
     source.content_fetch_policy === 'article_head_allowed' && source.ai_content_policy === 'disabled' &&
     source.image_policy === 'remote_preview' && source.discovery_config.routes?.length === 1 &&
