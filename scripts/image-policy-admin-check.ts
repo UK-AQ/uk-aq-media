@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { HttpError } from '@uk-aq-media/core';
 import {
-  ArticleImagePolicyBody, SourceMutation, validateImagePolicyEvidence,
+  ArticleImagePolicyBody, SourceMutation, validateArticleImagePolicyEvidence,
+  validateImagePolicyEvidence,
 } from '../apps/media-admin/src/editorial-dashboard';
 
 assert.equal(SourceMutation.safeParse({ image_policy: 'local_copy_permitted',
@@ -19,6 +20,12 @@ assert.throws(() => validateImagePolicyEvidence('local_copy_permitted', 'Permiss
   error => error instanceof HttpError && error.message === 'local_copy_confirmation_required');
 assert.equal(validateImagePolicyEvidence('local_copy_permitted', '  Permission recorded  ', true),
   'Permission recorded');
+assert.equal(validateArticleImagePolicyEvidence('local_copy_permitted', undefined, true), null);
+assert.equal(validateArticleImagePolicyEvidence('local_copy_permitted',
+  '  Article-specific evidence retained for compatibility  ', true),
+  'Article-specific evidence retained for compatibility');
+assert.throws(() => validateArticleImagePolicyEvidence('local_copy_permitted', undefined, false),
+  error => error instanceof HttpError && error.message === 'local_copy_confirmation_required');
 
 const source = readFileSync('apps/media-admin/src/editorial-dashboard.ts', 'utf8');
 const sourceMutation = source.slice(source.indexOf('async function mutateSource'),
@@ -49,6 +56,7 @@ assert.doesNotMatch(articleMutation, /status\s*=/);
 assert.match(articleMutation, /INSERT INTO media_article_events/);
 assert.match(articleMutation, /'edited', 'admin'/);
 assert.match(articleMutation, /operation: 'image_policy'/);
+assert.match(articleMutation, /source_permission_confirmed: sourcePermissionConfirmed/);
 assert.match(articleMutation, /evidence_only: !changed/);
 assert.match(articleMutation, /a\.image_policy = 'local_copy_permitted'/,
   'legacy local-copy evidence refresh must be guarded by current article policy');

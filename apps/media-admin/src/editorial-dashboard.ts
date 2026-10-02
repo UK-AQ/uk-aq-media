@@ -138,6 +138,15 @@ export function validateImagePolicyEvidence(imagePolicy: z.infer<typeof ImagePol
   return basis;
 }
 
+export function validateArticleImagePolicyEvidence(imagePolicy: z.infer<typeof ImagePolicy>,
+  permissionBasis: string | undefined, confirmed: boolean | undefined): string | null {
+  const basis = permissionBasis?.trim() || null;
+  if (imagePolicy === 'local_copy_permitted' && confirmed !== true) {
+    throw new HttpError(400, 'local_copy_confirmation_required');
+  }
+  return basis;
+}
+
 function permissionEvidence(createdAt: unknown, metadataJson: unknown): PermissionEvidence | null {
   if (typeof createdAt !== 'string' || typeof metadataJson !== 'string') return null;
   try {
@@ -1022,8 +1031,10 @@ async function setArticleImagePolicy(request: Request, db: D1Database,
   const requestedRevision = requiredArticleRevision(request);
   const parsed = ArticleImagePolicyBody.safeParse(await readJson(request));
   if (!parsed.success) throw new HttpError(400, 'invalid_article_image_policy_body');
-  const permissionBasis = validateImagePolicyEvidence(parsed.data.image_policy,
+  const permissionBasis = validateArticleImagePolicyEvidence(parsed.data.image_policy,
     parsed.data.permission_basis, parsed.data.confirm_local_copy_permitted);
+  const sourcePermissionConfirmed = parsed.data.image_policy === 'local_copy_permitted' &&
+    parsed.data.confirm_local_copy_permitted === true;
   const replay = await db.prepare(`SELECT article_id, event_type, revision, metadata_json
     FROM media_article_events WHERE event_key = ?`).bind(eventKey).first<{
       article_id: number; event_type: string; revision: number; metadata_json: string;
@@ -1036,7 +1047,8 @@ async function setArticleImagePolicy(request: Request, db: D1Database,
         metadata.operation !== 'image_policy' ||
         metadata.requested_revision !== requestedRevision ||
         metadata.new_image_policy !== parsed.data.image_policy ||
-        (metadata.permission_basis ?? null) !== permissionBasis) {
+        (metadata.permission_basis ?? null) !== permissionBasis ||
+        Boolean(metadata.source_permission_confirmed) !== sourcePermissionConfirmed) {
       throw new HttpError(409, 'idempotency_key_conflict');
     }
     return articleDetail(db, id);
@@ -1063,7 +1075,7 @@ async function setArticleImagePolicy(request: Request, db: D1Database,
   const metadata = JSON.stringify({ operation: 'image_policy',
     requested_revision: requestedRevision, previous_image_policy: current.image_policy,
     new_image_policy: parsed.data.image_policy, permission_basis: permissionBasis,
-    evidence_only: !changed });
+    source_permission_confirmed: sourcePermissionConfirmed, evidence_only: !changed });
   if (changed) {
     await db.batch([
       db.prepare(`UPDATE media_articles SET image_policy = ?, mutation_key = ?,
