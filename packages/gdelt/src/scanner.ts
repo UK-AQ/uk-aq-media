@@ -8,6 +8,7 @@ import {
   GDELT_MAX_MATCHED_CANDIDATES_PER_FILE, GDELT_MAX_MATCHED_CANDIDATES_PER_RUN,
   GDELT_MAX_NEW_FILE_PAIRS, GDELT_MAX_NGRAM_COMPRESSED_BYTES,
   GDELT_MAX_TOC_COMPRESSED_BYTES, GDELT_MAX_TOC_LINE_BYTES, GDELT_MAX_TITLE_LENGTH,
+  GDELT_MAX_UNRESOLVED_DOCID_SAMPLE,
   GdeltCandidateInputSchema,
   enumerateFileStamps, gdeltArticleIdentityUrl, gdeltFileUrls,
   matchGdeltFamilies, type GdeltCandidateInput, type GdeltFamilyKey,
@@ -26,12 +27,36 @@ export class GdeltLineTooLargeError extends Error {
   }
 }
 
+export type GdeltTocResolutionDiagnostics = {
+  matched_docid_count: number;
+  unresolved_matched_docid_count: number;
+  unresolved_matched_docid_sample: string[];
+};
+
+export class GdeltTocResolutionError extends Error {
+  readonly code = 'gdelt_toc_missing_matched_docids';
+
+  constructor(readonly file_stamp: string, readonly diagnostics: GdeltTocResolutionDiagnostics) {
+    super('gdelt_toc_missing_matched_docids');
+    this.name = 'GdeltTocResolutionError';
+  }
+}
+
+export function warnPartialTocResolution(fileStamp: string,
+  diagnostics: GdeltTocResolutionDiagnostics): void {
+  if (diagnostics.unresolved_matched_docid_count === 0 ||
+    diagnostics.unresolved_matched_docid_count >= diagnostics.matched_docid_count) return;
+  console.warn(JSON.stringify({ event: 'gdelt_toc_partially_unresolved_matched_docids',
+    file_stamp: fileStamp, ...diagnostics }));
+}
+
 export type GdeltFileScan = {
   candidates: GdeltCandidateInput[];
   ngram_rows: number;
   matches_seen: number;
   malformed_ngram_rows: number;
   malformed_toc_rows: number;
+  toc_resolution: GdeltTocResolutionDiagnostics;
 };
 
 function cleanText(value: string, maximum: number): string | null {
@@ -138,8 +163,9 @@ export function parseTocLine(line: string): ParsedToc | null {
   return id && date && lang && title && url ? { id, date, lang, title, url } : null;
 }
 
-export async function resolveTocLines(lines: AsyncIterable<string>, matchedDocs: Map<string, NgramMatch>):
-Promise<{ candidates: GdeltCandidateInput[]; malformed_toc_rows: number }> {
+export async function resolveTocLines(lines: AsyncIterable<string>, matchedDocs: Map<string, NgramMatch>,
+  fileStamp: string): Promise<{ candidates: GdeltCandidateInput[]; malformed_toc_rows: number;
+    toc_resolution: GdeltTocResolutionDiagnostics }> {
   const unresolved = new Set(matchedDocs.keys());
   const candidates = new Map<string, GdeltCandidateInput>();
   let malformed_toc_rows = 0;
@@ -188,11 +214,19 @@ Promise<{ candidates: GdeltCandidateInput[]; malformed_toc_rows: number }> {
     }
   }
   if (tocRows === 0) throw new Error('gdelt_toc_empty');
-  if (unresolved.size) throw new Error('gdelt_toc_missing_matched_docids');
+  const toc_resolution = {
+    matched_docid_count: matchedDocs.size,
+    unresolved_matched_docid_count: unresolved.size,
+    unresolved_matched_docid_sample: [...unresolved].sort()
+      .slice(0, GDELT_MAX_UNRESOLVED_DOCID_SAMPLE),
+  };
+  if (matchedDocs.size > 0 && unresolved.size === matchedDocs.size) {
+    throw new GdeltTocResolutionError(fileStamp, toc_resolution);
+  }
   if (candidates.size > GDELT_MAX_MATCHED_CANDIDATES_PER_FILE) {
     throw new Error('gdelt_file_candidate_limit');
   }
-  return { candidates: [...candidates.values()], malformed_toc_rows };
+  return { candidates: [...candidates.values()], malformed_toc_rows, toc_resolution };
 }
 
 function byteGuard(maximum: number, code: string): Transform {
@@ -272,10 +306,10 @@ async function scanFilePair(stamp: string): Promise<GdeltFileScan> {
   const matched = await scanNgramLines(ngrams);
   const toc = await gzipLines(urls.toc, GDELT_MAX_TOC_COMPRESSED_BYTES,
     stamp, 'toc', GDELT_MAX_TOC_LINE_BYTES);
-  const resolved = await resolveTocLines(toc, matched.matched_docs);
+  const resolved = await resolveTocLines(toc, matched.matched_docs, stamp);
   return { candidates: resolved.candidates, ngram_rows: matched.ngram_rows,
     matches_seen: matched.matches_seen, malformed_ngram_rows: matched.malformed_ngram_rows,
-    malformed_toc_rows: resolved.malformed_toc_rows };
+    malformed_toc_rows: resolved.malformed_toc_rows, toc_resolution: resolved.toc_resolution };
 }
 
 type PairState = 'missing' | 'complete';
@@ -380,6 +414,7 @@ export async function runGdeltBatch(baseUrl: string, secret: string): Promise<Re
       if (state === 'missing') { missing++; completedThrough = stamp; continue; }
       if (newFiles >= GDELT_MAX_NEW_FILE_PAIRS) break;
       const scan = await scanFilePair(stamp);
+      warnPartialTocResolution(stamp, scan.toc_resolution);
       if (runCandidates + scan.candidates.length > GDELT_MAX_MATCHED_CANDIDATES_PER_RUN) break;
       runCandidates += scan.candidates.length;
       const expectedChunks = Math.ceil(scan.candidates.length / GDELT_INGEST_CHUNK_SIZE);

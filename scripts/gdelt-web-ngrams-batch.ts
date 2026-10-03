@@ -1,4 +1,6 @@
-import { GdeltLineTooLargeError, runGdeltBatch } from '@uk-aq-media/gdelt/scanner';
+import {
+  GdeltLineTooLargeError, GdeltTocResolutionError, runGdeltBatch,
+} from '@uk-aq-media/gdelt/scanner';
 
 const baseUrl = process.env.UK_AQ_MEDIA_GDELT_INGEST_URL?.trim() ?? '';
 const secret = process.env.UK_AQ_MEDIA_GDELT_INGEST_SECRET?.trim() ?? '';
@@ -15,6 +17,10 @@ try {
       file_kind: error.file_kind,
       configured_limit_bytes: error.configured_limit_bytes,
       observed_bytes: error.observed_bytes,
+    } : {}),
+    ...(error instanceof GdeltTocResolutionError ? {
+      file_stamp: error.file_stamp,
+      ...error.diagnostics,
     } : {}),
   }));
   process.exitCode = 1;

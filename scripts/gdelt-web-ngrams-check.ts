@@ -7,7 +7,8 @@ import {
 } from '@uk-aq-media/core';
 import { persistArticle, persistDiscoveryEvidence } from '@uk-aq-media/discovery/persistence';
 import {
-  domainMatchesBoundary, GDELT_MAX_NGRAM_LINE_BYTES, gdeltArticleIdentityUrl, gdeltWindow,
+  domainMatchesBoundary, GDELT_MAX_NGRAM_LINE_BYTES, GDELT_MAX_UNRESOLVED_DOCID_SAMPLE,
+  gdeltArticleIdentityUrl, gdeltWindow,
   matchGdeltFamilies,
   registrablePublisherDomain, type GdeltCandidateInput,
 } from '@uk-aq-media/gdelt';
@@ -15,8 +16,8 @@ import {
   completeGdeltFile, ingestGdeltChunk, startGdeltFile, startGdeltRun,
 } from '@uk-aq-media/gdelt/ingest';
 import {
-  boundedLines, fixtureLines, gdeltIngestResponseErrorCode, parseNgramLine, parseTocLine,
-  resolveTocLines, scanNgramLines,
+  boundedLines, fixtureLines, GdeltTocResolutionError, gdeltIngestResponseErrorCode,
+  parseNgramLine, parseTocLine, resolveTocLines, scanNgramLines, warnPartialTocResolution,
 } from '@uk-aq-media/gdelt/scanner';
 import mediaDiscoveryWorker, { assertEmptyGdeltStartBody } from '../apps/media-discovery/src/index';
 import { reconcileHomepageLatestSixAfterSourceCommit } from '@uk-aq-media/discovery';
@@ -199,7 +200,7 @@ const joined = await resolveTocLines(fixtureLines([
     title: 'Regional wildfires', url: 'https://elsewhere.com/climate' }),
   JSON.stringify({ ID: 'doc-fr', date: '20260913120000', lang: 'French',
     title: 'Qualite de air', url: 'https://example.fr/article' }),
-] ), ngrams.matched_docs);
+] ), ngrams.matched_docs, '20260913120000');
 assert.equal(joined.candidates.length, 2, 'English filtering and canonical candidate dedupe must apply');
 assert.equal(joined.candidates[0]?.language, 'English',
   'live GDELT lang=en must be retained and normalised internally');
@@ -209,11 +210,56 @@ assert.equal(joined.candidates.some(value => value.url.includes('example.fr')), 
   'non-English candidates must remain excluded');
 assert.equal(joined.candidates[0]?.families.length, 2, 'multiple family evidence must be retained once');
 assert.equal(joined.candidates[0]?.provider_observed_at, '2026-09-13T12:01:00.000Z');
+assert.deepEqual(joined.toc_resolution, { matched_docid_count: 3,
+  unresolved_matched_docid_count: 0, unresolved_matched_docid_sample: [] });
+assert.equal(joined.toc_resolution.unresolved_matched_docid_count, 0,
+  'a parsed non-English TOC row must resolve its DOCID without becoming a candidate');
+
+const partialNgrams = await scanNgramLines(fixtureLines([
+  'doc-valid\tair quality in London\t1',
+  'doc-malformed\twildfires affect the region\t1',
+]));
+const partiallyResolved = await resolveTocLines(fixtureLines([
+  JSON.stringify({ ID: 'doc-valid', date: '20260913120000', lang: 'English',
+    title: 'Air quality in London', url: 'https://example.co.uk/valid' }),
+  JSON.stringify({ ID: 'doc-malformed', date: 'not-a-date', lang: 'English',
+    title: 'Regional wildfires', url: 'https://example.co.uk/malformed' }),
+]), partialNgrams.matched_docs, '20260913120100');
+assert.equal(partiallyResolved.candidates.length, 1,
+  'valid candidates must survive a partially unresolved TOC join');
+assert.deepEqual(partiallyResolved.toc_resolution, { matched_docid_count: 2,
+  unresolved_matched_docid_count: 1, unresolved_matched_docid_sample: ['doc-malformed'] });
+const resolutionWarnings: string[] = [];
+const originalConsoleWarn = console.warn;
+try {
+  console.warn = (value?: unknown) => { resolutionWarnings.push(String(value)); };
+  warnPartialTocResolution('20260913120100', partiallyResolved.toc_resolution);
+} finally { console.warn = originalConsoleWarn; }
+assert.deepEqual(resolutionWarnings.map(value => JSON.parse(value)), [{
+  event: 'gdelt_toc_partially_unresolved_matched_docids', file_stamp: '20260913120100',
+  matched_docid_count: 2, unresolved_matched_docid_count: 1,
+  unresolved_matched_docid_sample: ['doc-malformed'],
+}], 'partial resolution must emit bounded structured diagnostics');
+
+const unresolvedDocs = new Map(Array.from({ length: GDELT_MAX_UNRESOLVED_DOCID_SAMPLE + 5 },
+  (_, index) => [`doc-${String(index).padStart(2, '0')}`,
+    new Map([['gdelt-air-quality' as const, new Set(['air quality'])]])] as const));
 await assert.rejects(resolveTocLines(fixtureLines([
   JSON.stringify({ ID: 'different-file-doc', date: '20260913120000', lang: 'English',
     title: 'Air quality', url: 'https://example.co.uk/a' }),
-]), new Map([['doc-from-first-file', new Map([['gdelt-air-quality', new Set(['air quality'])]])]])),
-/gdelt_toc_missing_matched_docids/, 'DOCIDs must resolve only within their paired file');
+]), unresolvedDocs, '20260913120200'), error => {
+  assert.equal(error instanceof GdeltTocResolutionError, true);
+  const resolutionError = error as GdeltTocResolutionError;
+  assert.equal(resolutionError.message, 'gdelt_toc_missing_matched_docids');
+  assert.equal(resolutionError.file_stamp, '20260913120200');
+  assert.equal(resolutionError.diagnostics.matched_docid_count,
+    GDELT_MAX_UNRESOLVED_DOCID_SAMPLE + 5);
+  assert.equal(resolutionError.diagnostics.unresolved_matched_docid_count,
+    GDELT_MAX_UNRESOLVED_DOCID_SAMPLE + 5);
+  assert.equal(resolutionError.diagnostics.unresolved_matched_docid_sample.length,
+    GDELT_MAX_UNRESOLVED_DOCID_SAMPLE, 'unresolved diagnostic samples must remain bounded');
+  return true;
+}, 'DOCIDs must resolve only within their paired file');
 
 assert.throws(() => gdeltArticleIdentityUrl('http://example.co.uk/a'), /unsafe_gdelt_article_url/);
 assert.throws(() => gdeltArticleIdentityUrl('https://user:pass@example.co.uk/a'), /unsafe_gdelt_article_url/);
