@@ -11,6 +11,7 @@ export const GDELT_MAX_NEW_FILE_PAIRS = 6;
 export const GDELT_MAX_MATCHED_CANDIDATES_PER_FILE = 200;
 export const GDELT_MAX_MATCHED_CANDIDATES_PER_RUN = 600;
 export const GDELT_MAX_UNRESOLVED_DOCID_SAMPLE = 10;
+export const GDELT_CATCHUP_BUDGET_MS = 25 * 60 * 1000;
 export const GDELT_INGEST_CHUNK_SIZE = 2;
 export const GDELT_MAX_NGRAM_COMPRESSED_BYTES = 96 * 1024 * 1024;
 export const GDELT_MAX_TOC_COMPRESSED_BYTES = 64 * 1024 * 1024;
@@ -131,6 +132,12 @@ export function dateFromFileStamp(value: string): Date {
   return date;
 }
 
+export function gdeltSafeTarget(now: Date): string {
+  const safeEndMs = Math.floor((now.getTime() - GDELT_SAFETY_LAG_MINUTES * 60_000) / 60_000) *
+    60_000;
+  return fileStamp(new Date(safeEndMs));
+}
+
 export type GdeltWindow = {
   checkpoint_before: string | null;
   window_start: string;
@@ -138,7 +145,7 @@ export type GdeltWindow = {
 };
 
 export function gdeltWindow(now: Date, checkpoint: string | null): GdeltWindow {
-  const safeEndMs = Math.floor((now.getTime() - GDELT_SAFETY_LAG_MINUTES * 60_000) / 60_000) * 60_000;
+  const safeEndMs = dateFromFileStamp(gdeltSafeTarget(now)).getTime();
   const safeEnd = new Date(safeEndMs);
   if (!checkpoint) {
     return { checkpoint_before: null,

@@ -8,7 +8,7 @@ import {
 import { persistArticle, persistDiscoveryEvidence } from '@uk-aq-media/discovery/persistence';
 import {
   domainMatchesBoundary, GDELT_MAX_NGRAM_LINE_BYTES, GDELT_MAX_UNRESOLVED_DOCID_SAMPLE,
-  gdeltArticleIdentityUrl, gdeltWindow,
+  gdeltArticleIdentityUrl, gdeltSafeTarget, gdeltWindow,
   matchGdeltFamilies,
   registrablePublisherDomain, type GdeltCandidateInput,
 } from '@uk-aq-media/gdelt';
@@ -16,8 +16,9 @@ import {
   completeGdeltFile, ingestGdeltChunk, startGdeltFile, startGdeltRun,
 } from '@uk-aq-media/gdelt/ingest';
 import {
-  boundedLines, fixtureLines, GdeltTocResolutionError, gdeltIngestResponseErrorCode,
-  parseNgramLine, parseTocLine, resolveTocLines, scanNgramLines, warnPartialTocResolution,
+  boundedLines, fixtureLines, GdeltCatchupNoProgressError, GdeltTocResolutionError,
+  gdeltIngestResponseErrorCode, parseNgramLine, parseTocLine, resolveTocLines, runGdeltCatchup,
+  scanNgramLines, warnPartialTocResolution, type GdeltBatchResult,
 } from '@uk-aq-media/gdelt/scanner';
 import mediaDiscoveryWorker, { assertEmptyGdeltStartBody } from '../apps/media-discovery/src/index';
 import { reconcileHomepageLatestSixAfterSourceCommit } from '@uk-aq-media/discovery';
@@ -91,6 +92,13 @@ const families = {
   wildfire: { family_key: 'gdelt-wildfire', matched_phrases: ['wildfires'] },
   wood: { family_key: 'gdelt-wood-burning', matched_phrases: ['wood burning'] },
 } as const satisfies Record<string, GdeltCandidateInput['families'][number]>;
+
+function gdeltBatchResult(checkpointBefore: string | null,
+  checkpointAfter: string): GdeltBatchResult {
+  return { ok: true, run_id: 'fixture-run', checkpoint_before: checkpointBefore,
+    checkpoint_after: checkpointAfter, window_start: checkpointAfter,
+    window_end: checkpointAfter, completed_through: checkpointAfter, minutes_checked: 1 };
+}
 
 await assertEmptyGdeltStartBody(new Request('https://media.example/gdelt/web-ngrams/runs/start', {
   method: 'POST',
@@ -283,6 +291,78 @@ assert.equal(canonicalizeUrl('https://www.example.co.uk/a?utm_source=gdelt', 'ex
 assert.deepEqual(gdeltWindow(new Date('2026-09-13T12:10:44.000Z'), null), {
   checkpoint_before: null, window_start: '20260913100600', window_end: '20260913120500',
 });
+assert.equal(gdeltSafeTarget(new Date('2026-09-13T12:10:44.000Z')), '20260913120500');
+
+// Workflow-side catch-up orchestration over normal bounded batch results.
+let currentBatchCalls = 0;
+const currentCatchup = await runGdeltCatchup(async () => {
+  currentBatchCalls++;
+  return gdeltBatchResult('20260913120500', '20260913120500');
+}, { now: () => new Date('2026-09-13T12:10:44.000Z') });
+assert.equal(currentBatchCalls, 1, 'an already-current invocation must still run exactly one batch');
+assert.deepEqual(currentCatchup, { checkpoint_before: '20260913120500',
+  checkpoint_after: '20260913120500', safe_target: '20260913120500', batches_completed: 1,
+  caught_up: true, elapsed_ms: 0, termination_reason: 'caught_up' });
+
+let advancingNow = new Date('2026-09-13T12:10:00.000Z');
+let advancingBatch = 0;
+const advancingResults = [
+  gdeltBatchResult('20260913120000', '20260913120200'),
+  gdeltBatchResult('20260913120200', '20260913120600'),
+  gdeltBatchResult('20260913120600', '20260913120700'),
+];
+const advancingCatchup = await runGdeltCatchup(async () => {
+  const result = advancingResults[advancingBatch++];
+  assert.ok(result, 'catch-up must not request an unexpected extra batch');
+  advancingNow = advancingBatch === 1 ? new Date('2026-09-13T12:11:00.000Z') :
+    new Date('2026-09-13T12:12:00.000Z');
+  return result;
+}, { now: () => advancingNow });
+assert.equal(advancingBatch, 3,
+  'a stale checkpoint must run repeated bounded batches until the moving target is reached');
+assert.deepEqual(advancingCatchup, { checkpoint_before: '20260913120000',
+  checkpoint_after: '20260913120700', safe_target: '20260913120700', batches_completed: 3,
+  caught_up: true, elapsed_ms: 120_000, termination_reason: 'caught_up' });
+
+let budgetNow = new Date('2026-09-13T12:10:00.000Z');
+let inFlightCompleted = false;
+let budgetBatchCalls = 0;
+const budgetCatchup = await runGdeltCatchup(async () => {
+  budgetBatchCalls++;
+  budgetNow = new Date('2026-09-13T12:10:02.000Z');
+  inFlightCompleted = true;
+  return gdeltBatchResult('20260913120000', '20260913120100');
+}, { now: () => budgetNow, budget_ms: 1_000 });
+assert.equal(inFlightCompleted, true, 'a batch that starts within budget must finish normally');
+assert.equal(budgetBatchCalls, 1, 'an expired budget must prevent the next batch from starting');
+assert.deepEqual(budgetCatchup, { checkpoint_before: '20260913120000',
+  checkpoint_after: '20260913120100', safe_target: '20260913120500', batches_completed: 1,
+  caught_up: false, elapsed_ms: 2_000, termination_reason: 'budget_exhausted' });
+
+let failingBatchCalls = 0;
+await assert.rejects(runGdeltCatchup(async () => {
+  failingBatchCalls++;
+  if (failingBatchCalls === 2) throw new Error('gdelt_fixture_batch_failed');
+  return gdeltBatchResult('20260913120000', '20260913120100');
+}, { now: () => new Date('2026-09-13T12:10:00.000Z') }), /gdelt_fixture_batch_failed/);
+assert.equal(failingBatchCalls, 2, 'a failed batch must stop catch-up immediately');
+
+await assert.rejects(runGdeltCatchup(async () =>
+  gdeltBatchResult('20260913120000', '20260913120000'),
+{ now: () => new Date('2026-09-13T12:10:00.000Z') }), error => {
+  assert.equal(error instanceof GdeltCatchupNoProgressError, true);
+  const noProgress = error as GdeltCatchupNoProgressError;
+  assert.equal(noProgress.message, 'gdelt_catchup_no_progress');
+  assert.equal(noProgress.safe_target, '20260913120500');
+  assert.equal(noProgress.batches_completed, 1);
+  return true;
+}, 'a stale, non-advancing successful batch must trip the no-progress guard');
+
+const currentNoProgress = await runGdeltCatchup(async () =>
+  gdeltBatchResult('20260913120500', '20260913120500'),
+{ now: () => new Date('2026-09-13T12:10:00.000Z') });
+assert.equal(currentNoProgress.termination_reason, 'caught_up',
+  'caught-up state must be checked before applying the no-progress guard');
 
 // Integration fixture: real migrations and the production D1 mutation functions over SQLite.
 const sqlite = new DatabaseSync(':memory:');

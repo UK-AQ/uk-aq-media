@@ -2,7 +2,8 @@ import { createGunzip } from 'node:zlib';
 import { Readable, Transform } from 'node:stream';
 import { canonicalizeUrl } from '@uk-aq-media/core';
 import {
-  GDELT_FILE_TIMEOUT_MS, GDELT_HEAD_TIMEOUT_MS, GDELT_INGEST_CHUNK_SIZE,
+  GDELT_CATCHUP_BUDGET_MS, GDELT_FILE_TIMEOUT_MS, GDELT_HEAD_TIMEOUT_MS,
+  GDELT_INGEST_CHUNK_SIZE,
   GDELT_INGEST_TIMEOUT_MS, GDELT_MAX_DECOMPRESSED_BYTES,
   GDELT_MAX_INGEST_BODY_BYTES, GDELT_MAX_NGRAM_LINE_BYTES,
   GDELT_MAX_MATCHED_CANDIDATES_PER_FILE, GDELT_MAX_MATCHED_CANDIDATES_PER_RUN,
@@ -10,7 +11,7 @@ import {
   GDELT_MAX_TOC_COMPRESSED_BYTES, GDELT_MAX_TOC_LINE_BYTES, GDELT_MAX_TITLE_LENGTH,
   GDELT_MAX_UNRESOLVED_DOCID_SAMPLE,
   GdeltCandidateInputSchema,
-  enumerateFileStamps, gdeltArticleIdentityUrl, gdeltFileUrls,
+  dateFromFileStamp, enumerateFileStamps, gdeltArticleIdentityUrl, gdeltFileUrls, gdeltSafeTarget,
   matchGdeltFamilies, type GdeltCandidateInput, type GdeltFamilyKey,
 } from './contracts';
 
@@ -58,6 +59,37 @@ export type GdeltFileScan = {
   malformed_toc_rows: number;
   toc_resolution: GdeltTocResolutionDiagnostics;
 };
+
+export type GdeltBatchResult = {
+  ok: true;
+  run_id: string;
+  checkpoint_before: string | null;
+  checkpoint_after: string;
+  window_start: string;
+  window_end: string;
+  completed_through: string;
+  minutes_checked: number;
+};
+
+export type GdeltCatchupResult = {
+  checkpoint_before: string | null;
+  checkpoint_after: string;
+  safe_target: string;
+  batches_completed: number;
+  caught_up: boolean;
+  elapsed_ms: number;
+  termination_reason: 'caught_up' | 'budget_exhausted';
+};
+
+export class GdeltCatchupNoProgressError extends Error {
+  readonly code = 'gdelt_catchup_no_progress';
+
+  constructor(readonly checkpoint_before: string, readonly checkpoint_after: string,
+    readonly safe_target: string, readonly batches_completed: number) {
+    super('gdelt_catchup_no_progress');
+    this.name = 'GdeltCatchupNoProgressError';
+  }
+}
 
 function cleanText(value: string, maximum: number): string | null {
   const clean = value.normalize('NFKC').replace(/[\u0000-\u001f\u007f]+/g, ' ')
@@ -392,16 +424,24 @@ function errorCode(error: unknown): string {
   return /^gdelt_[a-z0-9_]+$/.test(value) ? value.slice(0, 100) : 'gdelt_batch_failed';
 }
 
-export async function runGdeltBatch(baseUrl: string, secret: string): Promise<Record<string, unknown>> {
+function responseFileStamp(value: unknown, errorCode: string): string {
+  if (typeof value !== 'string') throw new Error(errorCode);
+  try { dateFromFileStamp(value); } catch { throw new Error(errorCode); }
+  return value;
+}
+
+export async function runGdeltBatch(baseUrl: string, secret: string): Promise<GdeltBatchResult> {
   if (!baseUrl.startsWith('https://') || secret.length < 32) throw new Error('gdelt_batch_config_invalid');
   const client = new IngestClient(baseUrl, secret);
   const started = await client.start();
   const runId = String(started.run_id ?? '');
-  const start = String(started.window_start ?? '');
-  const end = String(started.window_end ?? '');
+  const checkpointBefore = started.checkpoint_before === null ? null :
+    responseFileStamp(started.checkpoint_before, 'gdelt_ingest_start_invalid');
+  const start = responseFileStamp(started.window_start, 'gdelt_ingest_start_invalid');
+  const end = responseFileStamp(started.window_end, 'gdelt_ingest_start_invalid');
   const processed = new Set(Array.isArray(started.processed_file_stamps)
     ? started.processed_file_stamps.map(String) : []);
-  if (!runId || !start || !end) throw new Error('gdelt_ingest_start_invalid');
+  if (!runId) throw new Error('gdelt_ingest_start_invalid');
   let missing = 0;
   let replayed = 0;
   let newFiles = 0;
@@ -433,11 +473,66 @@ export async function runGdeltBatch(baseUrl: string, secret: string): Promise<Re
       newFiles++;
       completedThrough = stamp;
     }
-    return await client.finish({ run_id: runId, completed_through: completedThrough,
+    const finished = await client.finish({ run_id: runId, completed_through: completedThrough,
       missing_minutes: missing, complete_pairs_replayed: replayed });
+    const checkpointAfter = responseFileStamp(finished.checkpoint_after,
+      'gdelt_ingest_finish_invalid');
+    const finishedThrough = responseFileStamp(finished.completed_through,
+      'gdelt_ingest_finish_invalid');
+    const minutesChecked = finished.minutes_checked;
+    if (finished.run_id !== runId || finished.ok !== true ||
+      !Number.isSafeInteger(minutesChecked) || Number(minutesChecked) < 1) {
+      throw new Error('gdelt_ingest_finish_invalid');
+    }
+    return { ok: true, run_id: runId, checkpoint_before: checkpointBefore,
+      checkpoint_after: checkpointAfter, window_start: start, window_end: end,
+      completed_through: finishedThrough, minutes_checked: Number(minutesChecked) };
   } catch (error) {
     await client.fail({ run_id: runId, error_code: errorCode(error) });
     throw error;
+  }
+}
+
+export async function runGdeltCatchup(runBatch: () => Promise<GdeltBatchResult>, options: {
+  now?: () => Date;
+  budget_ms?: number;
+} = {}): Promise<GdeltCatchupResult> {
+  const now = options.now ?? (() => new Date());
+  const budgetMs = options.budget_ms ?? GDELT_CATCHUP_BUDGET_MS;
+  if (!Number.isFinite(budgetMs) || budgetMs < 0) throw new Error('gdelt_catchup_config_invalid');
+  const invocationStartedAt = now().getTime();
+  if (!Number.isFinite(invocationStartedAt)) throw new Error('gdelt_catchup_config_invalid');
+  const deadline = invocationStartedAt + budgetMs;
+  let checkpointBefore: string | null = null;
+  let hasCheckpointBefore = false;
+  let batchesCompleted = 0;
+  for (;;) {
+    const batch = await runBatch();
+    batchesCompleted++;
+    if (!hasCheckpointBefore) {
+      checkpointBefore = batch.checkpoint_before;
+      hasCheckpointBefore = true;
+    }
+    const checkedAt = now();
+    const checkedAtMs = checkedAt.getTime();
+    if (!Number.isFinite(checkedAtMs)) throw new Error('gdelt_catchup_config_invalid');
+    const safeTarget = gdeltSafeTarget(checkedAt);
+    const elapsedMs = Math.max(0, checkedAtMs - invocationStartedAt);
+    if (batch.checkpoint_after >= safeTarget) {
+      return { checkpoint_before: checkpointBefore, checkpoint_after: batch.checkpoint_after,
+        safe_target: safeTarget, batches_completed: batchesCompleted, caught_up: true,
+        elapsed_ms: elapsedMs, termination_reason: 'caught_up' };
+    }
+    if (batch.checkpoint_before !== null &&
+      batch.checkpoint_after <= batch.checkpoint_before) {
+      throw new GdeltCatchupNoProgressError(batch.checkpoint_before, batch.checkpoint_after,
+        safeTarget, batchesCompleted);
+    }
+    if (checkedAtMs >= deadline) {
+      return { checkpoint_before: checkpointBefore, checkpoint_after: batch.checkpoint_after,
+        safe_target: safeTarget, batches_completed: batchesCompleted, caught_up: false,
+        elapsed_ms: elapsedMs, termination_reason: 'budget_exhausted' };
+    }
   }
 }
 
