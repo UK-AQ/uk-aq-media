@@ -147,6 +147,41 @@ export function deterministicTid(createdAt: string, publicationId: number): stri
 }
 
 export type BlueskyWakeup = { type: 'bluesky_wakeup'; publication_id?: number };
+
+// Use in single-table publication subqueries (including aliased tables).
+export const BLUESKY_IN_PROGRESS_SQL = `(status IN ('queued', 'posting') OR
+  (publication_reason = 'auto_approved' AND status = 'blocked'
+    AND last_error_code = 'thumbnail_pending'))`;
+
+export function blueskyPublicationStatusLabel(status: string, error: unknown): string {
+  if (status === 'blocked' && error === 'thumbnail_pending') return 'Waiting for thumbnail';
+  if (status === 'blocked' && error === 'operator_cancelled') return 'Cancelled';
+  const labels: Record<string, string> = {
+    queued: 'Queued', posting: 'Posting', posted: 'Posted', failed: 'Failed', blocked: 'Blocked',
+  };
+  return labels[status] ?? status;
+}
+
+export async function releaseBlueskyThumbnailPending(db: D1Database): Promise<number> {
+  // Only release intent already created by the forward-only auto-approval trigger.
+  // The view keeps outbox creation and recovery on the same image-policy boundary;
+  // the consumer still validates the actual URL and bytes before any remote write.
+  const result = await db.prepare(`UPDATE media_bluesky_publications
+    SET status = 'queued', last_error_code = NULL, next_attempt_at = NULL, updated_at = ?
+    WHERE publication_reason = 'auto_approved' AND status = 'blocked'
+      AND last_error_code = 'thumbnail_pending'
+      AND article_id IN (SELECT article_id FROM media_bluesky_thumbnail_eligible_articles)`)
+    .bind(new Date().toISOString()).run();
+  return Number(result.meta.changes ?? 0);
+}
+
+export async function reconcileBlueskyPublications(db: D1Database,
+  queue: Pick<Queue, 'send'>): Promise<void> {
+  await releaseBlueskyThumbnailPending(db);
+  const runnable = await db.prepare(
+    "SELECT id FROM media_bluesky_publications WHERE status IN ('queued', 'posting') LIMIT 1").first();
+  if (runnable) await queue.send({ type: 'bluesky_wakeup' } satisfies BlueskyWakeup);
+}
 export function isBlueskyWakeup(value: unknown): value is BlueskyWakeup {
   if (!value || typeof value !== 'object') return false;
   const body = value as Record<string, unknown>;

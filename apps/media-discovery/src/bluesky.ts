@@ -2,6 +2,7 @@ import {
   BLUESKY_HANDLE, BLUESKY_THUMBNAIL_BYTES, deterministicTid, fetchRemotePreviewImage,
   isBlueskyWakeup, readBoundedImageResponse, remotePreviewUrl, renderBlueskyPost,
   reconcileHomepageLatestSix, storeLocalImage, validateLocalImageBytes,
+  reconcileBlueskyPublications,
   type BlueskyWakeup, type Source,
 } from '@uk-aq-media/core';
 import { fetchArticleHeadMetadata, type ArticleHeadMetadata } from '@uk-aq-media/discovery';
@@ -9,7 +10,7 @@ import { fetchArticleHeadMetadata, type ArticleHeadMetadata } from '@uk-aq-media
 type Settings = { publishing_enabled: number; activation_event_id: number | null;
   cooldown_seconds: number; default_message_template: string; last_successful_post_at: string | null };
 type Publication = { id: number; article_id: number; publication_key: string; status: string;
-  attempt_count: number; record_key: string | null; created_at: string };
+  publication_reason: string; attempt_count: number; record_key: string | null; created_at: string };
 type Article = { canonical_url: string; title: string;
   publisher: string; og_image_url: string | null; image_policy: string; source_key: string;
   canonical_domain: string; source_image_policy: Source['image_policy']; social_handle: string | null;
@@ -298,6 +299,13 @@ async function createOrReadPost(auth: { accessJwt: string; did: string }, rkey: 
 }
 
 async function fail(db: D1Database, publication: Publication, error: PublicationError): Promise<void> {
+  if (publication.publication_reason === 'auto_approved' && error.code === 'thumbnail_missing') {
+    await db.prepare(`UPDATE media_bluesky_publications
+      SET status = 'blocked', last_error_code = 'thumbnail_pending', next_attempt_at = NULL,
+        updated_at = ? WHERE id = ? AND status = 'posting'`)
+      .bind(new Date().toISOString(), publication.id).run();
+    return;
+  }
   const retry = error.transient && publication.attempt_count + 1 < MAX_ATTEMPTS;
   const delaySeconds = Math.min(900, 30 * 2 ** publication.attempt_count);
   const nextAttemptAt = retry ? new Date(Date.now() + delaySeconds * 1000).toISOString() : null;
@@ -308,9 +316,7 @@ async function fail(db: D1Database, publication: Publication, error: Publication
 }
 
 export async function reconcileBlueskyQueue(env: MediaDiscoveryEnv): Promise<void> {
-  const queued = await env.MEDIA_DB.prepare(
-    "SELECT id FROM media_bluesky_publications WHERE status IN ('queued', 'posting') LIMIT 1").first();
-  if (queued) await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' } satisfies BlueskyWakeup);
+  await reconcileBlueskyPublications(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE);
 }
 
 export async function scheduleNextBacklogWake(env: MediaDiscoveryEnv,
@@ -373,7 +379,7 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
     message.ack(); return;
   }
   const publication = await env.MEDIA_DB.prepare(`SELECT id, article_id, publication_key, status,
-    attempt_count, record_key, created_at FROM media_bluesky_publications
+    publication_reason, attempt_count, record_key, created_at FROM media_bluesky_publications
     WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
     ORDER BY id LIMIT 1`).bind(new Date(now).toISOString()).first<Publication>();
   if (!publication) {
@@ -415,6 +421,13 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
       publisherMention: article.social_handle && article.social_did
         ? { handle: article.social_handle, did: article.social_did } : null });
     const recordCreatedAt = new Date().toISOString();
+    // Image loading may take several remote requests. Recheck permission and
+    // identity immediately before the post; never use bytes whose policy was revoked.
+    const stillEligible = await env.MEDIA_DB.prepare(`SELECT a.id FROM media_articles a
+      JOIN media_bluesky_thumbnail_eligible_articles ready ON ready.article_id = a.id
+      WHERE a.id = ? AND a.og_image_url = ? AND a.image_policy = ?`)
+      .bind(article.id, article.og_image_url, article.image_policy).first();
+    if (!stillEligible) throw new PublicationError('thumbnail_missing');
     const result = await createOrReadPost(auth, recordKey, {
       $type: 'app.bsky.feed.post', text: rendered.text, facets: rendered.facets,
       langs: ['en-GB'], createdAt: recordCreatedAt,
@@ -449,8 +462,9 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
       : new PublicationError(caught instanceof Error && /^(post_text_too_long|message_template_)/.test(caught.message)
         ? 'post_text_too_long' : 'bluesky_api_transient', true);
     await fail(env.MEDIA_DB, publication, error);
-    console.error(JSON.stringify({ event: 'bluesky_publication_failed', publication_id: publication.id,
-      error_code: error.code }));
+    const waiting = publication.publication_reason === 'auto_approved' && error.code === 'thumbnail_missing';
+    console.error(JSON.stringify({ event: waiting ? 'bluesky_thumbnail_pending' : 'bluesky_publication_failed',
+      publication_id: publication.id, error_code: waiting ? 'thumbnail_pending' : error.code }));
   }
   try {
     await scheduleNextBacklogWake(env, wakeSettings);

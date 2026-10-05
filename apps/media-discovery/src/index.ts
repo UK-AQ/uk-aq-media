@@ -188,7 +188,13 @@ export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/gdelt/web-ngrams/')) {
-      return handleGdeltIngest(request, env, url.pathname);
+      const response = await handleGdeltIngest(request, env, url.pathname);
+      if (response.ok && url.pathname === '/gdelt/web-ngrams/files/chunk') {
+        // Promotions may fill image metadata as well as creating approvals.
+        try { await reconcileBlueskyQueue(env); }
+        catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+      }
+      return response;
     }
     if (url.pathname !== '/scheduler/run') return json({ error: 'not_found' }, 404);
     if (request.method !== 'POST') {
@@ -202,15 +208,17 @@ export default {
     }
     try {
       const queued = await enqueueScheduledDiscovery(env);
-      await reconcileSocialQueues(env);
       return json({ ok: true, queued }, 202);
     } catch {
       return json({ error: 'discovery_schedule_failed' }, 503);
+    } finally {
+      // Social recovery must not depend on publisher discovery enqueue succeeding.
+      await reconcileSocialQueues(env);
     }
   },
   async scheduled(_controller, env): Promise<void> {
-    await enqueueScheduledDiscovery(env);
-    await reconcileSocialQueues(env);
+    try { await enqueueScheduledDiscovery(env); }
+    finally { await reconcileSocialQueues(env); }
   },
   async queue(batch, env): Promise<void> {
     if (batch.queue === 'uk-aq-media-bluesky') {
@@ -219,6 +227,10 @@ export default {
     }
     if (batch.queue === 'uk-aq-media-facebook') {
       for (const message of batch.messages) await consumeFacebook(message, env);
+      // A permitted local-copy acquisition in this path can also make an
+      // existing automatic Bluesky intent ready; isolate the follow-up failure.
+      try { await reconcileBlueskyQueue(env); }
+      catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
       return;
     }
     if (batch.queue !== 'uk-aq-media-discovery') {

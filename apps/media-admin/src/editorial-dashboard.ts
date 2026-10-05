@@ -1,6 +1,7 @@
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, ImagePolicy,
   PublicationPolicy,
+  BLUESKY_IN_PROGRESS_SQL, blueskyPublicationStatusLabel,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
   hasPermittedPresentationImage, loadSource, MAX_LOCAL_IMAGE_BYTES,
   normaliseArticleAuthorForStorage, publisherHttpsUrl,
@@ -492,7 +493,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
     db.prepare(`SELECT count(*) AS publication_count,
       count(*) FILTER (WHERE status = 'posted') AS post_count,
-      count(*) FILTER (WHERE status IN ('queued', 'posting')) AS in_progress_count
+      count(*) FILTER (WHERE ${BLUESKY_IN_PROGRESS_SQL}) AS in_progress_count
       FROM media_bluesky_publications WHERE article_id = ?`)
       .bind(id).first<{ publication_count: number; post_count: number; in_progress_count: number }>(),
     db.prepare(`SELECT id, publication_reason, status, attempt_count, facebook_post_id,
@@ -514,6 +515,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       .first<{ created_at: string; metadata_json: string }>(),
   ]);
   const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
+    status_label: blueskyPublicationStatusLabel(String(row.status), row.last_error_code),
     post_url: typeof row.post_uri === 'string' && row.post_uri.startsWith('at://')
       ? `https://bsky.app/profile/ukaq.co.uk/post/${row.post_uri.split('/').at(-1)}` : null }));
   const retainedLocalImage = article.image_policy === 'local_copy_permitted' &&
@@ -571,9 +573,13 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
       publication_count: blueskyCount?.publication_count ?? 0,
       latest_status: blueskyPublications[0]?.status ?? null,
       ...blueskyDirect,
-      manual_post_available: manualPostReason !== null && thumbnailEligible,
+      latest_status_label: blueskyPublications[0]?.status_label ?? null,
+      manual_post_available: manualPostReason !== null && thumbnailEligible &&
+        (blueskyCount?.in_progress_count ?? 0) === 0,
       manual_post_reason: manualPostReason,
-      manual_post_unavailable_reason: manualPostReason && !thumbnailEligible ? 'thumbnail_missing' : null,
+      manual_post_unavailable_reason: manualPostReason
+        ? (blueskyCount?.in_progress_count ?? 0) > 0 ? 'publication_in_progress'
+          : !thumbnailEligible ? 'thumbnail_missing' : null : null,
       thumbnail_eligible: thumbnailEligible, publications: blueskyPublications },
     facebook: { post_count: facebookCount?.post_count ?? 0,
       publication_count: facebookCount?.publication_count ?? 0,
@@ -776,6 +782,8 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
         AS bluesky_publication_count,
       (SELECT status FROM media_bluesky_publications bp WHERE bp.article_id = a.id
         ORDER BY bp.id DESC LIMIT 1) AS bluesky_latest_status,
+      (SELECT last_error_code FROM media_bluesky_publications bp WHERE bp.article_id = a.id
+        ORDER BY bp.id DESC LIMIT 1) AS bluesky_latest_error_code,
       (SELECT count(*) FROM media_facebook_publications fp
         WHERE fp.article_id = a.id AND fp.status = 'posted') AS facebook_post_count,
       (SELECT count(*) FROM media_facebook_publications fp WHERE fp.article_id = a.id)
@@ -792,7 +800,10 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
   const rows: Array<Record<string, unknown>> = results.slice(0, limit).map(row => {
     const { local_image_source_url: localSourceUrl,
       local_image_content_sha256: localContentSha256, ...publicRow } = row;
-    return { ...publicRow, admin_preview_image_path: hasPermittedPresentationImage({
+    return { ...publicRow,
+      bluesky_latest_status_label: row.bluesky_latest_status === null ? null
+        : blueskyPublicationStatusLabel(String(row.bluesky_latest_status), row.bluesky_latest_error_code),
+      admin_preview_image_path: hasPermittedPresentationImage({
       source_key: String(row.source_key),
       og_image_url: typeof row.og_image_url === 'string' ? row.og_image_url : null,
       article_image_policy: String(row.image_policy),

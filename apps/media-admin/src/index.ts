@@ -1,6 +1,7 @@
 import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, reconcileHomepageLatestSix, z,
   BLUESKY_PLACEHOLDERS, BLUESKY_POST_BYTES, BLUESKY_POST_GRAPHEMES,
   BLUESKY_TEMPLATE_LITERAL_GRAPHEMES, validateBlueskyTemplate,
+  BLUESKY_IN_PROGRESS_SQL, reconcileBlueskyPublications,
   FACEBOOK_PLACEHOLDERS, FACEBOOK_TEMPLATE_MAX_LENGTH,
   validateFacebookTemplate,
   loadSource, type Status } from '@uk-aq-media/core';
@@ -89,6 +90,14 @@ const DirectPublishBody = StatusMutationBody.refine(value =>
 const BulkDirectPublishBody = BulkApproveBody.refine(value =>
   value.post_to_bluesky === true || value.post_to_facebook === true);
 const MAX_ADMIN_BODY_BYTES = 4096;
+
+async function afterImageMutation(response: Response, env: MediaAdminEnv): Promise<Response> {
+  if (response.ok) {
+    try { await reconcileBlueskyPublications(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+  }
+  return response;
+}
 const MAX_HUMAN_DISPLAY_TITLE_CHARACTERS = 500;
 const NEURON_MICRO_UNITS = 1_000_000;
 
@@ -789,7 +798,7 @@ async function statusMutationResponse(env: MediaAdminEnv, id: number, receipt: N
 type BulkRequestRow = { article_ids_json: string; post_to_bluesky: number; post_to_facebook: number };
 type BulkTargetRow = { id: number; status: Status; og_image_url: string | null;
   image_policy: string; source_image_policy: string; title: string; publisher: string;
-  canonical_url: string };
+  canonical_url: string; bluesky_has_in_progress: number };
 type DirectTargetRow = BulkTargetRow & {
   bluesky_has_in_progress: number; bluesky_post_count: number;
   facebook_has_in_progress: number; facebook_has_unknown_remote_state: number;
@@ -828,7 +837,9 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
   if (!existing) {
     const placeholders = ids.map(() => '?').join(', ');
     const { results } = await env.MEDIA_DB.prepare(`SELECT a.id, a.status, a.og_image_url,
-      a.image_policy, s.image_policy AS source_image_policy, a.title, a.publisher, a.canonical_url
+      a.image_policy, s.image_policy AS source_image_policy, a.title, a.publisher, a.canonical_url,
+      EXISTS (SELECT 1 FROM media_bluesky_publications p WHERE p.article_id = a.id
+        AND ${BLUESKY_IN_PROGRESS_SQL}) AS bluesky_has_in_progress
       FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
       WHERE a.id IN (${placeholders}) ORDER BY a.id`).bind(...ids).all<BulkTargetRow>();
     const byId = new Map(results.map(row => [row.id, row]));
@@ -837,6 +848,9 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
       if (!row) return [{ article_id: id, error: 'article_not_found' }];
       if (!['pending', 'rejected', 'hidden'].includes(row.status)) {
         return [{ article_id: id, error: 'invalid_state_transition' }];
+      }
+      if (requestedBluesky && row.bluesky_has_in_progress) {
+        return [{ article_id: id, error: 'publication_in_progress' }];
       }
       if (requestedBluesky && !blueskyImageEligible(row)) {
         return [{ article_id: id, error: 'thumbnail_missing' }];
@@ -1006,7 +1020,7 @@ async function directPublish(request: Request, env: MediaAdminEnv,
   const { results } = await db.prepare(`SELECT a.id, a.status, a.og_image_url,
     a.image_policy, s.image_policy AS source_image_policy, a.title, a.publisher, a.canonical_url,
     EXISTS (SELECT 1 FROM media_bluesky_publications p WHERE p.article_id = a.id
-      AND p.status IN ('queued', 'posting')) AS bluesky_has_in_progress,
+      AND ${BLUESKY_IN_PROGRESS_SQL}) AS bluesky_has_in_progress,
     (SELECT count(*) FROM media_bluesky_publications p WHERE p.article_id = a.id
       AND p.status = 'posted') AS bluesky_post_count,
     EXISTS (SELECT 1 FROM media_facebook_publications p WHERE p.article_id = a.id
@@ -1067,7 +1081,7 @@ async function directPublish(request: Request, env: MediaAdminEnv,
           AND s.image_policy = 'local_copy_permitted'))))`);
     guardBindings.push(...ids);
     guard.push(`NOT EXISTS (SELECT 1 FROM media_bluesky_publications p
-      WHERE p.article_id IN (${placeholders}) AND p.status IN ('queued', 'posting'))`);
+      WHERE p.article_id IN (${placeholders}) AND ${BLUESKY_IN_PROGRESS_SQL})`);
     guardBindings.push(...ids);
   }
   if (facebook) {
@@ -1142,10 +1156,12 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
   if (replay) return statusMutationResponse(env, id, replay, true);
   const before = await db.prepare(`SELECT status, og_image_url, image_policy,
     title, publisher, canonical_url,
+    EXISTS (SELECT 1 FROM media_bluesky_publications p WHERE p.article_id = a.id
+      AND ${BLUESKY_IN_PROGRESS_SQL}) AS bluesky_has_in_progress,
     (SELECT image_policy FROM media_sources WHERE source_key = a.source_key) AS source_image_policy
     FROM media_articles a WHERE id = ?`).bind(id).first<{
       status: Status; og_image_url: string | null; image_policy: string; source_image_policy: string;
-      title: string; publisher: string; canonical_url: string }>();
+      title: string; publisher: string; canonical_url: string; bluesky_has_in_progress: number }>();
   if (!before) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
       requestedBluesky, requestedFacebook);
@@ -1159,6 +1175,12 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
     if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
     throw new HttpError(400, requestedBluesky
       ? 'post_to_bluesky_not_available' : 'post_to_facebook_not_available');
+  }
+  if (requestedBluesky && before.bluesky_has_in_progress) {
+    const racedReplay = await statusMutationReceipt(db, key, id, action,
+      requestedBluesky, requestedFacebook);
+    if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
+    throw new HttpError(409, 'publication_in_progress');
   }
   if (requestedBluesky && !blueskyImageEligible(before)) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
@@ -1242,7 +1264,10 @@ export default {
         return await facebookConnectionCheck(request, env);
       }
       const editorialResponse = await handleEditorialDashboard(request, env, url);
-      if (editorialResponse) return editorialResponse;
+      if (editorialResponse) {
+        return ['PUT', 'DELETE'].includes(request.method)
+          ? afterImageMutation(editorialResponse, env) : editorialResponse;
+      }
       if (url.pathname === '/admin/articles/bulk/approve') {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
         return await bulkApprove(request, env);
@@ -1263,7 +1288,7 @@ export default {
         if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
         return bulkImageRefresh[1] === 'preview'
           ? await previewBulkGuardianImageRefresh(env.MEDIA_DB)
-          : await applyBulkGuardianImageRefresh(request, env.MEDIA_DB);
+          : await afterImageMutation(await applyBulkGuardianImageRefresh(request, env.MEDIA_DB), env);
       }
       const imageRefresh = /^\/admin\/articles\/([1-9]\d*)\/guardian-image-refresh\/(preview|apply)$/.exec(url.pathname);
       if (imageRefresh) {
@@ -1272,7 +1297,7 @@ export default {
         if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
         return imageRefresh[2] === 'preview'
           ? await previewGuardianImageRefresh(request, env.MEDIA_DB, id)
-          : await applyGuardianImageRefresh(request, env.MEDIA_DB, id);
+          : await afterImageMutation(await applyGuardianImageRefresh(request, env.MEDIA_DB, id), env);
       }
       const titleDecision = /^\/admin\/articles\/([1-9]\d*)\/display-title\/(accept-ai|reject-ai)$/.exec(url.pathname);
       if (titleDecision) {
@@ -1335,6 +1360,13 @@ export default {
         'SELECT * FROM media_discovery_runs ORDER BY started_at DESC, id DESC LIMIT ?',
       ).bind(limit).all();
       return json({ runs: results });
-    } catch (error) { return httpFailure(error); }
+    } catch (error) {
+      // The D1 insert guard also covers an automatic intent appearing after
+      // preflight. Its batch abort preserves all-or-nothing editorial mutations.
+      if (error instanceof Error && error.message.includes('bluesky_publication_in_progress')) {
+        return httpFailure(new HttpError(409, 'publication_in_progress'));
+      }
+      return httpFailure(error);
+    }
   },
 } satisfies ExportedHandler<MediaAdminEnv>;
