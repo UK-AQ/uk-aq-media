@@ -849,11 +849,11 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
       if (!['pending', 'rejected', 'hidden'].includes(row.status)) {
         return [{ article_id: id, error: 'invalid_state_transition' }];
       }
-      if (requestedBluesky && !blueskyImageEligible(row)) {
-        return [{ article_id: id, error: 'thumbnail_missing' }];
-      }
       if (requestedBluesky && row.bluesky_has_in_progress) {
         return [{ article_id: id, error: 'publication_in_progress' }];
+      }
+      if (requestedBluesky && !blueskyImageEligible(row)) {
+        return [{ article_id: id, error: 'thumbnail_missing' }];
       }
       return [];
     });
@@ -1176,6 +1176,12 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
     throw new HttpError(400, requestedBluesky
       ? 'post_to_bluesky_not_available' : 'post_to_facebook_not_available');
   }
+  if (requestedBluesky && before.bluesky_has_in_progress) {
+    const racedReplay = await statusMutationReceipt(db, key, id, action,
+      requestedBluesky, requestedFacebook);
+    if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
+    throw new HttpError(409, 'publication_in_progress');
+  }
   if (requestedBluesky && !blueskyImageEligible(before)) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
       requestedBluesky, requestedFacebook);
@@ -1183,12 +1189,6 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
     throw new HttpError(409, 'thumbnail_missing');
   }
   if (requestedFacebook) await requireFacebookEligibility(db, [before]);
-  if (requestedBluesky && before.bluesky_has_in_progress) {
-    const racedReplay = await statusMutationReceipt(db, key, id, action,
-      requestedBluesky, requestedFacebook);
-    if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
-    throw new HttpError(409, 'publication_in_progress');
-  }
   const now = new Date().toISOString();
   const placeholders = transition.from.map(() => '?').join(', ');
   // D1 batch is transactional. The durable full request identity owns the key;

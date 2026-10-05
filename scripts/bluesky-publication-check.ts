@@ -959,6 +959,7 @@ async function checkManualApprovalContract(): Promise<void> {
   insertStatusFixture(sqlite, 212, 'pending', false);
   result = await invokeStatus(env, bulkRequest([211, 212], 'bulk_thumbnail_failure', true));
   assert.equal(result.status, 409);
+  assert.deepEqual(result.body.failures, [{ article_id: 212, error: 'thumbnail_missing' }]);
   assert.deepEqual(sqlite.prepare(`SELECT status FROM media_articles WHERE id IN (211, 212)
     ORDER BY id`).all().map(row => row.status), ['pending', 'pending'],
   'bulk social validation must fail before any approval');
@@ -1022,6 +1023,47 @@ async function checkThumbnailWaitingCorrection(): Promise<void> {
   assert.equal(social.latest_status_label, 'Waiting for thumbnail');
   assert.equal(social.direct_publish_unavailable_reason, 'publication_in_progress');
 
+  // Waiting intent takes precedence while the thumbnail is still absent, for
+  // both direct publication endpoints and the manual approval endpoints.
+  const noImageDirect = await invokeStatus(env,
+    directRequest([603], 'waiting-direct-single-603', true, false));
+  assert.equal(noImageDirect.status, 409);
+  assert.equal(noImageDirect.body.error, 'publication_in_progress');
+  const noImageBulkDirect = await invokeStatus(env,
+    directRequest([603], 'waiting-direct-bulk-603', true, false, true));
+  assert.equal(noImageBulkDirect.status, 409);
+  assert.deepEqual(noImageBulkDirect.body.failures,
+    [{ article_id: 603, platform: 'bluesky', error: 'publication_in_progress' }]);
+
+  const manualCases = [
+    { id: 607, status: 'pending', action: 'approve', publicationStatus: 'blocked' },
+    { id: 608, status: 'rejected', action: 'approve', publicationStatus: 'queued' },
+    { id: 609, status: 'hidden', action: 'unhide', publicationStatus: 'posting' },
+  ] as const;
+  for (const item of manualCases) {
+    insertStatusFixture(sqlite, item.id, 'approved', false, 'trusted_source_auto');
+    sqlite.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
+      revision = revision + 1 WHERE id = ?`).run(item.status, `fixture-state-${item.id}`, item.id);
+    sqlite.prepare(`UPDATE media_bluesky_publications SET status = ?, last_error_code = ?
+      WHERE article_id = ?`).run(item.publicationStatus,
+      item.publicationStatus === 'blocked' ? 'thumbnail_pending' : null, item.id);
+    const request = new Request(`https://media.example/admin/articles/${item.id}/${item.action}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${FIXTURE_ADMIN_TOKEN}`,
+        'Content-Type': 'application/json', 'Idempotency-Key': `waiting-manual-${item.id}` },
+      body: JSON.stringify({ post_to_bluesky: true }),
+    });
+    const result = await invokeStatus(env, request);
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error, 'publication_in_progress');
+    assert.equal(sqlite.prepare('SELECT status FROM media_articles WHERE id = ?')
+      .get(item.id)!.status, item.status);
+  }
+  const noImageBulkApproval = await invokeStatus(env,
+    bulkRequest(manualCases.map(item => item.id), 'waiting-bulk-approval', true));
+  assert.equal(noImageBulkApproval.status, 409);
+  assert.deepEqual(noImageBulkApproval.body.failures, manualCases.map(item =>
+    ({ article_id: item.id, error: 'publication_in_progress' })));
+
   // Later metadata does not manufacture a row for the historical missing decision.
   sqlite.exec(`UPDATE media_articles SET og_image_url = 'https://fixture.example/later.jpg'
     WHERE id IN (601, 603)`);
@@ -1080,6 +1122,23 @@ async function checkThumbnailWaitingCorrection(): Promise<void> {
   sqlite.exec('UPDATE media_bluesky_settings SET activation_event_id = NULL');
   insertStatusFixture(sqlite, 606, 'approved', false, 'trusted_source_auto');
   assert.equal(scalar(sqlite, 'SELECT count(*) AS value FROM media_bluesky_publications WHERE article_id = 606'), 0);
+
+  // An actual posted automatic intent permits a deliberate repost, and the
+  // no-social approval path still ignores in-progress social intent.
+  sqlite.exec(`UPDATE media_sources SET image_policy = 'remote_preview'
+    WHERE source_key = 'bluesky-race-fixture';
+    UPDATE media_bluesky_publications SET status = 'posted', last_error_code = NULL,
+      post_uri = 'at://did:plc:fixture/app.bsky.feed.post/603', post_cid = 'cid-603',
+      posted_at = '2026-10-05T12:00:00.000Z' WHERE article_id = 603`);
+  const repost = await invokeStatus(env,
+    directRequest([603], 'posted-auto-repost-603', true, false));
+  assert.equal(repost.status, 200);
+  assert.equal((repost.body.bluesky_publication as { publication_reason: string })
+    .publication_reason, 'manual_repost');
+  assert.equal((await invokeStatus(env,
+    bulkRequest([607, 608, 609], 'waiting-approval-no-social', false))).status, 200);
+  assert.equal(scalar(sqlite, `SELECT count(*) AS value FROM media_bluesky_publications
+    WHERE article_id IN (607, 608, 609)`), 3);
   assert.deepEqual(sqlite.prepare('PRAGMA foreign_key_check').all(), []);
   sqlite.close();
 }
