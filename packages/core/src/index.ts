@@ -11,3 +11,5 @@ export * from './http';
 export * from './article-author';
 export * from './search-terms';
 export { z } from 'zod';
+
+export { wakeNewsEmailOutbox } from './news-email';

@@ -29,6 +29,7 @@
   ],
   "queues": {
     "producers": [
+      { "binding": "MEDIA_EMAIL_QUEUE", "queue": "uk-aq-media-email" },
       {
         "binding": "MEDIA_DISCOVERY_QUEUE",
         "queue": "uk-aq-media-discovery"

@@ -1,0 +1,5 @@
+# Add this ingress BEFORE the existing Cloudflare Tunnel catch-all, after separate
+# operator DNS/route approval. Keep the service on loopback; never expose SMTP.
+- hostname: REPLACE_PRO_TUNNEL_HOST
+  path: /(send|receipt)$
+  service: http://127.0.0.1:8025

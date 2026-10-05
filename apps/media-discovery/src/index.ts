@@ -5,7 +5,7 @@ import {
   scheduledGuardianRouteKeys,
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
-import { json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
+import { wakeNewsEmailOutbox, json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
 import {
   completeGdeltFile, failGdeltRun, finishGdeltRun, ingestGdeltChunk,
   startGdeltFile, startGdeltRun,
@@ -185,11 +185,12 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/gdelt/web-ngrams/')) {
       const response = await handleGdeltIngest(request, env, url.pathname);
       if (response.ok && url.pathname === '/gdelt/web-ngrams/files/chunk') {
+        if (ctx) ctx.waitUntil(wakeNewsEmailOutbox(env));
         // Promotions may fill image metadata as well as creating approvals.
         try { await reconcileBlueskyQueue(env); }
         catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
@@ -220,7 +221,7 @@ export default {
     try { await enqueueScheduledDiscovery(env); }
     finally { await reconcileSocialQueues(env); }
   },
-  async queue(batch, env): Promise<void> {
+  async queue(batch, env, ctx?: ExecutionContext): Promise<void> {
     if (batch.queue === 'uk-aq-media-bluesky') {
       for (const message of batch.messages) await consumeBluesky(message, env);
       return;
@@ -250,6 +251,7 @@ export default {
       try {
         await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
           message.id, message.attempts, configuredDisplayTitleAi(env));
+        if (ctx) ctx.waitUntil(wakeNewsEmailOutbox(env));
         await reconcileSocialQueues(env);
         message.ack();
       } catch {

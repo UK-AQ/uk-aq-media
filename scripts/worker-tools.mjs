@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 const mode = process.argv[2];
 if (!['types', 'build'].includes(mode)) throw new Error('Expected types or build');
-for (const name of ['public', 'admin', 'discovery']) {
+for (const name of ['public', 'admin', 'discovery', 'email']) {
   const config = `apps/media-${name}/wrangler.jsonc`;
   const args = mode === 'types'
     ? ['types', `apps/media-${name}/worker-configuration.d.ts`, '--env-interface',
