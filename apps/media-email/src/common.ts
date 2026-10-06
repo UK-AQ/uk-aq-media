@@ -8,8 +8,12 @@ export interface Env {
   NEWS_EMAIL_CONFIRM_COOLDOWN_HOURS: string; NEWS_EMAIL_CONFIRM_MAX_SENDS: string;
   NEWS_EMAIL_CONFIRM_BACKOFF_DAYS: string; NEWS_EMAIL_IP_BURST_LIMIT: string;
   NEWS_EMAIL_IP_HOURLY_LIMIT: string; UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET: string;
-  NEWS_EMAIL_OPERATOR_SECRET: string; NEWS_EMAIL_SENDER_URL: string;
-  NEWS_EMAIL_SENDER_SECRET: string; SUPABASE_URL: string; SB_SECRET_KEY: string;
+  NEWS_EMAIL_OPERATOR_SECRET: string; NEWS_EMAIL_PUBLIC_API_ORIGIN: string;
+  GOOGLE_SMTP_USERNAME: string; GOOGLE_OAUTH_CLIENT_ID: string;
+  GOOGLE_OAUTH_CLIENT_SECRET: string; GOOGLE_OAUTH_REFRESH_TOKEN: string;
+  // Optional Pro fallback only; never needed by the default direct transport.
+  NEWS_EMAIL_SENDER_URL?: string; NEWS_EMAIL_SENDER_SECRET?: string;
+  SUPABASE_URL: string; SB_SECRET_KEY: string;
 }
 export interface Subscription {
   id: string; email: string; status: string; delivery_mode: string; daily_time_local: string;
@@ -19,8 +23,12 @@ export interface Work {
   event_id?: number; subscription_id?: string; generation?: string; after?: string;
   cutoff?: string; start?: string; mode_since_at?: string; at?: string;
 }
-export interface Job { id:string; work_type:string; payload:string; state:string }
-export interface Delivery { id:string; state:string; message_id:string; created_at:string; sent_at:string|null }
+export interface Job { id:string; work_type:string; payload:string; state:string; attempt_count:number }
+export type Transport = 'cloudflare_xoauth2' | 'pro_app_password';
+export interface Delivery {
+  id:string; state:string; message_id:string; created_at:string; sent_at:string|null;
+  selected_transport:Transport; attempt_transport:Transport|null; attempt_count:number; retry_hold:number;
+}
 export const now = ():string => new Date().toISOString();
 export const iso = (value:string):string => new Date(value).toISOString();
 export const encoder = new TextEncoder();
@@ -44,7 +52,7 @@ export async function rpc<T>(env:Env, action:string, data:Record<string,unknown>
   if (!response.ok) throw new Error('subscription_service_unavailable');
   return await response.json() as T;
 }
-export async function boundedBody(request:Request, limit=8192):Promise<string> {
+export async function boundedBody(request:Request|Response, limit=8192):Promise<string> {
   if (Number(request.headers.get('content-length'))>limit) throw new HttpError(413,'request_too_large');
   if (!request.body) return '';
   const reader=request.body.getReader(); let size=0; const chunks:Uint8Array[]=[];
@@ -64,17 +72,19 @@ export async function addJob(env:Env,id:string,type:string,work:Work,event:numbe
     .bind(id,event,type,JSON.stringify(work),now()).run();
 }
 export async function queueJob(env:Env,id:string):Promise<void> {
-  const pending=await env.MEDIA_DB.prepare('SELECT state FROM media_news_email_outbox WHERE id=?')
-    .bind(id).first<{state:string}>();
-  if(!pending || pending.state==='completed') return;
+  const pending=await env.MEDIA_DB.prepare(`SELECT o.state,coalesce(d.retry_hold,0) AS retry_hold
+    FROM media_news_email_outbox o LEFT JOIN media_news_email_deliveries d ON d.id=o.id WHERE o.id=?`)
+    .bind(id).first<{state:string;retry_hold:number}>();
+  if(!pending || pending.state==='completed' || pending.retry_hold) return;
   // Sending first leaves a recoverable row if either the Queue or acknowledgement fails.
   await env.MEDIA_EMAIL_QUEUE.send({id});
   await env.MEDIA_DB.prepare(`UPDATE media_news_email_outbox SET state='queued',queued_at=?,
     attempt_count=attempt_count+1 WHERE id=? AND state!='completed'`).bind(now(),id).run();
 }
-export async function complete(env:Env,id:string):Promise<void> {
-  await env.MEDIA_DB.prepare(`UPDATE media_news_email_outbox SET state='completed',last_error=NULL WHERE id=?`)
-    .bind(id).run();
+export async function complete(env:Env,job:Job):Promise<void> {
+  // A concurrent operator release/reconciliation must not be consumed by an older job.
+  await env.MEDIA_DB.prepare(`UPDATE media_news_email_outbox SET state='completed',last_error=NULL
+    WHERE id=? AND attempt_count=?`).bind(job.id,job.attempt_count).run();
 }
 export async function newDelivery(env:Env,id:string,sub:string,mode:string,event:number|null=null,
   digest:string|null=null):Promise<Delivery> {

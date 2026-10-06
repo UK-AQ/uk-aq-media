@@ -1,6 +1,7 @@
 import { hash, iso, newDelivery, now, rpc, token, type Delivery, type Env, type Subscription, type Work } from './common';
+import { submission, type Message } from './message';
+import { submit } from './transport';
 interface Article { title:string; publisher:string; canonical_url:string; published_at:string|null }
-interface Message { kind:string; text:string; manage_url?:string; unsubscribe_url?:string }
 const terminal=new Set(['accepted','unknown','permanent_failure','cancelled']);
 export async function cancel(env:Env,id:string):Promise<void> {
   await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='cancelled'
@@ -8,27 +9,25 @@ export async function cancel(env:Env,id:string):Promise<void> {
 }
 async function send(env:Env,delivery:Delivery,sub:Subscription,message:Message):Promise<string> {
   if(terminal.has(delivery.state)) return delivery.state;
-  if(delivery.state==='sending') return 'unknown'; // Recovery never blindly repeats an in-flight SMTP write.
+  if(delivery.retry_hold || delivery.state==='sending') throw new Error('delivery_claim_unavailable');
   const claim=await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='sending',
-    claimed_at=?,attempt_count=attempt_count+1 WHERE id=? AND state IN ('pending','temporary_failure')`)
-    .bind(now(),delivery.id).run();
-  if(!claim.meta.changes) return 'unknown';
-  let outcome='unknown';
-  try {
-    const url=new URL(env.NEWS_EMAIL_SENDER_URL);
-    if(url.protocol!=='https:') throw new Error('sender_https_required');
-    const response=await fetch(url,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(45000),
-      headers:{Authorization:`Bearer ${env.NEWS_EMAIL_SENDER_SECRET}`,'Content-Type':'application/json'},
-      body:JSON.stringify({...message,to:sub.email,message_id:delivery.message_id,date:delivery.created_at})});
-    if(response.ok) {
-      const result=await response.json() as {outcome?:string};
-      if(['accepted','temporary_failure','permanent_failure','unknown'].includes(result.outcome??'')) outcome=result.outcome!;
-    }
-  } catch { /* Request may have reached SMTP; a transport timeout is not proof of failure. */ }
+    claimed_at=?,attempt_count=attempt_count+1,attempt_transport=selected_transport,submission_started=0
+    WHERE id=? AND state IN ('pending','temporary_failure') AND retry_hold=0
+    AND selected_transport=? AND attempt_count=?`)
+    .bind(now(),delivery.id,delivery.selected_transport,delivery.attempt_count).run();
+  if(!claim.meta.changes) throw new Error('delivery_claim_changed');
+  const attempt=delivery.attempt_count+1;
+  const {outcome,error}=await submit(env,delivery.selected_transport,submission(delivery,sub.email,message),async()=>{
+    const marked=await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET submission_started=1
+      WHERE id=? AND state='sending' AND attempt_count=? AND attempt_transport=? AND retry_hold=0`)
+      .bind(delivery.id,attempt,delivery.selected_transport).run();
+    if(!marked.meta.changes) throw new Error('submission_claim_unavailable');
+  });
   await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state=?,
     sent_at=CASE WHEN ?='accepted' THEN ? ELSE sent_at END,
-    failed_at=CASE WHEN ?!='accepted' THEN ? ELSE NULL END,last_error=? WHERE id=? AND state='sending'`)
-    .bind(outcome,outcome,now(),outcome,now(),outcome==='accepted'?null:outcome,delivery.id).run();
+    failed_at=CASE WHEN ?!='accepted' THEN ? ELSE NULL END,last_error=?
+    WHERE id=? AND state='sending' AND attempt_count=? AND attempt_transport=?`)
+    .bind(outcome,outcome,now(),outcome,now(),error,delivery.id,attempt,delivery.selected_transport).run();
   if(outcome==='temporary_failure') throw new Error('temporary_failure');
   return outcome;
 }

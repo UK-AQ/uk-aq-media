@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-# Existing ignored Pro-local .env; never copy these values into Cloudflare/GitHub.
+# Optional fallback only. App Password stays in this ignored Pro-local .env.
+# GOOGLE_SMTP_USERNAME may also be provisioned separately as a Worker secret.
 set -a
 source .env
 set +a

@@ -1,3 +1,4 @@
+# Optional Pro fallback only; not a primary Worker deployment prerequisite.
 # Add this ingress BEFORE the existing Cloudflare Tunnel catch-all, after separate
 # operator DNS/route approval. Keep the service on loopback; never expose SMTP.
 - hostname: REPLACE_PRO_TUNNEL_HOST

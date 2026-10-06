@@ -54,6 +54,16 @@ CREATE TABLE media_news_email_deliveries (
   state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN
     ('pending','sending','accepted','temporary_failure','permanent_failure','unknown','cancelled')),
   message_id TEXT NOT NULL UNIQUE,
+  -- Selection changes only on an explicit safe operator retry; last attempt is retained.
+  selected_transport TEXT NOT NULL DEFAULT 'cloudflare_xoauth2'
+    CHECK (selected_transport IN ('cloudflare_xoauth2','pro_app_password')),
+  attempt_transport TEXT CHECK (attempt_transport IN ('cloudflare_xoauth2','pro_app_password')),
+  submission_started INTEGER NOT NULL DEFAULT 0 CHECK (submission_started IN (0,1)),
+  retry_hold INTEGER NOT NULL DEFAULT 0 CHECK (retry_hold IN (0,1)),
+  reconciled_at TEXT,
+  reconciliation_evidence TEXT CHECK (reconciliation_evidence IN
+    ('workspace_mail_log','recipient_confirmation','provider_result','pro_receipt')),
+  reconciliation_reference TEXT,
   attempt_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   claimed_at TEXT,

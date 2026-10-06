@@ -22,7 +22,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck && npm run build
       # Operator first applies the shared Supabase schema, creates the Queue,
-      # configures the Pro/Tunnel and replaces the non-secret Wrangler placeholders.
+      # provisions Google SMTP OAuth (https://mail.google.com/) and replaces the
+      # non-secret Supabase placeholder. Pro/Tunnel is optional fallback only.
       - name: Require completed configuration
         run: |
           if grep -q 'REPLACE_' apps/media-email/wrangler.jsonc; then
@@ -38,14 +39,32 @@ jobs:
           NEWS_EMAIL_TOKEN_SECRET: ${{ secrets.NEWS_EMAIL_TOKEN_SECRET }}
           NEWS_EMAIL_RATE_SECRET: ${{ secrets.NEWS_EMAIL_RATE_SECRET }}
           UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET: ${{ secrets.UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET }}
-          NEWS_EMAIL_SENDER_SECRET: ${{ secrets.NEWS_EMAIL_SENDER_SECRET }}
           NEWS_EMAIL_OPERATOR_SECRET: ${{ secrets.NEWS_EMAIL_OPERATOR_SECRET }}
+          GOOGLE_SMTP_USERNAME: ${{ secrets.GOOGLE_SMTP_USERNAME }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          # Optional pair; no Pro hostname/secret is needed for primary deployment.
+          NEWS_EMAIL_SENDER_URL: ${{ secrets.NEWS_EMAIL_SENDER_URL }}
+          NEWS_EMAIL_SENDER_SECRET: ${{ secrets.NEWS_EMAIL_SENDER_SECRET }}
         run: |
           node --input-type=module <<'JS' | npx wrangler secret bulk --config apps/media-email/wrangler.jsonc
           const keys = ['SB_SECRET_KEY', 'NEWS_EMAIL_TURNSTILE_SECRET', 'NEWS_EMAIL_TOKEN_SECRET',
             'NEWS_EMAIL_RATE_SECRET', 'UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET',
-            'NEWS_EMAIL_SENDER_SECRET', 'NEWS_EMAIL_OPERATOR_SECRET'];
+            'NEWS_EMAIL_OPERATOR_SECRET', 'GOOGLE_SMTP_USERNAME', 'GOOGLE_OAUTH_CLIENT_ID',
+            'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_OAUTH_REFRESH_TOKEN'];
           if (keys.some(key => !process.env[key])) throw new Error('Missing required News email secret');
+          const fallback = ['NEWS_EMAIL_SENDER_URL', 'NEWS_EMAIL_SENDER_SECRET'];
+          // An unused/old sender secret alone must not block primary deployment.
+          if (process.env.NEWS_EMAIL_SENDER_URL) {
+            if (fallback.some(key => !process.env[key])) throw new Error('Incomplete optional Pro fallback configuration');
+            let url;
+            try { url = new URL(process.env.NEWS_EMAIL_SENDER_URL); }
+            catch { throw new Error('Invalid optional Pro fallback configuration'); }
+            if (url.protocol !== 'https:' || url.pathname !== '/send' || url.username || url.password || url.search || url.hash ||
+                process.env.NEWS_EMAIL_SENDER_SECRET.length < 32) throw new Error('Invalid optional Pro fallback configuration');
+            keys.push(...fallback);
+          }
           process.stdout.write(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
           JS
       - name: Deploy email Worker

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Bounded loopback HTTP -> authenticated Workspace SMTP submission, Python stdlib only.
+"""Optional Pro fallback: loopback HTTP -> Workspace App-Password SMTP, stdlib only.
 
+Normal AQ NEWS delivery uses direct Cloudflare SMTP/XOAUTH2 without this service.
 The SQLite journal is a transport receipt cache, not subscriber/editorial authority.
 A process crash during DATA is quarantined as unknown on restart. Never log requests.
 """

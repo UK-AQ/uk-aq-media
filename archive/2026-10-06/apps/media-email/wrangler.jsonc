@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "uk-aq-media-email",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {"enabled": false},
+  "d1_databases": [{"binding":"MEDIA_DB","database_name":"uk-aq-media","database_id":"75b39d56-a8e2-48dc-9208-7ac0d199219c","migrations_dir":"../../migrations"}],
+  "queues": {
+    "producers": [{"binding":"MEDIA_EMAIL_QUEUE","queue":"uk-aq-media-email"}],
+    "consumers": [{"queue":"uk-aq-media-email","max_batch_size":1,"max_batch_timeout":5,"max_retries":5,"max_concurrency":1,"retry_delay":300}]
+  },
+  "vars": {
+    "NEWS_EMAIL_ENABLED": "false",
+    "NEWS_EMAIL_SITE_ORIGIN": "https://test-uk-aq.ukaq.co.uk",
+    "NEWS_EMAIL_TURNSTILE_HOSTNAMES": "test-uk-aq.ukaq.co.uk",
+    "NEWS_EMAIL_TURNSTILE_ACTION": "news_subscribe",
+    "NEWS_EMAIL_CONSENT_VERSION": "2026-10-05",
+    "NEWS_EMAIL_CONFIRM_COOLDOWN_HOURS": "24",
+    "NEWS_EMAIL_CONFIRM_MAX_SENDS": "3",
+    "NEWS_EMAIL_CONFIRM_BACKOFF_DAYS": "7",
+    "NEWS_EMAIL_IP_BURST_LIMIT": "5",
+    "NEWS_EMAIL_IP_HOURLY_LIMIT": "20",
+    "SUPABASE_URL": "https://REPLACE_TEST_PROJECT.supabase.co",
+    "NEWS_EMAIL_SENDER_URL": "https://REPLACE_PRO_TUNNEL_HOST/send"
+  },
+  "secrets": {"required":["SB_SECRET_KEY","NEWS_EMAIL_TURNSTILE_SECRET","NEWS_EMAIL_TOKEN_SECRET","NEWS_EMAIL_RATE_SECRET","UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET","NEWS_EMAIL_SENDER_SECRET","NEWS_EMAIL_OPERATOR_SECRET"]}
+}

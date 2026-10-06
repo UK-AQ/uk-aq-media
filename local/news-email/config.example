@@ -1,4 +1,6 @@
+# Optional fallback only; normal direct Cloudflare OAuth delivery needs no Pro.
 # Names only / non-secret defaults. Set actual credentials in the Pro's ignored .env.
+# Username also has a separate managed Worker-secret deployment; App Password is local-only.
 GOOGLE_SMTP_USERNAME=
 GOOGLE_SMTP_APP_PASSWORD=
 NEWS_EMAIL_SENDER_SECRET=

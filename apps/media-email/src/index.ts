@@ -4,16 +4,22 @@ import { addJob, boundedBody, complete, hash, iso, now, queueJob, rpc,
 import { confirmation, digest, immediate } from './delivery';
 import { publicRoute } from './public';
 import { cutoffAt } from './schedule';
+import { deliveryOperation } from './operations';
 
 async function scheduler(env:Env):Promise<Response> {
   const at=now(), slot=String(Math.floor(Date.now()/300000));
   await addJob(env,`daily-scan:${slot}`,'daily_scan',{after:'',at});
   await addJob(env,`confirmation-scan:${slot}`,'confirmation_scan',{after:''});
-  // Stale SMTP claims are quarantined, never returned to the retry pool.
-  await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='unknown',last_error='stale_smtp_claim'
+  // Only claims that may have submitted a body are ambiguous. Refresh/pre-DATA
+  // interruptions are safe retries; the durable marker precedes submission.
+  await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries
+    SET state=CASE submission_started WHEN 1 THEN 'unknown' ELSE 'temporary_failure' END,
+    last_error=CASE submission_started WHEN 1 THEN 'stale_smtp_claim' ELSE 'stale_pre_submission_claim' END
     WHERE state='sending' AND claimed_at<?`).bind(new Date(Date.now()-300000).toISOString()).run();
   const {results}=await env.MEDIA_DB.prepare(`SELECT id FROM media_news_email_outbox
-    WHERE state='pending' OR (state='queued' AND queued_at<?) ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END,coalesce(queued_at,created_at),id LIMIT 10`)
+    WHERE (state='pending' OR (state='queued' AND queued_at<?))
+    AND NOT EXISTS (SELECT 1 FROM media_news_email_deliveries d WHERE d.id=media_news_email_outbox.id AND d.retry_hold=1)
+    ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END,coalesce(queued_at,created_at),id LIMIT 10`)
     .bind(new Date(Date.now()-600000).toISOString()).all<{id:string}>();
   for(const row of results) await queueJob(env,row.id);
   return json({ok:true,queued:results.length});
@@ -26,6 +32,10 @@ async function continuation(env:Env,job:Job,work:Work,after:string):Promise<void
 }
 async function processJob(env:Env,job:Job):Promise<void> {
   if(job.state==='completed') return;
+  const held=await env.MEDIA_DB.prepare('SELECT retry_hold,state FROM media_news_email_deliveries WHERE id=?')
+    .bind(job.id).first<{retry_hold:number;state:string}>();
+  if(held?.retry_hold) return;
+  if(held?.state==='sending') throw new Error('delivery_claim_in_progress');
   const w=JSON.parse(job.payload) as Work;
   if(job.work_type==='confirmation_email') await confirmation(env,job.id,w);
   else if(job.work_type==='immediate_delivery') await immediate(env,job.id,w);
@@ -57,7 +67,7 @@ async function processJob(env:Env,job:Job):Promise<void> {
         // Unknown/permanent outcomes freeze this mode's window pending explicit reconciliation.
         const blocked=await env.MEDIA_DB.prepare(`SELECT r.id FROM media_news_digest_runs r
           JOIN media_news_email_deliveries d ON d.id=r.id WHERE r.subscription_id=?
-          AND r.window_start_utc=? AND d.state IN ('unknown','sending','permanent_failure') LIMIT 1`)
+          AND r.window_start_utc=? AND (d.state IN ('unknown','sending','permanent_failure') OR d.retry_hold=1) LIMIT 1`)
           .bind(sub.id,iso(sub.digest_cursor_at)).first();
         if(blocked) continue;
         const id=`daily:${sub.id}:${cutoff}`;
@@ -68,7 +78,7 @@ async function processJob(env:Env,job:Job):Promise<void> {
     }
     if(rows.length===5) { await continuation(env,job,w,rows[4]!.id); return; }
   } else throw new Error('invalid_work_type');
-  await complete(env,job.id);
+  await complete(env,job);
 }
 async function fetchRoute(request:Request,env:Env):Promise<Response> {
   const url=new URL(request.url);
@@ -82,36 +92,19 @@ async function fetchRoute(request:Request,env:Env):Promise<Response> {
   if(url.pathname.startsWith('/operations/')) {
     if(!await bearerMatches(request,env.NEWS_EMAIL_OPERATOR_SECRET)) throw new HttpError(401,'unauthorized');
     if(request.method!=='POST') throw new HttpError(405,'method_not_allowed');
-    const data=JSON.parse(await boundedBody(request)) as Record<string,string>;
+    let parsed:unknown;
+    try { parsed=JSON.parse(await boundedBody(request)); } catch { throw new HttpError(400,'invalid_request'); }
+    if(!parsed || typeof parsed!=='object' || Array.isArray(parsed)) throw new HttpError(400,'invalid_request');
+    const data=parsed as Record<string,unknown>;
     if(url.pathname==='/operations/activate') {
       await env.MEDIA_DB.prepare(`UPDATE media_news_email_settings SET activated_at=?
         WHERE singleton=1 AND activated_at IS NULL`).bind(now()).run();
       return json(await env.MEDIA_DB.prepare('SELECT activated_at FROM media_news_email_settings WHERE singleton=1').first());
     }
-    if(url.pathname==='/operations/reconcile') {
-      if(!data.delivery_id || data.delivery_id.length>200) throw new HttpError(400,'invalid_request');
-      const d=await env.MEDIA_DB.prepare(`SELECT id,message_id FROM media_news_email_deliveries
-        WHERE id=? AND state='unknown'`).bind(data.delivery_id).first<{id:string;message_id:string}>();
-      if(!d) throw new HttpError(409,'unknown_delivery_required');
-      const endpoint=new URL('/receipt',env.NEWS_EMAIL_SENDER_URL);
-      if(endpoint.protocol!=='https:') throw new Error('sender_https_required');
-      const receipt=await fetch(endpoint,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(15000),
-        headers:{Authorization:`Bearer ${env.NEWS_EMAIL_SENDER_SECRET}`,'Content-Type':'application/json'},
-        body:JSON.stringify({message_id:d.message_id})});
-      if(!receipt.ok) throw new Error('receipt_unavailable');
-      const outcome=(await receipt.json() as {outcome:string}).outcome;
-      if(!['accepted','temporary_failure','permanent_failure'].includes(outcome)) return json({ok:false,outcome:'unknown'},409);
-      await env.MEDIA_DB.batch([
-        env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state=?,last_error='operator_reconciled',
-          sent_at=CASE WHEN ?='accepted' THEN coalesce(sent_at,claimed_at) ELSE sent_at END WHERE id=? AND state='unknown'`)
-          .bind(outcome,outcome,d.id),
-        env.MEDIA_DB.prepare(`UPDATE media_news_email_outbox SET state='pending',queued_at=NULL WHERE id=?`).bind(d.id),
-      ]);
-      await queueJob(env,d.id);
-      return json({ok:true,outcome});
-    }
+    if(url.pathname==='/operations/reconcile'||url.pathname==='/operations/retry')
+      return deliveryOperation(env,url.pathname,data);
     if(url.pathname!=='/operations/suppress') throw new HttpError(404,'not_found');
-    if(!/^[a-f0-9-]{36}$/.test(data.subscription_id??'')||typeof data.reason!=='string'||!data.reason.trim())
+    if(typeof data.subscription_id!=='string'||!/^[a-f0-9-]{36}$/.test(data.subscription_id)||typeof data.reason!=='string'||!data.reason.trim())
       throw new HttpError(400,'invalid_request');
     await rpc(env,'suppress',data); return json({ok:true});
   }
