@@ -1,8 +1,8 @@
 import { bearerMatches, HttpError, httpFailure, json, secretMatches } from '@uk-aq-media/core';
-import { addJob, boundedBody, complete, hash, iso, now, queueJob, rpc,
+import { addJob, boundedBody, complete, hash, now, queueJob, rpc,
   type Env, type Job, type Subscription, type Work } from './common';
 import { confirmation, digest, immediate } from './delivery';
-import { dailyCutoffIsDue } from './delivery-policy';
+import { dailyCutoffIsDue, dailyWorkIdentity } from './delivery-policy';
 import { publicRoute } from './public';
 import { cutoffAt } from './schedule';
 import { deliveryOperation } from './operations';
@@ -58,6 +58,8 @@ async function processJob(env:Env,job:Job):Promise<void> {
         await addJob(env,id,'immediate_delivery',{subscription_id:sub.id,event_id:w.event_id},w.event_id);
         await queueJob(env,id);
       } else {
+        const identity=dailyWorkIdentity(sub);
+        if(!identity) throw new Error('invalid_daily_timestamp_identity');
         const cutoff=cutoffAt(w.at!,sub.daily_time_local);
         // A newly requested Daily time starts at the first cutoff after that
         // preference revision; do not backfill an earlier cutoff immediately.
@@ -71,12 +73,11 @@ async function processJob(env:Env,job:Job):Promise<void> {
         const blocked=await env.MEDIA_DB.prepare(`SELECT r.id FROM media_news_digest_runs r
           JOIN media_news_email_deliveries d ON d.id=r.id WHERE r.subscription_id=?
           AND r.window_start_utc=? AND (d.state IN ('unknown','sending','permanent_failure') OR d.retry_hold=1) LIMIT 1`)
-          .bind(sub.id,iso(sub.digest_cursor_at)).first();
+          .bind(sub.id,identity.start).first();
         if(blocked) continue;
         const id=`daily:${sub.id}:${cutoff}`;
-        await addJob(env,id,'daily_digest',{subscription_id:sub.id,cutoff,start:iso(sub.digest_cursor_at),
-          mode_since_at:iso(sub.mode_since_at),daily_time_local:sub.daily_time_local,
-          preference_updated_at:iso(sub.updated_at)});
+        await addJob(env,id,'daily_digest',{subscription_id:sub.id,cutoff,...identity,
+          daily_time_local:sub.daily_time_local});
         await queueJob(env,id);
       }
     }

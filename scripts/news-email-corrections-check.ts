@@ -3,7 +3,8 @@ import { Buffer } from 'node:buffer';
 import { digestCursorRequest, digestRunStateAfterCursor, reconciliationOutcomeCommitted,
   reconciliationTargetAllows, rpc, type Env } from '../apps/media-email/src/common';
 import { normalizeSupportedMailbox } from '../apps/media-email/src/mailbox';
-import { dailyCutoffIsDue, dailyWorkStillMatches, digestRequiresOperator } from '../apps/media-email/src/delivery-policy';
+import { dailyCutoffIsDue, dailyTimestampIdentity, dailyWorkIdentity, dailyWorkStillMatches,
+  digestRequiresOperator } from '../apps/media-email/src/delivery-policy';
 import { serialize } from '../apps/media-email/src/message';
 import { classifyDefiniteProRejection } from '../apps/media-email/src/transport-policy';
 
@@ -40,22 +41,29 @@ for (const mailbox of [
 ]) assert.equal(normalizeSupportedMailbox(mailbox), null, mailbox);
 
 const dailyWork = {
-  mode_since_at: '2026-10-06T07:00:00.000Z',
-  start: '2026-10-05T07:00:00.000Z',
+  mode_since_at: '2026-10-06T19:31:16.662522+00:00',
+  start: '2026-10-05T07:00:00.123456+00:00',
   daily_time_local: '08:00:00',
-  preference_updated_at: '2026-10-05T06:00:00.000Z',
+  preference_updated_at: '2026-10-05T06:00:00.987654+00:00',
 };
 const dailySubscription = {
   status: 'active',
   delivery_mode: 'daily',
-  mode_since_at: '2026-10-06T07:00:00.000Z',
-  digest_cursor_at: '2026-10-05T07:00:00.000Z',
+  mode_since_at: dailyWork.mode_since_at,
+  digest_cursor_at: dailyWork.start,
   daily_time_local: '08:00:00',
-  updated_at: '2026-10-05T06:00:00.000Z',
+  updated_at: dailyWork.preference_updated_at,
 };
+assert.equal(dailyTimestampIdentity(dailyWork.mode_since_at),dailyWork.mode_since_at);
+assert.deepEqual(dailyWorkIdentity(dailySubscription),{
+  mode_since_at:dailyWork.mode_since_at,
+  start:dailyWork.start,
+  preference_updated_at:dailyWork.preference_updated_at,
+});
 assert.equal(dailyWorkStillMatches(dailyWork, dailySubscription), true);
 assert.equal(dailyWorkStillMatches(dailyWork, {...dailySubscription, daily_time_local: '09:00:00'}), false);
-assert.equal(dailyWorkStillMatches(dailyWork, {...dailySubscription, updated_at: '2026-10-06T07:01:00.000Z'}), false);
+assert.equal(dailyWorkStillMatches(dailyWork,
+  {...dailySubscription, updated_at:'2026-10-05T06:00:00.987655+00:00'}), false);
 assert.equal(dailyWorkStillMatches(dailyWork, {...dailySubscription, delivery_mode: 'immediate'}), false);
 const emptyCursorRequest=digestCursorRequest({...dailyWork,subscription_id:'subscription-1',
   cutoff:'2026-10-06T07:00:00.000Z'},'empty');
