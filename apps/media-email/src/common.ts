@@ -24,6 +24,18 @@ export interface Work {
   cutoff?: string; start?: string; mode_since_at?: string; daily_time_local?: string;
   preference_updated_at?:string; at?: string;
 }
+export type DigestCursorReason = 'accepted' | 'empty';
+export interface CursorAdvanceReceipt { ok?:boolean; advanced?:boolean }
+export function digestCursorRequest(work:Work,reason:DigestCursorReason):Record<string,unknown> {
+  const request:Record<string,unknown>={subscription_id:work.subscription_id,
+    window_start:work.start,window_end:work.cutoff,mode_since_at:work.mode_since_at};
+  if(reason==='empty') request.expected_preference_updated_at=work.preference_updated_at??null;
+  return request;
+}
+export function digestRunStateAfterCursor(reason:DigestCursorReason,
+  receipt:CursorAdvanceReceipt):'completed'|'cancelled' {
+  return reason==='empty'&&receipt.advanced!==true?'cancelled':'completed';
+}
 export interface Job { id:string; work_type:string; payload:string; state:string; attempt_count:number }
 export type Transport = 'cloudflare_xoauth2' | 'pro_app_password';
 export interface Delivery {

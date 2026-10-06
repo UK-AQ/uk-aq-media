@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { reconciliationOutcomeCommitted, reconciliationTargetAllows, rpc,
-  type Env } from '../apps/media-email/src/common';
+import { digestCursorRequest, digestRunStateAfterCursor, reconciliationOutcomeCommitted,
+  reconciliationTargetAllows, rpc, type Env } from '../apps/media-email/src/common';
 import { normalizeSupportedMailbox } from '../apps/media-email/src/mailbox';
 import { dailyCutoffIsDue, dailyWorkStillMatches, digestRequiresOperator } from '../apps/media-email/src/delivery-policy';
 import { serialize } from '../apps/media-email/src/message';
@@ -57,6 +57,15 @@ assert.equal(dailyWorkStillMatches(dailyWork, dailySubscription), true);
 assert.equal(dailyWorkStillMatches(dailyWork, {...dailySubscription, daily_time_local: '09:00:00'}), false);
 assert.equal(dailyWorkStillMatches(dailyWork, {...dailySubscription, updated_at: '2026-10-06T07:01:00.000Z'}), false);
 assert.equal(dailyWorkStillMatches(dailyWork, {...dailySubscription, delivery_mode: 'immediate'}), false);
+const emptyCursorRequest=digestCursorRequest({...dailyWork,subscription_id:'subscription-1',
+  cutoff:'2026-10-06T07:00:00.000Z'},'empty');
+assert.equal(emptyCursorRequest.expected_preference_updated_at,dailyWork.preference_updated_at);
+assert.equal(digestRunStateAfterCursor('empty',{ok:false,advanced:false}),'cancelled');
+assert.equal(digestRunStateAfterCursor('empty',{ok:true,advanced:true}),'completed');
+const acceptedCursorRequest=digestCursorRequest({...dailyWork,subscription_id:'subscription-1',
+  cutoff:'2026-10-06T07:00:00.000Z'},'accepted');
+assert.equal(Object.hasOwn(acceptedCursorRequest,'expected_preference_updated_at'),false);
+assert.equal(digestRunStateAfterCursor('accepted',{ok:false,advanced:false}),'completed');
 assert.equal(dailyCutoffIsDue('2026-10-05T08:00:00.000Z', '2026-10-05T07:00:00.000Z',
   '2026-10-06T07:01:00.000Z'), false);
 assert.equal(dailyCutoffIsDue('2026-10-06T08:00:00.000Z', '2026-10-05T07:00:00.000Z',
