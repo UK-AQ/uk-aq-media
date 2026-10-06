@@ -1,0 +1,10 @@
+# Optional fallback only; normal direct Cloudflare OAuth delivery needs no Pro.
+# Names only / non-secret defaults. Set actual credentials in the Pro's ignored .env.
+# Username also has a separate managed Worker-secret deployment; App Password is local-only.
+GOOGLE_SMTP_USERNAME=
+GOOGLE_SMTP_APP_PASSWORD=
+NEWS_EMAIL_SENDER_SECRET=
+NEWS_EMAIL_SITE_ORIGIN=https://test-uk-aq.ukaq.co.uk
+NEWS_EMAIL_PUBLIC_API_ORIGIN=https://uk-aq-media-email.uk-aq-media.workers.dev
+NEWS_EMAIL_RECEIPTS_PATH=/REPLACE_PRIVATE_STATE_DIRECTORY/news-email-receipts.sqlite3
+NEWS_EMAIL_PORT=8025

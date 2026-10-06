@@ -3,6 +3,7 @@
 interface __BaseEnv_MediaAdminEnv {
 	MEDIA_IMAGES: R2Bucket;
 	MEDIA_DB: D1Database;
+	MEDIA_EMAIL_QUEUE: Queue;
 	MEDIA_BLUESKY_QUEUE: Queue;
 	MEDIA_FACEBOOK_QUEUE: Queue;
 	AI: Ai;

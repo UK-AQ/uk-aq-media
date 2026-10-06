@@ -1,4 +1,4 @@
-import { ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, reconcileHomepageLatestSix, z,
+import { wakeNewsEmailOutbox, ArticleStatus, bearerMatches, boundedLimit, HttpError, httpFailure, json, reconcileHomepageLatestSix, z,
   BLUESKY_PLACEHOLDERS, BLUESKY_POST_BYTES, BLUESKY_POST_GRAPHEMES,
   BLUESKY_TEMPLATE_LITERAL_GRAPHEMES, validateBlueskyTemplate,
   BLUESKY_IN_PROGRESS_SQL, reconcileBlueskyPublications,
@@ -1253,10 +1253,12 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx?: ExecutionContext): Promise<Response> {
+    let authenticated = false;
     try {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
+      authenticated = true;
       const url = new URL(request.url);
       if (url.pathname === '/admin/bluesky/settings') return await blueskySettings(request, env);
       if (url.pathname === '/admin/facebook/settings') return await facebookSettings(request, env);
@@ -1367,6 +1369,10 @@ export default {
         return httpFailure(new HttpError(409, 'publication_in_progress'));
       }
       return httpFailure(error);
+    } finally {
+      if (authenticated && request.method === 'POST' && ctx) {
+        ctx.waitUntil(wakeNewsEmailOutbox(env));
+      }
     }
   },
 } satisfies ExportedHandler<MediaAdminEnv>;
