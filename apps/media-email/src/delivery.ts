@@ -1,5 +1,6 @@
-import { hash, iso, newDelivery, now, recordConfirmationOutcome, rpc, token,
-  type Delivery, type Env, type Subscription, type Work } from './common';
+import { digestCursorRequest, digestRunStateAfterCursor, hash, iso, newDelivery, now,
+  recordConfirmationOutcome, rpc, token, type CursorAdvanceReceipt, type Delivery,
+  type DigestCursorReason, type Env, type Subscription, type Work } from './common';
 import { dailyWorkStillMatches, digestRequiresOperator } from './delivery-policy';
 import { submission, type Message } from './message';
 import { submit } from './transport';
@@ -98,7 +99,8 @@ export async function digest(env:Env,id:string,w:Work):Promise<void> {
   const run=await env.MEDIA_DB.prepare('SELECT state FROM media_news_digest_runs WHERE id=?').bind(id).first<{state:string}>();
   if(run?.state==='completed') return;
   // SMTP acceptance and cursor repair are separate durable steps.
-  if(delivery.state==='accepted'||run?.state==='empty') { await finishDigest(env,id,w); return; }
+  if(delivery.state==='accepted') { await finishDigest(env,id,w,'accepted'); return; }
+  if(run?.state==='empty') { await finishDigest(env,id,w,'empty'); return; }
   if(terminal.has(delivery.state)) return;
   const sub=await rpc<Subscription>(env,'get',{subscription_id:w.subscription_id});
   if(!dailyWorkStillMatches(w,sub)) { await cancel(env,id); return; }
@@ -113,7 +115,7 @@ export async function digest(env:Env,id:string,w:Work):Promise<void> {
     const current=await rpc<Subscription>(env,'get',{subscription_id:sub.id});
     if(!dailyWorkStillMatches(w,current)) { await cancel(env,id); return; }
     await env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET state='empty',item_count=0 WHERE id=?`).bind(id).run();
-    await cancel(env,id); await finishDigest(env,id,w); return;
+    await cancel(env,id); await finishDigest(env,id,w,'empty'); return;
   }
   const message=await activeMessage(env,sub,articles,'daily');
   if(!message) { await cancel(env,id); return; }
@@ -127,7 +129,7 @@ export async function digest(env:Env,id:string,w:Work):Promise<void> {
   const outcome=await send(env,delivery,current,message);
   await env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET state=?,sent_at=? WHERE id=?`)
     .bind(outcome,outcome==='accepted'?now():null,id).run();
-  if(outcome==='accepted') await finishDigest(env,id,w);
+  if(outcome==='accepted') await finishDigest(env,id,w,'accepted');
 }
 async function holdDigest(env:Env,id:string,itemCount:number):Promise<void> {
   const stamp=now();
@@ -139,9 +141,17 @@ async function holdDigest(env:Env,id:string,itemCount:number):Promise<void> {
       last_error='digest_size_requires_operator' WHERE id=?`).bind(itemCount,id),
   ]);
 }
-async function finishDigest(env:Env,id:string,w:Work):Promise<void> {
-  await rpc(env,'cursor',{subscription_id:w.subscription_id,window_start:w.start,window_end:w.cutoff,
-    mode_since_at:w.mode_since_at});
+async function finishDigest(env:Env,id:string,w:Work,reason:DigestCursorReason):Promise<void> {
+  const receipt=await rpc<CursorAdvanceReceipt>(env,'cursor',digestCursorRequest(w,reason));
+  if(digestRunStateAfterCursor(reason,receipt)==='cancelled') {
+    // The empty window became stale after its final application-level check. Retire it
+    // without consuming the cursor so the subscriber's new Daily preference can reuse it.
+    await env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET state='cancelled',completed_at=?,
+      last_error='stale_daily_work' WHERE id=? AND state='empty'`).bind(now(),id).run();
+    return;
+  }
+  // Accepted SMTP submission remains authoritative even if a later cursor CAS no longer
+  // matches; in particular, preference revision changes never block its repair attempt.
   await env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET state='completed',completed_at=? WHERE id=?`)
     .bind(now(),id).run();
 }
