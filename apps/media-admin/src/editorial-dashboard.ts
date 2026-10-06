@@ -480,7 +480,7 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
     WHERE a.id = ?`).bind(id).first<Record<string, unknown>>();
   if (!article) throw new HttpError(404, 'article_not_found');
   const [events, evidence, bluesky, blueskyCount, facebook, facebookCount,
-    localCopyPermissionEvent] = await Promise.all([
+    localCopyPermissionEvent, possibleDuplicate] = await Promise.all([
     db.prepare(`SELECT id, event_type, actor_type, from_status, to_status, revision,
       created_at, metadata_json FROM media_article_events WHERE article_id = ?
       ORDER BY id DESC LIMIT 25`).bind(id).all(),
@@ -513,6 +513,18 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
         AND json_extract(metadata_json, '$.operation') = 'image_policy'
       ORDER BY id DESC LIMIT 1`).bind(id)
       .first<{ created_at: string; metadata_json: string }>(),
+    db.prepare(`SELECT possible_duplicate.candidate_article_id, possible_duplicate.reason_code,
+      possible_duplicate.hold_created_at, possible_duplicate.resolved_at,
+      possible_duplicate.resolution,
+      candidate.title AS candidate_title,
+      candidate.canonical_url AS candidate_canonical_url,
+      candidate.status AS candidate_status,
+      candidate.published_at AS candidate_published_at,
+      candidate.author AS candidate_author
+      FROM media_article_possible_duplicates possible_duplicate
+      JOIN media_articles candidate
+        ON candidate.id = possible_duplicate.candidate_article_id
+      WHERE possible_duplicate.article_id = ?`).bind(id).first<Record<string, unknown>>(),
   ]);
   const blueskyPublications: Array<Record<string, unknown>> = bluesky.results.map(row => ({ ...row,
     status_label: blueskyPublicationStatusLabel(String(row.status), row.last_error_code),
@@ -567,7 +579,24 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
         localCopyPermissionEvent?.metadata_json) : null,
     admin_preview_image_path: presentationImage ? `/admin/articles/${id}/image` : null,
     admin_preview_image_version: retainedLocalImage
-      ? article.local_image_content_sha256 : article.updated_at }, events: events.results,
+      ? article.local_image_content_sha256 : article.updated_at },
+    possible_duplicate: possibleDuplicate ? {
+      active: possibleDuplicate.resolved_at === null,
+      candidate_article_id: possibleDuplicate.candidate_article_id,
+      reason_code: possibleDuplicate.reason_code,
+      hold_created_at: possibleDuplicate.hold_created_at,
+      resolved_at: possibleDuplicate.resolved_at,
+      resolution: possibleDuplicate.resolution,
+      candidate: {
+        id: possibleDuplicate.candidate_article_id,
+        title: possibleDuplicate.candidate_title,
+        canonical_url: possibleDuplicate.candidate_canonical_url,
+        status: possibleDuplicate.candidate_status,
+        published_at: possibleDuplicate.candidate_published_at,
+        author: possibleDuplicate.candidate_author,
+      },
+    } : null,
+    events: events.results,
     discovery_evidence: evidence.results,
     bluesky: { post_count: blueskyCount?.post_count ?? 0,
       publication_count: blueskyCount?.publication_count ?? 0,
@@ -773,6 +802,14 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
       a.published_at, a.discovered_at, a.approved_at, a.updated_at, a.status,
       a.revision, a.approval_method, a.approval_author_rule_key, a.og_image_url,
       a.image_policy, s.image_policy AS source_image_policy,
+      CASE WHEN possible_duplicate.article_id IS NOT NULL
+          AND possible_duplicate.resolved_at IS NULL
+        THEN 1 ELSE 0 END AS possible_duplicate_active,
+      possible_duplicate.candidate_article_id AS possible_duplicate_candidate_article_id,
+      possible_duplicate.reason_code AS possible_duplicate_reason_code,
+      possible_duplicate.hold_created_at AS possible_duplicate_hold_created_at,
+      possible_duplicate.resolved_at AS possible_duplicate_resolved_at,
+      possible_duplicate.resolution AS possible_duplicate_resolution,
       li.source_image_url AS local_image_source_url,
       li.content_sha256 AS local_image_content_sha256,
       (SELECT count(*) FROM media_bluesky_publications bp
@@ -792,6 +829,8 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
         ORDER BY fp.id DESC LIMIT 1) AS facebook_latest_status,
       ${spec.expression} AS cursor_value
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
+    LEFT JOIN media_article_possible_duplicates possible_duplicate
+      ON possible_duplicate.article_id = a.id
     LEFT JOIN media_article_local_images li ON li.article_id = a.id
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY ${spec.expression} ${spec.direction}, a.id ${spec.direction} LIMIT ?`;

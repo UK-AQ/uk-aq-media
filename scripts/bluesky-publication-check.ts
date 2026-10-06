@@ -1003,6 +1003,7 @@ async function checkThumbnailWaitingCorrection(): Promise<void> {
   assert.deepEqual(sqlite.prepare('SELECT * FROM media_bluesky_publications ORDER BY id').all(), priorRows);
   assert.deepEqual(sqlite.prepare('PRAGMA table_info(media_bluesky_publications)').all(), priorColumns);
   assert.equal(scalar(sqlite, 'SELECT count(*) AS value FROM media_bluesky_publications WHERE article_id = 601'), 0);
+  sqlite.exec(readFileSync('migrations/0037_possible_duplicate_auto_approval_hold.sql', 'utf8'));
 
   insertStatusFixture(sqlite, 603, 'approved', false, 'trusted_source_auto');
   insertStatusFixture(sqlite, 604, 'approved', true, 'trusted_source_auto');

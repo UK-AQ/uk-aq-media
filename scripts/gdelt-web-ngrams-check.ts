@@ -468,7 +468,7 @@ const directArticle: DiscoveredArticle = {
   preview_metadata_checked_at: null,
 };
 await db.batch([
-  persistArticle(db, aqnSource, directArticle, [], null, '2026-09-13T12:20:00.000Z'),
+  persistArticle(db, aqnSource, directArticle, [], null, '2026-09-13T12:20:00.000Z', false),
   persistDiscoveryEvidence(db, aqnSource, 'publisher_rss', 'air-quality-news-feed', directArticle,
     [], null, '2026-09-13T12:20:00.000Z'),
 ]);
@@ -498,7 +498,8 @@ async function seedEditorialUrl(path: string, status: 'rejected' | 'hidden'): Pr
     title: `Air pollution ${path}`, author: null, published_at: null, categories: [],
     title_context: null, preview_url: null, display_title: null, display_title_origin: null,
     preview_metadata_checked_at: null };
-  await persistArticle(db, bbcSource, article, [], null, '2026-09-13T12:21:00.000Z').run();
+  await persistArticle(db, bbcSource, article, [], null,
+    '2026-09-13T12:21:00.000Z', true).run();
   if (status === 'rejected') sqlite.prepare(`UPDATE media_articles SET status = 'rejected',
     rejected_at = ?, revision = revision + 1, mutation_key = ?, updated_at = ? WHERE canonical_url_hash = ?`)
     .run('2026-09-13T12:22:00.000Z', `reject-${path}`, '2026-09-13T12:22:00.000Z', article.canonical_url_hash);

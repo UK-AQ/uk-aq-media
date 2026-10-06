@@ -6,7 +6,7 @@ import {
   mediaDeterministicRelevanceFilter,
 } from '@uk-aq-media/discovery';
 import {
-  persistArticle, persistDiscoveryEvidence,
+  persistArticle, persistDiscoveryEvidence, persistPossibleDuplicateHold,
 } from '@uk-aq-media/discovery/persistence';
 import {
   GdeltChunkSchema, GdeltFileCompleteSchema, GdeltFileStartSchema,
@@ -314,7 +314,12 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
     if (!candidate.relevant) { relevanceFiltered++; continue; }
     if (!source) throw new Error('gdelt_uk_source_unavailable');
     const article = discoveredArticle(candidate);
-    statements.push(persistArticle(db, source, article, [], null, timestamp));
+    const isNewIdentity = !existingArticleHashes.has(article.canonical_url_hash);
+    statements.push(persistArticle(db, source, article, [], null, timestamp, isNewIdentity));
+    const possibleDuplicateHold = persistPossibleDuplicateHold(
+      db, source, article, [], timestamp, isNewIdentity,
+    );
+    if (possibleDuplicateHold) statements.push(possibleDuplicateHold);
     for (const family of candidate.input.families) {
       statements.push(persistDiscoveryEvidence(db, source, 'gdelt', family.family_key,
         article, [], null, timestamp));
