@@ -24,7 +24,8 @@ import {
 import { mediaDeterministicRelevanceFilter } from './relevance';
 import { ScanError } from './rss';
 import {
-  persistArticle, persistDiscoveryEvidence, publicationAuthorRule,
+  persistArticle, persistDiscoveryEvidence, persistPossibleDuplicateHold,
+  publicationAuthorRule,
 } from './persistence';
 
 export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
@@ -344,7 +345,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     const acceptedArticles: DiscoveredArticle[] = [];
     const acceptedRules = new Map<string, AuthorRule[]>();
     // AQN and generic publisher routes remain at <=20 items; Guardian is <=10 per route.
-    // One article and one provider-evidence statement per item remains below D1's batch bound.
+    // At most article, possible-duplicate hold and provider-evidence statements per item remain
+    // below D1's batch bound, and their stable order makes an earlier same-batch insert visible.
     for (const article of unique.values()) {
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
@@ -377,7 +379,13 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         ? publicationRule : null;
       const approvalObservationKey = selectedAutoRule
         ? `author-auto:${runId}:${article.canonical_url_hash}` : null;
-      statements.push(persistArticle(db, source, article, matchedRules, approvalObservationKey, now));
+      const isNewIdentity = !existingHashes.has(article.canonical_url_hash);
+      statements.push(persistArticle(db, source, article, matchedRules, approvalObservationKey,
+        now, isNewIdentity));
+      const possibleDuplicateHold = persistPossibleDuplicateHold(
+        db, source, article, matchedRules, now, isNewIdentity,
+      );
+      if (possibleDuplicateHold) statements.push(possibleDuplicateHold);
       const providerKey = ['dsawsp', 'communities-against-woodsmoke', 'ncas'].includes(sourceKey)
         ? 'publisher_web_index' : 'publisher_rss';
       statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
