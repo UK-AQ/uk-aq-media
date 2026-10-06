@@ -1,6 +1,7 @@
 import { boundedBody, encoder, type Env, type Transport } from './common';
 import { serialize, type Submission } from './message';
 import { result, smtpSubmit, type Outcome, type Result } from './smtp';
+import { classifyDefiniteProRejection } from './transport-policy';
 
 const outcomes=new Set(['accepted','temporary_failure','permanent_failure','unknown']);
 export function fallbackEndpoint(env:Env,path:'/send'|'/receipt'):URL {
@@ -11,11 +12,12 @@ export function fallbackEndpoint(env:Env,path:'/send'|'/receipt'):URL {
     throw new Error('fallback_not_configured');
   return new URL(path,url);
 }
-async function proRequest(env:Env,url:URL,body:string):Promise<Outcome> {
+async function proRequest(env:Env,url:URL,body:string,allowDefiniteRejection=false):Promise<Outcome> {
   const response=await fetch(url,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(45000),
     headers:{Authorization:`Bearer ${env.NEWS_EMAIL_SENDER_SECRET}`,'Content-Type':'application/json'},body});
-  if(!response.ok) return 'unknown';
-  const data=JSON.parse(await boundedBody(response,4096)) as {outcome?:unknown};
+  const data=JSON.parse(await boundedBody(response,4096)) as {outcome?:unknown;error?:unknown};
+  if(!response.ok) return allowDefiniteRejection?
+    classifyDefiniteProRejection(response.status,data?.error)??'unknown':'unknown';
   return typeof data?.outcome==='string' && outcomes.has(data.outcome)?data.outcome as Outcome:'unknown';
 }
 export async function proReceipt(env:Env,messageId:string):Promise<Outcome> {
@@ -37,9 +39,9 @@ export async function submit(env:Env,transport:Transport,message:Submission,befo
   try { await beforeSubmit(); }
   catch { return result('temporary_failure','submission_claim_unavailable'); }
   // The HTTP request may reach Pro SMTP even when no HTTP receipt comes back.
-  // Neither a timeout nor an HTTP error proves that the fallback did not send.
+  // Unclassified HTTP failures, malformed replies and transport errors remain unknown.
   try {
-    const outcome=await proRequest(env,url,body);
+    const outcome=await proRequest(env,url,body,true);
     return result(outcome,outcome==='accepted'?null:`fallback_${outcome}`);
   } catch { return result('unknown','fallback_acceptance_unknown'); }
 }

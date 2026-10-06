@@ -1,5 +1,6 @@
 import { HttpError, json } from '@uk-aq-media/core';
 import { addJob, boundedBody, encoder, hash, queueJob, rpc, token, type Env } from './common';
+import { normalizeSupportedMailbox } from './mailbox';
 const neutral={ok:true,message:'If this address can be subscribed, please check the inbox for a confirmation email.'};
 async function rateLimit(request:Request,env:Env):Promise<void> {
   const ip=request.headers.get('CF-Connecting-IP');
@@ -36,9 +37,9 @@ export async function publicRoute(request:Request,env:Env,path:string):Promise<R
   catch { throw new HttpError(400,'invalid_request'); }
   if(path==='/subscribe') {
     preference(body);
-    if(typeof body.email!=='string' || body.email.length>254 ||
-      !/^[^\s@<>\r\n]+@[^\s@<>\r\n]+\.[^\s@<>\r\n]+$/.test(body.email.trim()) ||
-      body.consent_text_version!==env.NEWS_EMAIL_CONSENT_VERSION) throw new HttpError(400,'invalid_form');
+    const email=normalizeSupportedMailbox(body.email);
+    if(!email) throw new HttpError(400,'invalid_email');
+    if(body.consent_text_version!==env.NEWS_EMAIL_CONSENT_VERSION) throw new HttpError(400,'invalid_form');
     await rateLimit(request,env);
     const result=await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify',{
       method:'POST',redirect:'manual',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),
@@ -51,7 +52,7 @@ export async function publicRoute(request:Request,env:Env,path:string):Promise<R
       throw new HttpError(400,'turnstile_failed');
     const generation=crypto.randomUUID();
     const reserved=await rpc<{id?:string;subscription_id?:string}>(env,'subscribe',{
-      email:body.email.trim(),delivery_mode:body.delivery_mode,daily_time_local:body.daily_time_local??'08:00',
+      email,delivery_mode:body.delivery_mode,daily_time_local:body.daily_time_local??'08:00',
       consent_text_version:body.consent_text_version,id:generation,
       token_hash:await hash(await token(env,`confirmation:${generation}`)),
       cooldown_hours:Number(env.NEWS_EMAIL_CONFIRM_COOLDOWN_HOURS),

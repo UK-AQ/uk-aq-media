@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { encoder, type Delivery, type Env } from './common';
+import { normalizeSupportedMailbox } from './mailbox';
 
 export interface Message { kind:string; text:string; manage_url?:string; unsubscribe_url?:string }
 export interface Submission extends Message { to:string; message_id:string; date:string }
@@ -15,11 +16,7 @@ export function submission(delivery:Delivery,recipient:string,message:Message):S
 // V1 uses an ASCII addr-spec (SMTPUTF8 mailboxes fail closed), fixed ASCII header
 // text and a UTF-8/base64 body. Article/publisher text never becomes a header.
 export function serialize(env:Env,message:Submission):string {
-  const [local,domain,...extra]=message.to.split('@');
-  if(extra.length || !local || local.length>64 || !domain || message.to.length>254 ||
-    !/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+)*$/.test(local) ||
-    !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/.test(domain) ||
-    domain.split('.').some(label=>label.length>63)) throw new Error('invalid_news_message');
+  if(!normalizeSupportedMailbox(message.to)) throw new Error('invalid_news_message');
   const subject=Object.hasOwn(subjects,message.kind)?subjects[message.kind]:undefined;
   const date=new Date(message.date);
   if(!subject || !/^<news\.[a-f0-9]{64}@ukaq\.co\.uk>$/.test(message.message_id) ||

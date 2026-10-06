@@ -2,6 +2,7 @@ import { bearerMatches, HttpError, httpFailure, json, secretMatches } from '@uk-
 import { addJob, boundedBody, complete, hash, iso, now, queueJob, rpc,
   type Env, type Job, type Subscription, type Work } from './common';
 import { confirmation, digest, immediate } from './delivery';
+import { dailyCutoffIsDue } from './delivery-policy';
 import { publicRoute } from './public';
 import { cutoffAt } from './schedule';
 import { deliveryOperation } from './operations';
@@ -58,7 +59,9 @@ async function processJob(env:Env,job:Job):Promise<void> {
         await queueJob(env,id);
       } else {
         const cutoff=cutoffAt(w.at!,sub.daily_time_local);
-        if(Date.parse(cutoff)<=Date.parse(sub.digest_cursor_at)) continue;
+        // A newly requested Daily time starts at the first cutoff after that
+        // preference revision; do not backfill an earlier cutoff immediately.
+        if(!dailyCutoffIsDue(cutoff,sub.digest_cursor_at,sub.updated_at)) continue;
         // One unfinished run per subscription: repair accepted cursors before creating another cutoff.
         const open=await env.MEDIA_DB.prepare(`SELECT id FROM media_news_email_outbox
           WHERE work_type='daily_digest' AND json_extract(payload,'$.subscription_id')=?
@@ -72,7 +75,8 @@ async function processJob(env:Env,job:Job):Promise<void> {
         if(blocked) continue;
         const id=`daily:${sub.id}:${cutoff}`;
         await addJob(env,id,'daily_digest',{subscription_id:sub.id,cutoff,start:iso(sub.digest_cursor_at),
-          mode_since_at:iso(sub.mode_since_at)});
+          mode_since_at:iso(sub.mode_since_at),daily_time_local:sub.daily_time_local,
+          preference_updated_at:iso(sub.updated_at)});
         await queueJob(env,id);
       }
     }
@@ -147,7 +151,7 @@ export default {
         message.ack();
       } catch(error) {
         // Only known fixed codes; never persist raw external errors or request payloads.
-        const allowed=['temporary_failure','digest_size_requires_operator','subscription_service_unavailable'];
+        const allowed=['temporary_failure','subscription_service_unavailable'];
         const code=error instanceof Error && allowed.includes(error.message)?error.message:'work_retry_required';
         try {
           await env.MEDIA_DB.prepare('UPDATE media_news_email_outbox SET last_error=? WHERE id=?')

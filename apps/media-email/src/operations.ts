@@ -1,5 +1,6 @@
 import { HttpError, json } from '@uk-aq-media/core';
-import { now, queueJob, type Delivery, type Env, type Transport } from './common';
+import { now, queueJob, reconciliationOutcomeCommitted, reconciliationTargetAllows,
+  recordConfirmationOutcome, type Delivery, type Env, type Transport, type Work } from './common';
 import { fallbackEndpoint, proReceipt } from './transport';
 
 const messageId=/^<news\.[a-f0-9]{64}@ukaq\.co\.uk>$/;
@@ -40,15 +41,41 @@ export async function deliveryOperation(env:Env,path:string,data:Record<string,u
       if(!resolutions.has(outcome)) return json({ok:false,outcome:'unknown'},409);
       source='pro_receipt';
     } else throw new HttpError(409,'attempt_transport_required');
+    if(d.delivery_mode==='confirmation') {
+      if(!reconciliationTargetAllows(d.reconciliation_target,outcome))
+        throw new HttpError(409,'confirmation_outcome_conflict');
+      const job=await env.MEDIA_DB.prepare(`SELECT work_type,payload FROM media_news_email_outbox WHERE id=?`)
+        .bind(d.id).first<{work_type:string;payload:string}>();
+      let work:Work={};
+      try { work=JSON.parse(job?.payload??'{}') as Work; } catch { /* rejected below */ }
+      const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+      if(job?.work_type!=='confirmation_email'||typeof work.generation!=='string'||!uuid.test(work.generation)||
+        typeof work.subscription_id!=='string'||!uuid.test(work.subscription_id)||work.subscription_id!==d.subscription_id)
+        throw new HttpError(409,'confirmation_generation_required');
+      // Claim the operator's target durably before touching Supabase. Identical
+      // retries resume; a competing outcome cannot pass this compare-and-set.
+      const intent=await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries
+        SET reconciliation_target=? WHERE id=? AND state='unknown' AND attempt_count=?
+        AND attempt_transport=? AND (reconciliation_target IS NULL OR reconciliation_target=?)`)
+        .bind(outcome,d.id,d.attempt_count,d.attempt_transport,outcome).run();
+      if(!intent.meta.changes)
+        throw new HttpError(409,'confirmation_outcome_conflict');
+      // Supabase remains first for the definite state. If final D1 mutation is
+      // interrupted, the durable intent permits only this outcome to resume.
+      const committed=await recordConfirmationOutcome(env,d.id,work.generation,outcome);
+      if(!reconciliationOutcomeCommitted(committed,outcome))
+        throw new HttpError(409,'confirmation_outcome_conflict');
+    }
     const stamp=now();
     const updated=await env.MEDIA_DB.batch([
       env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state=?,retry_hold=?,
         last_error='operator_reconciled',reconciled_at=?,reconciliation_evidence=?,reconciliation_reference=?,
         sent_at=CASE WHEN ?='accepted' THEN coalesce(sent_at,claimed_at) ELSE sent_at END,
         failed_at=CASE WHEN ?='accepted' THEN NULL ELSE ? END
-        WHERE id=? AND state='unknown' AND attempt_count=? AND attempt_transport=?`)
+        WHERE id=? AND state='unknown' AND attempt_count=? AND attempt_transport=?
+        AND (delivery_mode!='confirmation' OR reconciliation_target=?)`)
         .bind(outcome,outcome==='accepted'?0:1,stamp,source,reference,outcome,outcome,stamp,
-          d.id,d.attempt_count,d.attempt_transport),
+          d.id,d.attempt_count,d.attempt_transport,outcome),
       // Accepted messages only need confirmation/cursor repair. Failure stays held even
       // if an old Queue message or recovery scan arrives. No submit/Queue send here.
       env.MEDIA_DB.prepare(`UPDATE media_news_email_outbox SET state='pending',queued_at=NULL,
@@ -71,7 +98,8 @@ export async function deliveryOperation(env:Env,path:string,data:Record<string,u
   // Expected state/attempt/selection guards a concurrent Queue claim or operator action.
   const updated=await env.MEDIA_DB.batch([
     env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='pending',selected_transport=?,
-      retry_hold=0,last_error='operator_retry_authorized' WHERE id=? AND state=? AND attempt_count=?
+      retry_hold=0,reconciliation_target=NULL,last_error='operator_retry_authorized'
+      WHERE id=? AND state=? AND attempt_count=?
       AND selected_transport=? AND retry_hold=?`)
       .bind(transport,d.id,d.state,d.attempt_count,d.selected_transport,d.retry_hold),
     env.MEDIA_DB.prepare(`UPDATE media_news_email_outbox SET state='pending',queued_at=NULL,
