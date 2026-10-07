@@ -61,7 +61,8 @@ export async function token(env:Env, scope:string):Promise<string> {
 export async function rpc<T>(env:Env, action:string, data:Record<string,unknown> = {}):Promise<T> {
   const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/uk_aq_news_email_service`, {
     method:'POST',headers:{apikey:env.SB_SECRET_KEY,
-      'Content-Type':'application/json'},body:JSON.stringify({p_action:action,p_data:data}),
+      'Content-Type':'application/json','Content-Profile':'uk_aq_public'},
+    body:JSON.stringify({p_action:action,p_data:data}),
     signal:AbortSignal.timeout(15000),redirect:'manual',
   });
   if (!response.ok) throw new Error('subscription_service_unavailable');
