@@ -17,10 +17,10 @@ const sources = z.array(SourceSchema).parse(JSON.parse(
 ));
 const publisherSources = sources.filter(source =>
   ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org',
-    'mums-for-lungs']
+    'university-of-exeter', 'mums-for-lungs']
     .includes(source.source_key));
-assert.equal(PUBLISHER_RSS_ROUTES.length, 17);
-assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 29);
+assert.equal(PUBLISHER_RSS_ROUTES.length, 18);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 30);
 for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
@@ -35,12 +35,14 @@ assert.equal(publisherSources.find(source => source.source_key === 'openaq')?.ca
   'openaq.medium.com');
 assert.equal(publisherSources.find(source => source.source_key === 'phys-org')?.ai_content_policy,
   'disabled');
+assert.equal(publisherSources.find(source => source.source_key === 'university-of-exeter')
+  ?.canonical_domain, 'news.exeter.ac.uk');
 assert.equal(PUBLISHER_RSS_ROUTES.find(route => route.source_key === 'openaq' &&
   route.route_key === 'openaq-medium' && 'content_encoded_preview_scan_bytes' in route)
   ?.content_encoded_preview_scan_bytes, MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES);
 assert.equal(PUBLISHER_RSS_ROUTES.filter(route =>
   'content_encoded_preview_scan_bytes' in route).length, 1);
-for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org']) {
+for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org', 'university-of-exeter']) {
   const configured = publisherSources.find(source => source.source_key === sourceKey)!;
   assert.deepEqual(configuredPublisherRssRouteKeys({ ...configured,
     publication_policy: 'auto_approve' }), []);

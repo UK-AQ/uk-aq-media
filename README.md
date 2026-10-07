@@ -34,6 +34,13 @@ image metadata use the generic RSS adapter and normal AQ relevance filter. Its p
 `search_index_policy='metadata_only'`; feed-body indexing must not be enabled until explicit
 publisher permission is obtained.
 
+## University of Exeter News publisher source
+
+University of Exeter News is an enabled manual/Standard publisher source discovered through its
+first-party `https://news.exeter.ac.uk/feed/` RSS feed. It uses the generic publisher RSS
+adapter, metadata-only indexing and the normal deterministic AQ relevance filter, so unrelated
+University news is discarded before article persistence. Title AI remains disabled.
+
 ## NCAS publisher source
 
 NCAS is an enabled manual/Standard publisher source using exactly three bounded first-party
@@ -47,8 +54,9 @@ thumbnail; rediscovery does not replace a non-null stored thumbnail or editorial
 
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
-Independent RSS discovery, specialist Carbon Brief, OpenAQ and Phys.org feeds, a bounded
-DSAWSP, Communities Against Woodsmoke and NCAS publisher-index adapters, and a
+Independent RSS discovery, specialist Carbon Brief, OpenAQ, Phys.org, Mums for Lungs and
+University of Exeter News feeds, bounded DSAWSP, Communities Against Woodsmoke and NCAS
+publisher-index adapters, and a
 separate global GDELT Web NGrams batch that retains English AQ candidates globally but
 promotes only relevant UK-publisher candidates into the existing Media system.
 The public website reaches the approved homepage feed only through the sibling
@@ -112,8 +120,9 @@ scope registry; `0015` adds separate malformed NGram accounting; and `0016` adva
 still-blocked GDELT dynamic publisher sources to `remote_preview`. Migration `0023` adds the
 bounded CAWS Blog index with manual/Standard publication policy and publisher-index
 provenance. Migration `0032` adds NCAS with exactly the three configured tag-index routes,
-manual/Standard publication policy and publisher-index provenance. Four publisher adapters
-remain deferred.
+manual/Standard publication policy and publisher-index provenance. Migration `0039` adds
+University of Exeter News as a manual/Standard generic RSS publisher using its first-party feed.
+Four publisher adapters remain deferred.
 
 ## GDELT Web NGrams discovery
 
@@ -263,7 +272,7 @@ Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred
 The discovery Worker exposes one authenticated backend scheduling route:
 
 - `POST /scheduler/run` requires `UK_AQ_MEDIA_WORKER_HTTP_SECRET` only through
-  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 34 }`
+  `x-uk-aq-worker-http-secret` and returns `202` with `{ "ok": true, "queued": 35 }`
   when all current routes and all three Guardian author rules are enabled: one AQN scan,
   eleven Guardian routes, four BBC routes, four Sky routes, five Independent routes,
   one route for each RSS specialist publisher, one route for each of the DSAWSP and CAWS
@@ -303,8 +312,8 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
 helper that selects only allowlisted AQN, Guardian, BBC News, Sky News and Independent
-work, plus Carbon Brief, OpenAQ, Phys.org, DSAWSP and CAWS, when each D1 source is current,
-enabled and matches its supported adapter shape.
+work, plus Carbon Brief, OpenAQ, Phys.org, University of Exeter News, Mums for Lungs, DSAWSP,
+CAWS and NCAS when each D1 source is current, enabled and matches its supported adapter shape.
 The caller cannot supply source or
 route selection. AQN retains its route-less `source_scan`; every Guardian and generic
 publisher RSS route receives its own `source_scan`. The consumer reloads and validates
@@ -397,8 +406,10 @@ also prevents the normal missing-preview article-head fallback, so Medium articl
 `https://phys.org/rss-feed/earth-news/environment/`. All three use the generic publisher
 RSS adapter, remain manual/Standard, retain no excerpt, and pass the deterministic AQ
 relevance filter. Carbon Brief and OpenAQ permit metadata-only display-title AI;
-Phys.org keeps title AI disabled so its original headlines remain observable. Discovery
-always stores the original feed headline in `title`, leaves `display_title` null, and does
+Phys.org keeps title AI disabled so its original headlines remain observable. University of
+Exeter News uses `https://news.exeter.ac.uk/feed/`, remains manual/Standard with title AI
+disabled, and passes the same deterministic AQ relevance filter. Discovery always stores the
+original feed headline in `title`, leaves `display_title` null, and does
 not invoke AI for any of these three sources. Carbon Brief and OpenAQ remain eligible for
 an explicit authenticated editorial title request; any resulting suggestion stays
 separately Pending until editorial acceptance.
@@ -432,8 +443,9 @@ A long outage can exceed the feed's recent window; historical recovery is deferr
 
 AQN and Guardian retain automatic metadata-only AI for the narrow display-title task.
 Carbon Brief and OpenAQ permit the same bounded metadata use only through an explicit
-authenticated editorial request; discovery does not call AI for them. Phys.org, the three
-mainstream manual publisher RSS sources and four deferred publishers retain disabled AI. No seed
+authenticated editorial request; discovery does not call AI for them. Phys.org, University of
+Exeter News, the mainstream manual publisher RSS sources and four deferred publishers retain
+disabled AI. No seed
 asserts a permanent legal permission; Defra is retired from the current Media source
 catalogue.
 Source-level and article-level image blocks are both checked on public reads.

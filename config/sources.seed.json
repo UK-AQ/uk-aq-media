@@ -295,6 +295,31 @@
     "search_index_policy": "metadata_only"
   },
   {
+    "source_key": "university-of-exeter",
+    "name": "University of Exeter News",
+    "canonical_domain": "news.exeter.ac.uk",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "university-of-exeter-news",
+          "url": "https://news.exeter.ac.uk/feed/",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
     "source_key": "dsawsp",
     "name": "DSAWSP",
     "canonical_domain": "dsawsp.org",
