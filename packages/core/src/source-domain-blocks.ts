@@ -49,9 +49,8 @@ export function domainBlockedSql(hostExpression: string): string {
 
 // Validated ASCII hostnames can be used as SQL constants without consuming the
 // GDELT chunk's bounded D1 parameter allowance. No user SQL is accepted here.
-export function publisherAdmissionSql(urls: readonly string[], sourceDomain?: string): string {
+export function publisherAdmissionSql(urls: readonly string[]): string {
   const hosts = new Set(urls.map(publisherHostname));
-  if (sourceDomain) hosts.add(normalisePublisherHostname(sourceDomain));
   return [...hosts].map(host => `NOT ${domainBlockedSql(`'${host}'`)}`).join(' AND ');
 }
 

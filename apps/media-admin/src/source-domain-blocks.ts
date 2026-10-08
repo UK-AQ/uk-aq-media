@@ -7,10 +7,10 @@ const BlockBody = z.object({ domain: z.string().max(254), blocked: z.boolean(),
   reason: z.string().trim().max(1000).optional() }).strict();
 const CleanupBody = z.object({
   confirm: z.literal('blocked_source_initial_cleanup'),
-  after_id: z.number().int().nonnegative().default(0),
-  through_id: z.number().int().positive(),
+  preview_id: z.string().uuid(),
+  after_id: z.number().int().nonnegative().safe().default(0),
   limit: z.number().int().min(1).max(50).default(50),
-}).strict().refine(value => value.after_id <= value.through_id);
+}).strict();
 
 export async function mutateSourceDomainBlock(db: D1Database, key: string,
   input: unknown): Promise<Response> {
@@ -67,17 +67,34 @@ const INITIAL_MATCH_SQL = `EXISTS (SELECT 1 FROM media_source_domain_blocks init
   WHERE initial_block.domain IN (${INITIAL_DOMAINS_SQL}) AND initial_block.blocked = 1
     AND ${domainBoundarySql(publisherHostnameSql('a.canonical_url'), 'initial_block.domain')})`;
 
-export async function previewInitialDomainCleanup(db: D1Database): Promise<Response> {
-  const [counts, state] = await Promise.all([
-    db.prepare(`SELECT initial_block.domain, a.status, count(a.id) AS article_count
+export async function previewInitialDomainCleanup(db: D1Database, key: string,
+  input: unknown): Promise<Response> {
+  if (!z.object({}).strict().safeParse(input).success) {
+    throw new HttpError(400, 'invalid_initial_domain_cleanup_preview_body');
+  }
+  // Counts and the high-water ID are captured in one SQL snapshot. Reusing a
+  // preview key returns that inspected scope, even if newer articles now exist.
+  await db.prepare(`INSERT INTO media_source_domain_cleanup_previews
+    (preview_id, request_key, through_id, counts_json, all_initial_domains_blocked, created_at)
+    SELECT ?, ?, coalesce((SELECT max(id) FROM media_articles), 0),
+      (SELECT json_group_array(json_object('domain', domain, 'status', status,
+        'article_count', article_count)) FROM (
+      SELECT initial_block.domain, a.status, count(a.id) AS article_count
       FROM media_source_domain_blocks initial_block LEFT JOIN media_articles a
         ON ${domainBoundarySql(publisherHostnameSql('a.canonical_url'), 'initial_block.domain')}
       WHERE initial_block.domain IN (${INITIAL_DOMAINS_SQL})
-      GROUP BY initial_block.domain, a.status ORDER BY initial_block.domain, a.status`).all(),
-    db.prepare(`SELECT ${INITIAL_READY_SQL} AS all_initial_domains_blocked,
-      coalesce(max(id), 0) AS through_id FROM media_articles`).first(),
-  ]);
-  return json({ reason: 'blocked_source_initial_cleanup', counts: counts.results, ...state,
+      GROUP BY initial_block.domain, a.status ORDER BY initial_block.domain, a.status)),
+      ${INITIAL_READY_SQL}, ? WHERE 1 ON CONFLICT(request_key) DO NOTHING`)
+    .bind(crypto.randomUUID(), key, new Date().toISOString()).run();
+  const receipt = await db.prepare(`SELECT preview_id, through_id, counts_json,
+    all_initial_domains_blocked, created_at FROM media_source_domain_cleanup_previews
+    WHERE request_key = ?`).bind(key).first<{
+      preview_id: string; through_id: number; counts_json: string;
+      all_initial_domains_blocked: number; created_at: string;
+    }>();
+  if (!receipt) throw new HttpError(503, 'cleanup_preview_unavailable');
+  const { counts_json, ...scope } = receipt;
+  return json({ reason: 'blocked_source_initial_cleanup', counts: JSON.parse(counts_json), ...scope,
     maximum_batch_size: 50 });
 }
 
@@ -94,6 +111,10 @@ export async function executeInitialDomainCleanup(db: D1Database, key: string,
     if (replay.request_json !== requestJson) throw new HttpError(409, 'idempotency_key_conflict');
     return json({ ...JSON.parse(replay.response_json), replayed: true });
   }
+  const preview = await db.prepare(`SELECT through_id FROM media_source_domain_cleanup_previews
+    WHERE preview_id = ?`).bind(data.preview_id).first<{ through_id: number }>();
+  if (!preview) throw new HttpError(409, 'initial_cleanup_preview_required');
+  if (data.after_id > preview.through_id) throw new HttpError(400, 'invalid_initial_cleanup_cursor');
   const ready = await db.prepare(`SELECT ${INITIAL_READY_SQL} AS ready`).first<{ ready: number }>();
   if (!ready?.ready) throw new HttpError(409, 'initial_domains_must_all_be_blocked');
   const now = new Date().toISOString();
@@ -105,7 +126,7 @@ export async function executeInitialDomainCleanup(db: D1Database, key: string,
         SELECT ?, ?, (SELECT json_group_array(id) FROM (
           SELECT a.id FROM media_articles a WHERE a.id > ? AND a.id <= ?
           ORDER BY a.id LIMIT ?)), ? WHERE ${INITIAL_READY_SQL}`)
-        .bind(key, requestJson, data.after_id, data.through_id, data.limit, now),
+        .bind(key, requestJson, data.after_id, preview.through_id, data.limit, now),
       // Normal status transition, revision guard and trigger audit. No outbox SQL.
       db.prepare(`UPDATE media_articles AS a SET status = 'rejected',
         mutation_key = ? || id, revision = revision + 1, rejected_at = ?, updated_at = ?
@@ -114,7 +135,7 @@ export async function executeInitialDomainCleanup(db: D1Database, key: string,
             FROM media_source_domain_cleanup_requests WHERE request_key = ?)))`)
         .bind(prefix, now, now, key),
       db.prepare(`UPDATE media_source_domain_cleanup_requests SET response_json = json_object(
-        'reason', 'blocked_source_initial_cleanup', 'through_id', ?,
+        'reason', 'blocked_source_initial_cleanup', 'preview_id', ?, 'through_id', ?,
         'scanned_count', json_array_length(selected_ids_json),
         'rejected_count', (SELECT count(*) FROM media_article_events e
           WHERE e.article_id IN (SELECT value FROM json_each(selected_ids_json))
@@ -124,7 +145,7 @@ export async function executeInitialDomainCleanup(db: D1Database, key: string,
           WHERE a.id > coalesce((SELECT max(value)
             FROM json_each(selected_ids_json)), ?) AND a.id <= ?)
           THEN 'true' ELSE 'false' END)) WHERE request_key = ?`)
-        .bind(data.through_id, prefix, data.after_id, data.after_id, data.through_id, key),
+        .bind(data.preview_id, preview.through_id, prefix, data.after_id, data.after_id, preview.through_id, key),
     ]);
   } catch (error) {
     const raced = await db.prepare(`SELECT request_json FROM media_source_domain_cleanup_requests

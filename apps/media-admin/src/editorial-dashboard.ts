@@ -1,7 +1,7 @@
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, ImagePolicy,
   PublicationPolicy, domainBlockedSql, domainBoundarySql, normalisedHostnameSql,
-  publisherAdmissionSql, requirePublisherDomainAllowed,
+  publisherAdmissionSql, publisherDomainsSql, requirePublisherDomainAllowed,
   BLUESKY_IN_PROGRESS_SQL, blueskyPublicationStatusLabel,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
   hasPermittedPresentationImage, loadSource, MAX_LOCAL_IMAGE_BYTES,
@@ -917,16 +917,27 @@ async function listSources(db: D1Database, search: URLSearchParams): Promise<Res
   }
   const host = normalisedHostnameSql('s.canonical_domain');
   const blocked = domainBlockedSql(host);
-  const visibilitySql = visibility === 'all' ? '1' : visibility === 'blocked' ? blocked : `NOT ${blocked}`;
-  const blockField = (field: string): string => `(SELECT domain_block.${field}
+  const sourceDomains = publisherDomainsSql('s.source_key', 's.canonical_domain');
+  const domainHost = normalisedHostnameSql('publisher_domain.value');
+  // A partly blocked source belongs in both views: its permitted alternatives
+  // remain discoverable, and its blocked domains remain manageable.
+  const visibilitySql = visibility === 'all' ? '1' : `EXISTS (
+    SELECT 1 FROM json_each(${sourceDomains}) publisher_domain
+    WHERE ${visibility === 'blocked' ? '' : 'NOT '}${domainBlockedSql(domainHost)})`;
+  const blockField = (field: string, effectiveHost = host): string => `(SELECT domain_block.${field}
     FROM media_source_domain_blocks domain_block WHERE domain_block.blocked = 1
-      AND ${domainBoundarySql(host, 'domain_block.domain')}
+      AND ${domainBoundarySql(effectiveHost, 'domain_block.domain')}
     ORDER BY length(domain_block.domain) DESC LIMIT 1)`;
   const { results } = await db.prepare(`SELECT s.*,
       ${blocked} AS domain_blocked,
       ${blockField('domain')} AS domain_block_domain,
       ${blockField('reason')} AS domain_block_reason,
       ${blockField('updated_at')} AS domain_block_updated_at,
+      (SELECT json_group_array(json_object('domain', ${domainHost},
+        'blocked', ${domainBlockedSql(domainHost)},
+        'block_domain', ${blockField('domain', domainHost)},
+        'reason', ${blockField('reason', domainHost)}))
+        FROM json_each(${sourceDomains}) publisher_domain) AS publisher_domains_json,
       (SELECT r.status FROM media_discovery_runs r WHERE r.source_key = s.source_key
         ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS recent_run_status,
       (SELECT r.started_at FROM media_discovery_runs r WHERE r.source_key = s.source_key
@@ -944,8 +955,8 @@ async function listSources(db: D1Database, search: URLSearchParams): Promise<Res
     .all<Record<string, unknown>>();
   const domains = await db.prepare(`SELECT b.* FROM media_source_domain_blocks b
     WHERE ${visibility === 'all' ? '1' : visibility === 'blocked' ? 'b.blocked = 1' : 'b.blocked = 0'}
-      AND NOT EXISTS (SELECT 1 FROM media_sources s WHERE s.retired_at IS NULL
-        AND ${domainBoundarySql(normalisedHostnameSql('s.canonical_domain'), 'b.domain')})
+      AND NOT EXISTS (SELECT 1 FROM media_sources s, json_each(${sourceDomains}) publisher_domain
+        WHERE s.retired_at IS NULL AND ${domainBoundarySql(domainHost, 'b.domain')})
     ORDER BY b.domain LIMIT ? OFFSET ?`).bind(limit + 1, domainOffset)
     .all<Record<string, unknown>>();
   const rules = await db.prepare(`SELECT ar.* FROM media_author_rules ar
@@ -953,7 +964,12 @@ async function listSources(db: D1Database, search: URLSearchParams): Promise<Res
     ORDER BY ar.source_key, ar.display_name, ar.author_key LIMIT 250`)
     .all<Record<string, unknown>>();
   return json({ visibility,
-    sources: results.slice(0, limit).map(row => presentSource({ ...row, domain_blocked: row.domain_blocked === 1 })),
+    sources: results.slice(0, limit).map(row => {
+      const { publisher_domains_json, ...source } = row;
+      const domains = JSON.parse(String(publisher_domains_json)) as Record<string, unknown>[];
+      return presentSource({ ...source, domain_blocked: row.domain_blocked === 1,
+        publisher_domains: domains.map(domain => ({ ...domain, blocked: domain.blocked === 1 })) });
+    }),
     domain_blocks: domains.results.slice(0, limit).map(row => ({ ...row, blocked: row.blocked === 1 })),
     next_offset: offset + Math.min(results.length, limit),
     next_domain_offset: domainOffset + Math.min(domains.results.length, limit),
@@ -1660,8 +1676,11 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
     if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
     return mutateSourceDomainBlock(env.MEDIA_DB, requireIdempotencyKey(request), await readJson(request));
   }
+  if (url.pathname === '/admin/source-domain-blocks/initial-cleanup/preview') {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    return previewInitialDomainCleanup(env.MEDIA_DB, requireIdempotencyKey(request), await readJson(request));
+  }
   if (url.pathname === '/admin/source-domain-blocks/initial-cleanup') {
-    if (request.method === 'GET') return previewInitialDomainCleanup(env.MEDIA_DB);
     if (request.method === 'POST') return executeInitialDomainCleanup(env.MEDIA_DB,
       requireIdempotencyKey(request), await readJson(request));
     return json({ error: 'method_not_allowed' }, 405);

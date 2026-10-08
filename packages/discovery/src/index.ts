@@ -1,7 +1,7 @@
 import {
   z, deleteArticleBodyTerms, feedBodySearchTerms, loadAuthorRules, loadSource, permitsAi,
   replaceArticleBodyTerms, blockedPublisherHosts, findPublisherDomainBlock,
-  publisherHostname, normalisePublisherHostname, publisherAdmissionSql, requirePublisherDomainAllowed, HttpError,
+  publisherHostname, publisherDomains, publisherAdmissionSql, requirePublisherDomainAllowed, HttpError,
   reconcileHomepageLatestSix, type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
@@ -188,7 +188,9 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
   let displayTitleChanged = false;
 
   for (const article of articles) {
-    if (await findPublisherDomainBlock(db, source.canonical_domain)) break;
+    const articleHosts = [article.canonical_url, article.original_url,
+      ...(article.publisher_resolved_urls ?? [])].map(publisherHostname);
+    if ((await blockedPublisherHosts(db, articleHosts)).size) continue;
     const claimedAt = new Date().toISOString();
     let claimed: ClaimedTitleArticle | null;
     try {
@@ -240,7 +242,7 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
         ai_title_model = ?, ai_title_prompt_version = ?, ai_title_generated_at = ?,
         ai_title_decided_at = ?, updated_at = ?
         WHERE id = ? AND ai_title_attempted_at = ?
-          AND ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])], source.canonical_domain)}
+          AND ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])])}
           AND status IN ('pending', 'approved')
           AND display_title IS NULL AND ai_title_suggestion IS NULL
           AND ai_title_suggestion_state IS NULL
@@ -323,14 +325,24 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       return;
     }
 
-    if (await findPublisherDomainBlock(db, source.canonical_domain)) {
+    // A source may own several independently permitted domains. Skip the whole
+    // scan only when all of them are blocked; actual fetch and article URLs are
+    // still checked below against current D1 decisions.
+    const sourceDomains = [...new Set(publisherDomains(source))];
+    if ((await blockedPublisherHosts(db, sourceDomains)).size === sourceDomains.length) {
       await finishRun(db, runId, 'skipped', 0, 0, 0, 'publisher_domain_blocked');
       return;
     }
     const resolvedTargets = new Map<string, Set<string>>();
     const guardedFetcher: typeof fetch = async (input, init) => {
       const target = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      await requirePublisherDomainAllowed(db, target);
+      try { await requirePublisherDomainAllowed(db, target); }
+      catch (error) {
+        if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) {
+          throw new ScanError('publisher_domain_blocked');
+        }
+        throw error;
+      }
       const chain = resolvedTargets.get(target) ?? new Set([target]);
       resolvedTargets.set(target, chain);
       const response = await fetch(input, init);
@@ -386,16 +398,15 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
     let acceptedArticles: DiscoveredArticle[] = [];
-    const blockedHosts = await blockedPublisherHosts(db, [source.canonical_domain,
-      ...result.articles.flatMap(article => [publisherHostname(article.canonical_url),
-        publisherHostname(article.original_url)])]);
+    const blockedHosts = await blockedPublisherHosts(db,
+      result.articles.flatMap(article => [publisherHostname(article.canonical_url),
+        publisherHostname(article.original_url)]));
     const acceptedRules = new Map<string, AuthorRule[]>();
     // AQN and generic publisher routes remain at <=20 items; Guardian is <=10 per route.
     // At most article, possible-duplicate hold and provider-evidence statements per item remain
     // below D1's batch bound, and their stable order makes an earlier same-batch insert visible.
     for (const article of unique.values()) {
-      if (blockedHosts.has(normalisePublisherHostname(source.canonical_domain)) ||
-          blockedHosts.has(publisherHostname(article.canonical_url)) ||
+      if (blockedHosts.has(publisherHostname(article.canonical_url)) ||
           blockedHosts.has(publisherHostname(article.original_url))) {
         filtered++;
         continue;
@@ -419,12 +430,11 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     const metadataBlocked = await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
     filtered += metadataBlocked.size;
     acceptedArticles = acceptedArticles.filter(article => !metadataBlocked.has(article.canonical_url_hash));
-    const currentBlocked = await blockedPublisherHosts(db, [source.canonical_domain,
-      ...acceptedArticles.flatMap(article => [article.canonical_url, article.original_url,
-        ...(article.publisher_resolved_urls ?? [])].map(publisherHostname))]);
+    const currentBlocked = await blockedPublisherHosts(db,
+      acceptedArticles.flatMap(article => [article.canonical_url, article.original_url,
+        ...(article.publisher_resolved_urls ?? [])].map(publisherHostname)));
     acceptedArticles = acceptedArticles.filter(article => {
-      const blocked = currentBlocked.has(normalisePublisherHostname(source.canonical_domain)) ||
-        [article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])]
+      const blocked = [article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])]
           .some(url => currentBlocked.has(publisherHostname(url)));
       if (blocked) filtered++;
       return !blocked;
@@ -459,7 +469,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const rows = acceptedArticles.filter(article => existingHashes.has(article.canonical_url_hash) !== newIdentity);
       return rows.length ? `(SELECT sum(eligible) FROM (${rows.map(article =>
         `SELECT CASE WHEN ${publisherAdmissionSql([article.canonical_url, article.original_url,
-          ...(article.publisher_resolved_urls ?? [])], source.canonical_domain)} THEN 1 ELSE 0 END AS eligible`)
+          ...(article.publisher_resolved_urls ?? [])])} THEN 1 ELSE 0 END AS eligible`)
         .join(' UNION ALL ')}))` : '0';
     };
     statements.push(db.prepare(`UPDATE media_discovery_runs SET status = 'succeeded',
@@ -513,6 +523,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     }
   } catch (error) {
     const code = error instanceof ScanError ? error.code : 'source_scan_failed';
+    if (code === 'publisher_domain_blocked') {
+      await finishRun(db, runId, 'skipped', seen, invalid, filtered, code);
+      return;
+    }
     try { await finishRun(db, runId, 'failed', seen, invalid, filtered, code); }
     catch { console.error(JSON.stringify({ event: 'run_evidence_unavailable', run_id: runId })); }
     throw error;
