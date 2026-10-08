@@ -1,6 +1,7 @@
 import {
   z, deleteArticleBodyTerms, feedBodySearchTerms, loadAuthorRules, loadSource, permitsAi,
-  replaceArticleBodyTerms,
+  replaceArticleBodyTerms, blockedPublisherHosts, findPublisherDomainBlock,
+  publisherHostname, publisherDomains, publisherAdmissionSql, requirePublisherDomainAllowed, HttpError,
   reconcileHomepageLatestSix, type AuthorRule, type Source, type DiscoveredArticle,
 } from '@uk-aq-media/core';
 import {
@@ -160,6 +161,7 @@ async function claimEligibleTitleArticle(db: D1Database, sourceKey: string,
       AND ai_title_suggestion IS NULL
       AND ai_title_suggestion_state IS NULL
       AND ai_title_attempted_at IS NULL
+      AND ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])])}
       AND length(title) > ?
     RETURNING id, title, author`).bind(claimedAt, article.canonical_url_hash, sourceKey,
       DISPLAY_TITLE_AI_THRESHOLD)
@@ -186,6 +188,9 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
   let displayTitleChanged = false;
 
   for (const article of articles) {
+    const articleHosts = [article.canonical_url, article.original_url,
+      ...(article.publisher_resolved_urls ?? [])].map(publisherHostname);
+    if ((await blockedPublisherHosts(db, articleHosts)).size) continue;
     const claimedAt = new Date().toISOString();
     let claimed: ClaimedTitleArticle | null;
     try {
@@ -237,6 +242,7 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
         ai_title_model = ?, ai_title_prompt_version = ?, ai_title_generated_at = ?,
         ai_title_decided_at = ?, updated_at = ?
         WHERE id = ? AND ai_title_attempted_at = ?
+          AND ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])])}
           AND status IN ('pending', 'approved')
           AND display_title IS NULL AND ai_title_suggestion IS NULL
           AND ai_title_suggestion_state IS NULL
@@ -257,8 +263,9 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
 }
 
 async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
-  articles: DiscoveredArticle[]): Promise<void> {
-  if (source.image_policy !== 'remote_preview' || articles.length === 0) return;
+  articles: DiscoveredArticle[]): Promise<Set<string>> {
+  const blockedHashes = new Set<string>();
+  if (source.image_policy !== 'remote_preview' || articles.length === 0) return blockedHashes;
   const placeholders = articles.map(() => '?').join(', ');
   const { results } = await db.prepare(`SELECT canonical_url_hash, og_image_url, image_policy,
     preview_metadata_checked_at FROM media_articles WHERE canonical_url_hash IN (${placeholders})`)
@@ -274,8 +281,19 @@ async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
     if (hasPreview || !articleAllowsPreview ||
         state?.preview_metadata_checked_at && !cawsRecheck) continue;
     try {
-      Object.assign(article, await discoverArticleHeadPreviewMetadata(article, source));
+      Object.assign(article, await discoverArticleHeadPreviewMetadata(article, source, async url => {
+        try { await requirePublisherDomainAllowed(db, url); }
+        catch (error) {
+          if (error instanceof HttpError) throw error;
+          throw new ScanError('domain_block_state_unavailable');
+        }
+      }));
     } catch (error) {
+      if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) {
+        blockedHashes.add(article.canonical_url_hash);
+        continue;
+      }
+      if (error instanceof ScanError && error.code === 'domain_block_state_unavailable') throw error;
       console.warn(JSON.stringify({
         event: 'article_head_metadata_failed',
         source_key: source.source_key,
@@ -284,6 +302,7 @@ async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
       }));
     }
   }
+  return blockedHashes;
 }
 
 export async function runSourceScan(db: D1Database, sourceKey: string, routeKey: string | undefined,
@@ -306,10 +325,42 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       return;
     }
 
+    // A source may own several independently permitted domains. Skip the whole
+    // scan only when all of them are blocked; actual fetch and article URLs are
+    // still checked below against current D1 decisions.
+    const sourceDomains = [...new Set(publisherDomains(source))];
+    if ((await blockedPublisherHosts(db, sourceDomains)).size === sourceDomains.length) {
+      await finishRun(db, runId, 'skipped', 0, 0, 0, 'publisher_domain_blocked');
+      return;
+    }
+    const resolvedTargets = new Map<string, Set<string>>();
+    const guardedFetcher: typeof fetch = async (input, init) => {
+      const target = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      try { await requirePublisherDomainAllowed(db, target); }
+      catch (error) {
+        if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) {
+          throw new ScanError('publisher_domain_blocked');
+        }
+        throw error;
+      }
+      const chain = resolvedTargets.get(target) ?? new Set([target]);
+      resolvedTargets.set(target, chain);
+      const response = await fetch(input, init);
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('Location');
+        if (location) {
+          try {
+            const next = new URL(location, target).href;
+            chain.add(next); resolvedTargets.set(next, chain);
+          } catch { /* Existing adapters reject malformed redirect locations. */ }
+        }
+      }
+      return response;
+    };
     let result: { articles: DiscoveredArticle[]; items_seen: number; items_invalid: number };
     let rules: AuthorRule[] = [];
     if (sourceKey === 'air-quality-news' && routeKey === undefined) {
-      result = await discoverAqn(source);
+      result = await discoverAqn(source, guardedFetcher);
     } else if (sourceKey === 'the-guardian' && routeKey &&
         configuredGuardianRouteKeys(source).includes(routeKey as GuardianRouteKey)) {
       rules = await loadAuthorRules(db, sourceKey);
@@ -319,35 +370,47 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
           'guardian_profile_author_rule_disabled_or_missing');
         return;
       }
-      result = await discoverGuardian(source, routeKey);
+      result = await discoverGuardian(source, routeKey, guardedFetcher);
     } else if (sourceKey === 'communities-against-woodsmoke' &&
         routeKey === CAWS_INDEX_ROUTE_KEY &&
         configuredCawsIndex(source)) {
-      result = await discoverCaws(source);
+      result = await discoverCaws(source, guardedFetcher);
     } else if (sourceKey === 'dsawsp' && routeKey && configuredDsawspIndex(source)) {
-      result = await discoverDsawsp(source);
+      result = await discoverDsawsp(source, guardedFetcher);
     } else if (sourceKey === 'ncas' && routeKey &&
         configuredNcasRouteKeys(source).includes(routeKey as NcasRouteKey)) {
-      result = await discoverNcas(source, routeKey as NcasRouteKey);
+      result = await discoverNcas(source, routeKey as NcasRouteKey, guardedFetcher);
     } else if (routeKey && configuredPublisherRssRouteKeys(source).includes(routeKey)) {
-      result = await discoverPublisherRss(source, routeKey);
+      result = await discoverPublisherRss(source, routeKey, guardedFetcher);
     } else {
       await finishRun(db, runId, 'skipped', 0, 0, 0, 'unsupported_adapter_or_route');
       return;
     }
 
+    for (const article of result.articles) {
+      const resolved = resolvedTargets.get(article.canonical_url);
+      if (resolved) article.publisher_resolved_urls = [...resolved];
+    }
     seen = result.items_seen;
     invalid = result.items_invalid;
     if (seen > 0 && result.articles.length === 0) throw new ScanError('no_valid_feed_entries');
     const unique = new Map(result.articles.map(article => [article.canonical_url_hash, article]));
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
-    const acceptedArticles: DiscoveredArticle[] = [];
+    let acceptedArticles: DiscoveredArticle[] = [];
+    const blockedHosts = await blockedPublisherHosts(db,
+      result.articles.flatMap(article => [publisherHostname(article.canonical_url),
+        publisherHostname(article.original_url)]));
     const acceptedRules = new Map<string, AuthorRule[]>();
     // AQN and generic publisher routes remain at <=20 items; Guardian is <=10 per route.
     // At most article, possible-duplicate hold and provider-evidence statements per item remain
     // below D1's batch bound, and their stable order makes an earlier same-batch insert visible.
     for (const article of unique.values()) {
+      if (blockedHosts.has(publisherHostname(article.canonical_url)) ||
+          blockedHosts.has(publisherHostname(article.original_url))) {
+        filtered++;
+        continue;
+      }
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
@@ -364,6 +427,18 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       acceptedArticles.push(article);
       acceptedRules.set(article.canonical_url_hash, matchedRules);
     }
+    const metadataBlocked = await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
+    filtered += metadataBlocked.size;
+    acceptedArticles = acceptedArticles.filter(article => !metadataBlocked.has(article.canonical_url_hash));
+    const currentBlocked = await blockedPublisherHosts(db,
+      acceptedArticles.flatMap(article => [article.canonical_url, article.original_url,
+        ...(article.publisher_resolved_urls ?? [])].map(publisherHostname)));
+    acceptedArticles = acceptedArticles.filter(article => {
+      const blocked = [article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])]
+          .some(url => currentBlocked.has(publisherHostname(url)));
+      if (blocked) filtered++;
+      return !blocked;
+    });
     const acceptedHashes = acceptedArticles.map(article => article.canonical_url_hash);
     const existingHashes = acceptedHashes.length === 0 ? new Set<string>() : new Set(
       (await db.prepare(`SELECT canonical_url_hash FROM media_articles
@@ -371,7 +446,6 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         .bind(...acceptedHashes).all<{ canonical_url_hash: string }>()).results
         .map(row => row.canonical_url_hash),
     );
-    await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
     for (const article of acceptedArticles) {
       const matchedRules = acceptedRules.get(article.canonical_url_hash) ?? [];
       const publicationRule = publicationAuthorRule(matchedRules);
@@ -391,11 +465,16 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
         article, matchedRules, approvalObservationKey, now));
     }
+    const eligibleCountSql = (newIdentity: boolean): string => {
+      const rows = acceptedArticles.filter(article => existingHashes.has(article.canonical_url_hash) !== newIdentity);
+      return rows.length ? `(SELECT sum(eligible) FROM (${rows.map(article =>
+        `SELECT CASE WHEN ${publisherAdmissionSql([article.canonical_url, article.original_url,
+          ...(article.publisher_resolved_urls ?? [])])} THEN 1 ELSE 0 END AS eligible`)
+        .join(' UNION ALL ')}))` : '0';
+    };
     statements.push(db.prepare(`UPDATE media_discovery_runs SET status = 'succeeded',
-      finished_at = ?, updated_at = ?, items_seen = ?, items_inserted = ?, items_updated = ?,
+      finished_at = ?, updated_at = ?, items_seen = ?, items_inserted = ${eligibleCountSql(true)}, items_updated = ${eligibleCountSql(false)},
       items_invalid = ?, items_filtered = ? WHERE id = ?`).bind(now, now, seen,
-        acceptedHashes.filter(hash => !existingHashes.has(hash)).length,
-        acceptedHashes.filter(hash => existingHashes.has(hash)).length,
         invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
     await db.batch(statements);
@@ -403,6 +482,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     // derived-index refresh fails. Feed HTML is never written to durable storage.
     if (source.search_index_policy === 'feed_body_text') {
       for (const article of acceptedArticles) {
+        if (await findPublisherDomainBlock(db, publisherHostname(article.canonical_url))) continue;
         if (article.feed_body_html === null || article.feed_body_html === undefined) continue;
         try {
           const row = await db.prepare('SELECT id FROM media_articles WHERE canonical_url_hash = ?')
@@ -443,6 +523,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     }
   } catch (error) {
     const code = error instanceof ScanError ? error.code : 'source_scan_failed';
+    if (code === 'publisher_domain_blocked') {
+      await finishRun(db, runId, 'skipped', seen, invalid, filtered, code);
+      return;
+    }
     try { await finishRun(db, runId, 'failed', seen, invalid, filtered, code); }
     catch { console.error(JSON.stringify({ event: 'run_evidence_unavailable', run_id: runId })); }
     throw error;

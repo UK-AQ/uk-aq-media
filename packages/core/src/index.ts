@@ -13,3 +13,4 @@ export * from './search-terms';
 export { z } from 'zod';
 
 export { wakeNewsEmailOutbox } from './news-email';
+export * from './source-domain-blocks';

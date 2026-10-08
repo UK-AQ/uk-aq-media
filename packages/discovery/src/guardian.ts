@@ -179,7 +179,7 @@ export function scheduledGuardianRouteKeys(source: Source, rules: AuthorRule[]):
     guardianRouteKind(routeKey) !== 'author_profile' || guardianProfileRule(rules, routeKey) !== null);
 }
 
-async function configuredGuardianFeed(source: Source, routeKey: string): Promise<{
+async function configuredGuardianFeed(source: Source, routeKey: string, fetcher: typeof fetch = fetch): Promise<{
   xml: string;
   max_items: number;
 }> {
@@ -190,7 +190,7 @@ async function configuredGuardianFeed(source: Source, routeKey: string): Promise
     throw new ScanError('guardian_fetch_url_mismatch');
   }
   return {
-    xml: await readRssFeed(fetchUrl, 'guardian'),
+    xml: await readRssFeed(fetchUrl, 'guardian', undefined, fetcher),
     max_items: route.max_items,
   };
 }
@@ -334,12 +334,12 @@ export async function discoverGuardianPreviewForArticle(source: Source, routeKey
     canonicalUrl, currentImageUrl);
 }
 
-export async function discoverGuardian(source: Source, routeKey: string): Promise<{
+export async function discoverGuardian(source: Source, routeKey: string, fetcher: typeof fetch = fetch): Promise<{
   articles: DiscoveredArticle[];
   items_seen: number;
   items_invalid: number;
 }> {
-  const feed = await configuredGuardianFeed(source, routeKey);
+  const feed = await configuredGuardianFeed(source, routeKey, fetcher);
   return parseGuardianFeed(feed.xml, source, feed.max_items);
 }
 

@@ -27,6 +27,14 @@ export function publisherDomains(source: PublisherDomainInput): readonly string[
   return [canonicalDomain, ...aliases];
 }
 
+// Trusted SQL expressions only. Keep dashboard domain decisions aligned with
+// the same existing alias catalogue used for article ownership validation.
+export function publisherDomainsSql(sourceKey: string, canonicalDomain: string): string {
+  return `(CASE ${sourceKey} ${Object.entries(sourceDomainAliases).map(([key, aliases]) =>
+    `WHEN '${key}' THEN json_array(${canonicalDomain}, ${aliases.map(domain => `'${domain}'`).join(', ')})`)
+    .join(' ')} ELSE json_array(${canonicalDomain}) END)`;
+}
+
 function matchedPublisherDomain(hostname: string, source: PublisherDomainInput): string | null {
   const candidate = hostname.toLowerCase().replace(/^www\./, '');
   return publisherDomains(source).find(domain =>

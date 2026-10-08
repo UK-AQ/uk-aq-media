@@ -1,5 +1,6 @@
 import {
   SourceSchema, canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl,
+  blockedPublisherHosts, publisherAdmissionSql,
   reconcileHomepageLatestSix, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import {
@@ -173,13 +174,14 @@ Promise<PreparedCandidate> {
       canonical_url, categories: [] }).relevant };
 }
 
-function insertDynamicSource(db: D1Database, source: Source, now: string): D1PreparedStatement {
+function insertDynamicSource(db: D1Database, source: Source, candidate: PreparedCandidate, now: string): D1PreparedStatement {
   return db.prepare(`INSERT OR IGNORE INTO media_sources
     (source_key, name, canonical_domain, source_type, enabled, publication_policy,
       review_level, priority, discovery_method, discovery_config_json,
       content_fetch_policy, ai_content_policy, image_policy, search_index_policy,
       created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE ${publisherAdmissionSql([candidate.canonical_url, candidate.input.url])}`).bind(
       source.source_key, source.name, source.canonical_domain, source.source_type,
       Number(source.enabled), source.publication_policy, source.review_level, source.priority,
       source.discovery_method, JSON.stringify(source.discovery_config),
@@ -256,7 +258,7 @@ function discoveredArticle(candidate: PreparedCandidate): DiscoveredArticle {
 }
 
 export async function ingestGdeltChunk(db: D1Database, input: unknown,
-  now = new Date()): Promise<{ ok: true; replayed: boolean; candidate_count: number }> {
+  now = new Date()): Promise<{ ok: true; replayed: boolean; candidate_count: number; blocked_skipped: number }> {
   const data = GdeltChunkSchema.parse(input);
   const run = await loadRun(db, data.run_id);
   validateFileInRun(run, data.file_stamp);
@@ -272,12 +274,15 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
   if (existingChunk) {
     if (existingChunk.payload_hash !== payloadHash) throw new Error('gdelt_chunk_payload_changed');
     if (existingChunk.uk_promoted > 0) await reconcileHomepageLatestSix(db);
-    return { ok: true, replayed: true, candidate_count: data.candidates.length };
+    return { ok: true, replayed: true, candidate_count: data.candidates.length,
+      blocked_skipped: await chunkBlockedCount(db, data.file_stamp, data.chunk_index) };
   }
 
   const configuration = await loadPublisherConfiguration(db, data.candidates);
   const prepared = await Promise.all(data.candidates.map(candidate =>
     prepareCandidate(candidate, configuration.sources, configuration.scopes)));
+  const blockedHosts = await blockedPublisherHosts(db, prepared.map(candidate => candidate.publisher_host));
+  const isBlocked = (candidate: PreparedCandidate): boolean => blockedHosts.has(candidate.publisher_host);
   const placeholders = prepared.map(() => '?').join(', ');
   const hashes = prepared.map(candidate => candidate.canonical_url_hash);
   const [existingCandidates, existingArticles] = await Promise.all([
@@ -296,21 +301,22 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
   let nonUk = 0;
   let unknown = 0;
   let promoted = 0;
+  const promotionCandidates: PreparedCandidate[] = [];
   let relevanceFiltered = 0;
   for (const candidate of prepared) {
     if (candidate.publisher_scope === 'uk') uk++;
     else if (candidate.publisher_scope === 'non_uk') nonUk++;
     else unknown++;
     let source = candidate.source;
-    if (candidate.publisher_scope === 'uk' && !source) {
+    if (candidate.publisher_scope === 'uk' && !source && !isBlocked(candidate)) {
       source = await dynamicPublisherSource(candidate.publisher_domain);
-      statements.push(insertDynamicSource(db, source, timestamp));
+      statements.push(insertDynamicSource(db, source, candidate, timestamp));
     }
     statements.push(persistCandidate(db, candidate, data.file_stamp, timestamp));
     for (const family of candidate.input.families) {
       statements.push(persistCandidateFamily(db, candidate, family, data.file_stamp, timestamp));
     }
-    if (candidate.publisher_scope !== 'uk') continue;
+    if (isBlocked(candidate) || candidate.publisher_scope !== 'uk') continue;
     if (!candidate.relevant) { relevanceFiltered++; continue; }
     if (!source) throw new Error('gdelt_uk_source_unavailable');
     const article = discoveredArticle(candidate);
@@ -326,19 +332,31 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
     }
     statements.push(db.prepare(`UPDATE media_gdelt_candidates SET promoted_article_id =
       (SELECT id FROM media_articles WHERE canonical_url_hash = ?), updated_at = ?
-      WHERE canonical_url_hash = ?`).bind(candidate.canonical_url_hash, timestamp,
+      WHERE canonical_url_hash = ?
+        AND ${publisherAdmissionSql([candidate.canonical_url, candidate.input.url])}`).bind(candidate.canonical_url_hash, timestamp,
         candidate.canonical_url_hash));
-    if (!existingCandidateMap.get(candidate.canonical_url_hash)) promoted++;
+    if (!existingCandidateMap.get(candidate.canonical_url_hash)) {
+      promoted++; promotionCandidates.push(candidate);
+    }
   }
+  const blockedCountSql = prepared.length ? prepared.map(candidate =>
+    `SELECT CASE WHEN ${isBlocked(candidate) ? "0" : publisherAdmissionSql([candidate.canonical_url, candidate.input.url])} THEN 0 ELSE 1 END AS blocked`).join(' UNION ALL ')
+    : 'SELECT 0 AS blocked';
+  statements.push(db.prepare(`INSERT INTO media_gdelt_domain_block_skips
+    (file_stamp, chunk_index, blocked_skipped)
+    SELECT ?, ?, sum(blocked) FROM (${blockedCountSql})`)
+    .bind(data.file_stamp, data.chunk_index));
+  const promotedSql = promotionCandidates.length ? `(SELECT sum(promoted) FROM (${promotionCandidates.map(candidate =>
+    `SELECT CASE WHEN ${publisherAdmissionSql([candidate.canonical_url, candidate.input.url])} THEN 1 ELSE 0 END AS promoted`).join(' UNION ALL ')}))` : '0';
   statements.push(db.prepare(`INSERT INTO media_gdelt_file_chunks
     (file_stamp, chunk_index, payload_hash, candidate_count, candidates_inserted,
       candidates_updated, candidates_uk, candidates_non_uk, candidates_unknown,
       uk_promoted, uk_relevance_filtered, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${promotedSql}, ?, ?)`)
     .bind(data.file_stamp, data.chunk_index, payloadHash, prepared.length,
       prepared.filter(candidate => !existingCandidateMap.has(candidate.canonical_url_hash)).length,
       prepared.filter(candidate => existingCandidateMap.has(candidate.canonical_url_hash)).length,
-      uk, nonUk, unknown, promoted, relevanceFiltered, timestamp));
+      uk, nonUk, unknown, relevanceFiltered, timestamp));
   try { await db.batch(statements); }
   catch (error) {
     const replay = await db.prepare(`SELECT payload_hash, uk_promoted FROM media_gdelt_file_chunks
@@ -346,14 +364,23 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
       .first<{ payload_hash: string; uk_promoted: number }>();
     if (replay?.payload_hash === payloadHash) {
       if (replay.uk_promoted > 0) await reconcileHomepageLatestSix(db);
-      return { ok: true, replayed: true, candidate_count: prepared.length };
+      return { ok: true, replayed: true, candidate_count: prepared.length,
+        blocked_skipped: await chunkBlockedCount(db, data.file_stamp, data.chunk_index) };
     }
     throw error;
   }
   if (promoted > 0 || prepared.some(candidate => existingArticleHashes.has(candidate.canonical_url_hash))) {
     await reconcileHomepageLatestSix(db);
   }
-  return { ok: true, replayed: false, candidate_count: prepared.length };
+  return { ok: true, replayed: false, candidate_count: prepared.length,
+    blocked_skipped: await chunkBlockedCount(db, data.file_stamp, data.chunk_index) };
+}
+
+async function chunkBlockedCount(db: D1Database, stamp: string, chunk: number): Promise<number> {
+  const row = await db.prepare(`SELECT blocked_skipped FROM media_gdelt_domain_block_skips
+    WHERE file_stamp = ? AND chunk_index = ?`).bind(stamp, chunk)
+    .first<{ blocked_skipped: number }>();
+  return row?.blocked_skipped ?? 0;
 }
 
 export async function completeGdeltFile(db: D1Database, input: unknown,

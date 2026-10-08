@@ -18,6 +18,7 @@ export interface DiscoveredArticle {
   display_title: string | null;
   display_title_origin: 'publisher' | null;
   preview_metadata_checked_at: string | null;
+  publisher_resolved_urls?: string[];
   feed_body_html?: string | null;
 }
 

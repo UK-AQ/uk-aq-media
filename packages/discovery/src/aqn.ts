@@ -7,7 +7,7 @@ export { ScanError } from './rss';
 
 export const AQN_FEED = 'https://airqualitynews.com/feed/';
 
-export async function discoverAqn(source: Source): Promise<{
+export async function discoverAqn(source: Source, fetcher: typeof fetch = fetch): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   if (source.source_key !== 'air-quality-news' || source.discovery_method !== 'rss' ||
@@ -16,7 +16,7 @@ export async function discoverAqn(source: Source): Promise<{
   }
   // This adapter entry point fetches only the configured feed. The source-scan
   // persistence layer separately requests missing, policy-permitted head metadata.
-  return parseAqnFeed(await readRssFeed(AQN_FEED, 'aqn'), source);
+  return parseAqnFeed(await readRssFeed(AQN_FEED, 'aqn', undefined, fetcher), source);
 }
 
 export async function parseAqnFeed(xml: string, source: Source): Promise<{

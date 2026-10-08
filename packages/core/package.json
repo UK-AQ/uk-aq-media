@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "zod": "^4.5.4"
+    "zod": "^4.5.4",
+    "tldts": "7.4.12"
   }
 }

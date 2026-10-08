@@ -35,10 +35,10 @@ function logUnexpectedFeedError(adapterKey: string, phase: FeedFetchPhase, error
 }
 
 export async function readRssFeed(url: string, adapterKey: string,
-  allowedManualRedirectUrl?: string): Promise<string> {
+  allowedManualRedirectUrl?: string, fetcher: typeof fetch = fetch): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FEED_TIMEOUT_MS);
-  const request = (requestUrl: string): Promise<Response> => fetch(requestUrl, {
+  const request = (requestUrl: string): Promise<Response> => fetcher(requestUrl, {
     redirect: 'manual', signal: controller.signal,
     headers: {
       Accept: 'application/rss+xml, application/xml, text/xml',

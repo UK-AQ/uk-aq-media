@@ -219,7 +219,8 @@ async function cancelResponseBody(response: Response): Promise<void> {
 }
 
 export async function fetchArticleHeadMetadata(canonicalUrl: string,
-  source: Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>):
+  source: Pick<Source, 'source_key' | 'canonical_domain' | 'image_policy'>,
+  requireAllowedUrl?: (url: string) => Promise<void>):
   Promise<ArticleHeadMetadata & { previewUrl: string | null; previewError: string | null;
     checkedAt: string }> {
   if (source.image_policy !== 'remote_preview') {
@@ -235,6 +236,7 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
     let redirectCount = 0;
     let response: Response;
     for (;;) {
+      if (requireAllowedUrl) await requireAllowedUrl(requestUrl);
       try {
         response = await fetch(requestUrl, {
           method: 'GET', redirect: 'manual', signal: controller.signal,
@@ -304,9 +306,13 @@ export async function fetchArticleHeadMetadata(canonicalUrl: string,
 }
 
 export async function discoverArticleHeadPreviewMetadata(article: DiscoveredArticle,
-  source: Source): Promise<Pick<DiscoveredArticle, 'preview_url' | 'display_title' |
-    'display_title_origin' | 'preview_metadata_checked_at'>> {
-  const metadata = await fetchArticleHeadMetadata(article.canonical_url, source);
+  source: Source, requireAllowedUrl?: (url: string) => Promise<void>): Promise<Pick<DiscoveredArticle, 'preview_url' | 'display_title' |
+    'display_title_origin' | 'preview_metadata_checked_at' | 'publisher_resolved_urls'>> {
+  const resolvedUrls: string[] = [];
+  const metadata = await fetchArticleHeadMetadata(article.canonical_url, source, async url => {
+    if (requireAllowedUrl) await requireAllowedUrl(url);
+    resolvedUrls.push(url);
+  });
   const displayTitle = compactPublisherTitle(article.title,
     [metadata.ogTitle, metadata.twitterTitle]);
   const previewUrl = metadata.previewUrl;
@@ -315,5 +321,6 @@ export async function discoverArticleHeadPreviewMetadata(article: DiscoveredArti
     display_title: displayTitle,
     display_title_origin: displayTitle ? 'publisher' : null,
     preview_metadata_checked_at: metadata.checkedAt,
+    publisher_resolved_urls: resolvedUrls,
   };
 }
