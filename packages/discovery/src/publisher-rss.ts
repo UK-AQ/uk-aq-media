@@ -98,14 +98,14 @@ export function configuredPublisherRssRouteKeys(source: Source): string[] {
   catch { return []; }
 }
 
-export async function discoverPublisherRss(source: Source, routeKey: string): Promise<{
+export async function discoverPublisherRss(source: Source, routeKey: string, fetcher: typeof fetch = fetch): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   const route = configuredRoute(source, routeKey);
   const expected = expectedRoute(source.source_key, routeKey)!;
   const allowedRedirect = 'allowed_manual_redirect_url' in expected
     ? expected.allowed_manual_redirect_url : undefined;
-  return parsePublisherRssFeed(await readRssFeed(route.url, 'publisher_rss', allowedRedirect),
+  return parsePublisherRssFeed(await readRssFeed(route.url, 'publisher_rss', allowedRedirect, fetcher),
     source, routeKey);
 }
 

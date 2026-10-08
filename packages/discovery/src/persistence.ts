@@ -1,5 +1,5 @@
 import {
-  initialEditorialState, normaliseArticleAuthorForStorage,
+  initialEditorialState, normaliseArticleAuthorForStorage, publisherAdmissionSql,
   type AuthorRule, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 
@@ -167,6 +167,7 @@ export function persistArticle(db: D1Database, source: Source, article: Discover
       CASE WHEN EXISTS (SELECT 1 FROM possible_duplicate) THEN NULL ELSE ? END,
       CASE WHEN EXISTS (SELECT 1 FROM possible_duplicate) THEN NULL ELSE ? END,
       ?, ?
+    WHERE ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])])}
     ${ARTICLE_CONFLICT_UPDATE_SQL}
     RETURNING id, revision`).bind(Number(possibleDuplicateCheck),
       ...possibleDuplicateBindings(source, article, storedAuthor),
@@ -190,7 +191,8 @@ export function persistPossibleDuplicateHold(db: D1Database, source: Source,
     SELECT held.id, candidate.id, ?, ?
     FROM media_articles held JOIN media_articles candidate
       ON ${POSSIBLE_DUPLICATE_CANDIDATE_WHERE_SQL}
-    WHERE held.canonical_url_hash = ? AND held.created_at = ?
+    WHERE ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])])}
+      AND held.canonical_url_hash = ? AND held.created_at = ?
       AND held.status = 'pending' AND held.approval_method IS NULL
       AND held.approval_author_rule_key IS NULL AND held.approved_at IS NULL
     ORDER BY candidate.id LIMIT 1
@@ -208,13 +210,15 @@ export function persistDiscoveryEvidence(db: D1Database, source: Source, provide
     (article_id, source_key, provider_key, route_key, matched_author_keys_json,
       always_include_applied, author_auto_approval_applied, first_seen_at, last_seen_at,
       observation_count)
-    VALUES ((SELECT id FROM media_articles WHERE canonical_url_hash = ?), ?, ?, ?, ?, ?,
+    SELECT (SELECT id FROM media_articles WHERE canonical_url_hash = ?), ?, ?, ?, ?, ?,
       CASE WHEN ? IS NOT NULL AND EXISTS (
         SELECT 1 FROM media_articles
         WHERE canonical_url_hash = ? AND mutation_key = ?
           AND approval_method = 'trusted_author_auto'
           AND approval_author_rule_key = ?
-      ) THEN 1 ELSE 0 END, ?, ?, 1)
+      ) THEN 1 ELSE 0 END, ?, ?, 1
+    WHERE ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])])}
+      AND EXISTS (SELECT 1 FROM media_articles WHERE canonical_url_hash = ?)
     ON CONFLICT(article_id, provider_key, route_key) DO UPDATE SET
       matched_author_keys_json = (
         SELECT json_group_array(author_key) FROM (
@@ -235,5 +239,5 @@ export function persistDiscoveryEvidence(db: D1Database, source: Source, provide
       JSON.stringify(ruleKeys),
       Number(matchedRules.some(rule => rule.inclusion_policy === 'always_include')),
       approvalObservationKey, article.canonical_url_hash, approvalObservationKey,
-      selectedAutoRule?.author_key ?? null, now, now);
+      selectedAutoRule?.author_key ?? null, now, now, article.canonical_url_hash);
 }

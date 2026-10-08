@@ -1267,7 +1267,7 @@ export default {
       }
       const editorialResponse = await handleEditorialDashboard(request, env, url);
       if (editorialResponse) {
-        return ['PUT', 'DELETE'].includes(request.method)
+        return !url.pathname.startsWith('/admin/source-domain-blocks') && ['PUT', 'DELETE'].includes(request.method)
           ? afterImageMutation(editorialResponse, env) : editorialResponse;
       }
       if (url.pathname === '/admin/articles/bulk/approve') {
@@ -1354,7 +1354,10 @@ export default {
       }
       if (url.pathname === '/admin/runs/gdelt') {
         const { results } = await env.MEDIA_DB.prepare(
-          'SELECT * FROM media_gdelt_runs ORDER BY started_at DESC, id DESC LIMIT ?',
+          `SELECT r.*, (SELECT coalesce(sum(sk.blocked_skipped), 0)
+            FROM media_gdelt_domain_block_skips sk JOIN media_gdelt_files f
+              ON f.file_stamp = sk.file_stamp WHERE f.run_id = r.id) AS blocked_skipped
+            FROM media_gdelt_runs r ORDER BY r.started_at DESC, r.id DESC LIMIT ?`,
         ).bind(limit).all();
         return json({ runs: results });
       }
@@ -1370,7 +1373,8 @@ export default {
       }
       return httpFailure(error);
     } finally {
-      if (authenticated && request.method === 'POST' && ctx) {
+      if (authenticated && request.method === 'POST' && ctx &&
+          !new URL(request.url).pathname.startsWith('/admin/source-domain-blocks')) {
         ctx.waitUntil(wakeNewsEmailOutbox(env));
       }
     }

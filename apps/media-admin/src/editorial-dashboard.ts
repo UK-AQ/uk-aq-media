@@ -1,6 +1,7 @@
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, ImagePolicy,
-  PublicationPolicy,
+  PublicationPolicy, domainBlockedSql, domainBoundarySql, normalisedHostnameSql,
+  publisherAdmissionSql, requirePublisherDomainAllowed,
   BLUESKY_IN_PROGRESS_SQL, blueskyPublicationStatusLabel,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
   hasPermittedPresentationImage, loadSource, MAX_LOCAL_IMAGE_BYTES,
@@ -15,6 +16,9 @@ import {
   configuredCawsIndex, configuredDsawspIndex, configuredNcasRouteKeys,
   configuredPublisherRssRouteKeys, discoverPublisherRss, fetchArticleHeadMetadata,
 } from '@uk-aq-media/discovery';
+
+import { mutateSourceDomainBlock, previewInitialDomainCleanup, executeInitialDomainCleanup }
+  from './source-domain-blocks';
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_IMAGE_BYTES = MAX_LOCAL_IMAGE_BYTES;
@@ -311,11 +315,13 @@ function safeHostname(raw: string): string {
 }
 
 async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
-  'source_key' | 'canonical_domain' | 'content_fetch_policy' | 'image_policy'>): Promise<HeadMetadata> {
+  'source_key' | 'canonical_domain' | 'content_fetch_policy' | 'image_policy'>,
+  requireAllowedUrl?: (url: string) => Promise<void>): Promise<HeadMetadata> {
   let metadata: Awaited<ReturnType<typeof fetchArticleHeadMetadata>>;
   try {
-    metadata = await fetchArticleHeadMetadata(canonicalUrl, source);
+    metadata = await fetchArticleHeadMetadata(canonicalUrl, source, requireAllowedUrl);
   } catch (error) {
+    if (error instanceof HttpError) throw error;
     throw articleHeadHttpError(error);
   }
   const originalTitle = cleanText(metadata.ogTitle ?? metadata.twitterTitle ?? metadata.htmlTitle, 1000);
@@ -896,8 +902,31 @@ async function listRuns(db: D1Database, search: URLSearchParams): Promise<Respon
       ? encodeRunCursor(String(last.started_at), String(last.id)) : null } });
 }
 
-async function listSources(db: D1Database): Promise<Response> {
+async function listSources(db: D1Database, search: URLSearchParams): Promise<Response> {
+  const visibility = search.get('visibility') ?? 'non_blocked';
+  if (!['non_blocked', 'blocked', 'all'].includes(visibility)) {
+    throw new HttpError(400, 'invalid_source_visibility');
+  }
+  const limit = Number(search.get('limit') ?? 100);
+  const offset = Number(search.get('offset') ?? 0);
+  const domainOffset = Number(search.get('domain_offset') ?? 0);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+      !Number.isSafeInteger(offset) || offset < 0 ||
+      !Number.isSafeInteger(domainOffset) || domainOffset < 0) {
+    throw new HttpError(400, 'invalid_source_pagination');
+  }
+  const host = normalisedHostnameSql('s.canonical_domain');
+  const blocked = domainBlockedSql(host);
+  const visibilitySql = visibility === 'all' ? '1' : visibility === 'blocked' ? blocked : `NOT ${blocked}`;
+  const blockField = (field: string): string => `(SELECT domain_block.${field}
+    FROM media_source_domain_blocks domain_block WHERE domain_block.blocked = 1
+      AND ${domainBoundarySql(host, 'domain_block.domain')}
+    ORDER BY length(domain_block.domain) DESC LIMIT 1)`;
   const { results } = await db.prepare(`SELECT s.*,
+      ${blocked} AS domain_blocked,
+      ${blockField('domain')} AS domain_block_domain,
+      ${blockField('reason')} AS domain_block_reason,
+      ${blockField('updated_at')} AS domain_block_updated_at,
       (SELECT r.status FROM media_discovery_runs r WHERE r.source_key = s.source_key
         ORDER BY r.started_at DESC, r.id DESC LIMIT 1) AS recent_run_status,
       (SELECT r.started_at FROM media_discovery_runs r WHERE r.source_key = s.source_key
@@ -910,13 +939,26 @@ async function listSources(db: D1Database): Promise<Response> {
         WHERE e.entity_type = 'source' AND e.entity_key = s.source_key
           AND json_extract(e.after_json, '$.operation') = 'image_policy'
         ORDER BY e.id DESC LIMIT 1) AS local_copy_permission_recorded_at
-    FROM media_sources s WHERE s.retired_at IS NULL
-    ORDER BY s.name, s.source_key LIMIT 100`).all<Record<string, unknown>>();
+    FROM media_sources s WHERE s.retired_at IS NULL AND ${visibilitySql}
+    ORDER BY s.name, s.source_key LIMIT ? OFFSET ?`).bind(limit + 1, offset)
+    .all<Record<string, unknown>>();
+  const domains = await db.prepare(`SELECT b.* FROM media_source_domain_blocks b
+    WHERE ${visibility === 'all' ? '1' : visibility === 'blocked' ? 'b.blocked = 1' : 'b.blocked = 0'}
+      AND NOT EXISTS (SELECT 1 FROM media_sources s WHERE s.retired_at IS NULL
+        AND ${domainBoundarySql(normalisedHostnameSql('s.canonical_domain'), 'b.domain')})
+    ORDER BY b.domain LIMIT ? OFFSET ?`).bind(limit + 1, domainOffset)
+    .all<Record<string, unknown>>();
   const rules = await db.prepare(`SELECT ar.* FROM media_author_rules ar
     JOIN media_sources s ON s.source_key = ar.source_key WHERE s.retired_at IS NULL
     ORDER BY ar.source_key, ar.display_name, ar.author_key LIMIT 250`)
     .all<Record<string, unknown>>();
-  return json({ sources: results.map(presentSource), author_rules: rules.results.map(rule => ({
+  return json({ visibility,
+    sources: results.slice(0, limit).map(row => presentSource({ ...row, domain_blocked: row.domain_blocked === 1 })),
+    domain_blocks: domains.results.slice(0, limit).map(row => ({ ...row, blocked: row.blocked === 1 })),
+    next_offset: offset + Math.min(results.length, limit),
+    next_domain_offset: domainOffset + Math.min(domains.results.length, limit),
+    has_more: results.length > limit || domains.results.length > limit,
+    author_rules: rules.results.map(rule => ({
     ...rule,
     byline_aliases: JSON.parse(String(rule.byline_aliases_json)),
   })) });
@@ -929,12 +971,17 @@ async function lookupArticle(request: Request, db: D1Database): Promise<Response
   const existing = await db.prepare('SELECT id FROM media_articles WHERE canonical_url_hash = ?')
     .bind(identity.hash).first<{ id: number }>();
   if (existing) return articleDetail(db, existing.id);
+  await requirePublisherDomainAllowed(db, identity.canonicalUrl);
   const sourceKey = identity.source?.source_key ?? `manual-${(await canonicalUrlHash(identity.domain)).slice(0, 12)}`;
   const source = identity.source ?? conservativeManualSource(identity.domain, identity.domain, sourceKey);
   let metadata: HeadMetadata | null = null;
   let metadataError: string | null = null;
-  try { metadata = await fetchHeadMetadata(identity.canonicalUrl, source); }
-  catch (error) { metadataError = error instanceof HttpError ? error.message : 'metadata_unavailable'; }
+  try { metadata = await fetchHeadMetadata(identity.canonicalUrl, source,
+    rawUrl => requirePublisherDomainAllowed(db, rawUrl)); }
+  catch (error) {
+    if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) throw error;
+    metadataError = error instanceof HttpError ? error.message : 'metadata_unavailable';
+  }
   return json({ existing: false, canonical_url: identity.canonicalUrl,
     source: { source_key: source.source_key, name: source.name, canonical_domain: source.canonical_domain,
       known: identity.source !== null, will_create_disabled_definition: identity.source === null },
@@ -949,6 +996,7 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
   const existing = await db.prepare('SELECT id FROM media_articles WHERE canonical_url_hash = ?')
     .bind(identity.hash).first<{ id: number }>();
   if (existing) return articleDetail(db, existing.id);
+  await requirePublisherDomainAllowed(db, identity.canonicalUrl);
   const sourceKey = identity.source?.source_key ?? `manual-${(await canonicalUrlHash(identity.domain)).slice(0, 12)}`;
   const source = identity.source ?? conservativeManualSource(identity.domain, parsed.data.publisher, sourceKey);
   const preview = parsed.data.preview_image_url
@@ -968,9 +1016,10 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
        review_level, priority, discovery_method, discovery_config_json,
        content_fetch_policy, ai_content_policy, image_policy, search_index_policy,
        created_at, updated_at)
-      VALUES (?, ?, ?, 'publisher', 0, 'manual', 'enhanced', 50, 'deferred',
+      SELECT ?, ?, ?, 'publisher', 0, 'manual', 'enhanced', 50, 'deferred',
         '{"retain_excerpt":false}', 'article_head_allowed', 'disabled', 'remote_preview',
-        'metadata_only', ?, ?)`)
+        'metadata_only', ?, ?
+      WHERE ${publisherAdmissionSql([identity.canonicalUrl, parsed.data.url])}`)
       .bind(sourceKey, parsed.data.publisher, identity.domain, now, now));
   }
   const approved = parsed.data.initial_status === 'approved';
@@ -982,7 +1031,8 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
      published_at, discovered_at, last_seen_at, status, review_level, approval_method,
      approval_author_rule_key, og_image_url, image_policy, approved_at, revision,
      mutation_key, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, ?, ?, ?)`)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, ?, ?, ?
+    WHERE ${publisherAdmissionSql([identity.canonicalUrl, parsed.data.url])}`)
     .bind(sourceKey, identity.canonicalUrl, identity.hash, parsed.data.url,
       cleanText(parsed.data.title, 1000), publisher, author,
       parsed.data.published_at ?? null, now, now,
@@ -997,7 +1047,10 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
   }
   const created = await db.prepare('SELECT id FROM media_articles WHERE canonical_url_hash = ?')
     .bind(identity.hash).first<{ id: number }>();
-  if (!created) throw new HttpError(500, 'manual_article_create_failed');
+  if (!created) {
+    await requirePublisherDomainAllowed(db, identity.canonicalUrl);
+    throw new HttpError(500, 'manual_article_create_failed');
+  }
   await reconcileHomepageLatestSix(db);
   return articleDetail(db, created.id);
 }
@@ -1603,8 +1656,18 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
     return listRuns(env.MEDIA_DB, url.searchParams);
   }
+  if (url.pathname === '/admin/source-domain-blocks') {
+    if (request.method !== 'PUT') return json({ error: 'method_not_allowed' }, 405);
+    return mutateSourceDomainBlock(env.MEDIA_DB, requireIdempotencyKey(request), await readJson(request));
+  }
+  if (url.pathname === '/admin/source-domain-blocks/initial-cleanup') {
+    if (request.method === 'GET') return previewInitialDomainCleanup(env.MEDIA_DB);
+    if (request.method === 'POST') return executeInitialDomainCleanup(env.MEDIA_DB,
+      requireIdempotencyKey(request), await readJson(request));
+    return json({ error: 'method_not_allowed' }, 405);
+  }
   if (url.pathname === '/admin/sources') {
-    if (request.method === 'GET') return listSources(env.MEDIA_DB);
+    if (request.method === 'GET') return listSources(env.MEDIA_DB, url.searchParams);
     if (request.method === 'POST') return addSource(request, env.MEDIA_DB);
     return json({ error: 'method_not_allowed' }, 405);
   }
