@@ -27,10 +27,8 @@ const woodBurning = [
 
 // Research-news headlines often describe measured sources without saying "air quality".
 // Keep ambiguous scientific terms context-gated rather than accepting all biomass research.
-const researchCombustion = [
-  /\bwood smoke\b/, /\b(?:biomass|wood|solid fuel) smoke\b/,
-  /\b(?:biomass|residential wood|domestic wood|household solid fuel) (?:burning|combustion)\b/,
-];
+const researchSmoke = /\b(?:wood|biomass|solid fuel) smoke\b/;
+const researchCombustion = /\b(?:biomass|residential wood|domestic wood|household solid fuel) (?:burning|combustion)\b/;
 
 const researchSourceAttribution = [
   /\bsource apportionment\b/, /\b(?:air )?pollution fingerprint\b/,
@@ -54,7 +52,7 @@ export const mediaDeterministicRelevanceFilter: DeterministicRelevanceFilter = {
     const value = searchableText(input);
     if (matchesAny(value, airPollution)) return { relevant: true, reason: 'air_pollution_or_quality' };
     if (matchesAny(value, woodBurning)) return { relevant: true, reason: 'wood_burning' };
-    if (matchesAny(value, researchCombustion)) {
+    if (researchSmoke.test(value) || researchCombustion.test(value) && airContext.test(value)) {
       return { relevant: true, reason: 'research_smoke_or_biomass' };
     }
     if (matchesAny(value, researchSourceAttribution) && airContext.test(value)) {
