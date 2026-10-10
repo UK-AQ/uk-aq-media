@@ -320,6 +320,96 @@
     "search_index_policy": "metadata_only"
   },
   {
+    "source_key": "research-news-bioengineer",
+    "name": "Bioengineer.org",
+    "canonical_domain": "bioengineer.org",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "bioengineer-latest",
+          "url": "https://bioengineer.org/feed/",
+          "max_items": 20
+        },
+        {
+          "route_key": "bioengineer-air-pollution",
+          "url": "https://bioengineer.org/?s=air+pollution&feed=rss2",
+          "max_items": 20
+        },
+        {
+          "route_key": "bioengineer-wood-smoke",
+          "url": "https://bioengineer.org/?s=wood+smoke&feed=rss2",
+          "max_items": 20
+        },
+        {
+          "route_key": "bioengineer-particulate-matter",
+          "url": "https://bioengineer.org/?s=particulate+matter&feed=rss2",
+          "max_items": 20
+        },
+        {
+          "route_key": "bioengineer-source-apportionment",
+          "url": "https://bioengineer.org/?s=source+apportionment&feed=rss2",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
+    "source_key": "research-news-scienmag",
+    "name": "Scienmag",
+    "canonical_domain": "scienmag.com",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "scienmag-latest",
+          "url": "https://scienmag.com/feed/",
+          "max_items": 20
+        },
+        {
+          "route_key": "scienmag-air-pollution",
+          "url": "https://scienmag.com/?s=air+pollution&feed=rss2",
+          "max_items": 20
+        },
+        {
+          "route_key": "scienmag-wood-smoke",
+          "url": "https://scienmag.com/?s=wood+smoke&feed=rss2",
+          "max_items": 20
+        },
+        {
+          "route_key": "scienmag-particulate-matter",
+          "url": "https://scienmag.com/?s=particulate+matter&feed=rss2",
+          "max_items": 20
+        },
+        {
+          "route_key": "scienmag-source-apportionment",
+          "url": "https://scienmag.com/?s=source+apportionment&feed=rss2",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
     "source_key": "dsawsp",
     "name": "DSAWSP",
     "canonical_domain": "dsawsp.org",
