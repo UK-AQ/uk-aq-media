@@ -55,7 +55,7 @@ const belgradeTitle = 'Wood Smoke Tops the List as Belgrade\'s Air Pollution Fin
 for (const [key, domain, routeKey] of [
   ['research-news-bioengineer', 'bioengineer.org', 'bioengineer-wood-smoke'],
   ['research-news-scienmag', 'scienmag.com', 'scienmag-wood-smoke'],
-]) {
+] as const) {
   const candidate = publisherSources.find(source => source.source_key === key)!;
   assert.equal(candidate.publication_policy, 'manual');
   assert.equal(candidate.ai_content_policy, 'disabled');
