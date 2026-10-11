@@ -6,6 +6,8 @@ import {
   MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES, parseRssItems, readRssFeed, ScanError,
 } from './rss';
 
+// Bioengineer.org and Scienmag are intentionally absent from this allow-list; migration 0046
+// retires their former sources and blocks both publisher domains from News admission.
 export const PUBLISHER_RSS_ROUTES = [
   { source_key: 'bbc-news', route_key: 'bbc-news-top',
     url: 'https://feeds.bbci.co.uk/news/rss.xml', canonical_domain: 'bbc.co.uk', max_items: 20 },
