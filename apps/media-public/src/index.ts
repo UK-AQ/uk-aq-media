@@ -1,6 +1,7 @@
-import { boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, meaningfulSearchTerms, MAX_SEARCH_QUERY_CHARACTERS, reconcileHomepageLatestSix, remotePreviewUrl, sourcePresentationPlaceholderPath,
+import { allTopicsPredicate, selectedTopicSlugs, boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, meaningfulSearchTerms, MAX_SEARCH_QUERY_CHARACTERS, reconcileHomepageLatestSix, remotePreviewUrl, sourcePresentationPlaceholderPath,
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
+import { handleResearchPublic } from './research';
 
 type PreviewSelection = {
   id: number;
@@ -12,6 +13,7 @@ type PreviewSelection = {
   local_image_content_sha256?: string | null;
 };
 type FeedRow = PublicArticle & PreviewSelection & { feed_sort_at: string; topics_json: string;
+  topic_slugs_json: string;
   pollutants_json: string; locations_json: string };
 type ImageRow = {
   source_key: string;
@@ -89,7 +91,7 @@ export function decodeArticleCursor(raw: string | null): [string, number] | null
 
 function searchRequest(url: URL): { terms: string[]; fields: SearchField[] } {
   for (const key of url.searchParams.keys()) {
-    if (!['q', 'fields', 'limit', 'before'].includes(key)) throw new HttpError(400, 'invalid_search_query');
+    if (!['q', 'fields', 'limit', 'before', 'topic'].includes(key)) throw new HttpError(400, 'invalid_search_query');
   }
   if (url.searchParams.getAll('q').length !== 1) throw new HttpError(400, 'invalid_search_query');
   const query = url.searchParams.get('q')?.trim() ?? '';
@@ -107,7 +109,7 @@ function searchRequest(url: URL): { terms: string[]; fields: SearchField[] } {
 }
 
 async function publicArticles(origin: string, rows: FeedRow[]): Promise<unknown[]> {
-  return Promise.all(rows.map(async ({ feed_sort_at: _sort, topics_json,
+  return Promise.all(rows.map(async ({ feed_sort_at: _sort, topics_json, topic_slugs_json,
     pollutants_json, locations_json, featured, article_image_policy,
     source_image_policy, local_image_source_url, local_image_content_sha256,
     ...article }) => ({ ...article,
@@ -116,12 +118,14 @@ async function publicArticles(origin: string, rows: FeedRow[]): Promise<unknown[
       local_image_source_url, local_image_content_sha256,
     }),
     featured: featured === 1,
-    topics: JSON.parse(topics_json), pollutants: JSON.parse(pollutants_json),
+    topics: JSON.parse(topics_json), topic_slugs: JSON.parse(topic_slugs_json),
+    pollutants: JSON.parse(pollutants_json),
     locations: JSON.parse(locations_json) })));
 }
 
 async function articleSearch(url: URL, env: MediaPublicEnv): Promise<Response> {
   const { terms, fields } = searchRequest(url);
+  const selectedTopics = selectedTopicSlugs(url);
   const limit = boundedLimit(url);
   const before = decodeArticleCursor(url.searchParams.get('before'));
   if (terms.length === 0) return json({ articles: [], next_before: null }, 200, 'no-store');
@@ -139,6 +143,9 @@ async function articleSearch(url: URL, env: MediaPublicEnv): Promise<Response> {
     a.published_at, a.discovered_at, a.feed_sort_at,
     a.summary, a.why_it_matters, a.editorial_content_origin, a.featured,
     a.topics_json, a.pollutants_json, a.locations_json, a.og_image_url,
+    (SELECT coalesce(json_group_array(t.slug), '[]')
+      FROM media_article_topics at JOIN topics t ON t.id = at.topic_id AND t.is_active = 1
+      WHERE at.article_id = a.id) AS topic_slugs_json,
     a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
     li.source_image_url AS local_image_source_url,
     li.content_sha256 AS local_image_content_sha256
@@ -146,9 +153,11 @@ async function articleSearch(url: URL, env: MediaPublicEnv): Promise<Response> {
     LEFT JOIN media_article_local_images li ON li.article_id = a.id
     WHERE a.status = 'approved'
       AND NOT EXISTS (SELECT 1 FROM json_each(?) term WHERE NOT (${clauses}))
+      ${selectedTopics.length ? `AND ${allTopicsPredicate('a', 'media_article_topics')}` : ''}
       ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
     ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT ?`);
-  const bindings = [JSON.stringify(terms), ...(before ?? []), limit + 1];
+  const bindings = [JSON.stringify(terms),
+    ...(selectedTopics.length ? [JSON.stringify(selectedTopics)] : []), ...(before ?? []), limit + 1];
   const { results } = await statement.bind(...bindings).all<FeedRow>();
   const page = results.slice(0, limit);
   const last = page.at(-1);
@@ -400,6 +409,8 @@ export default {
   async fetch(request, env, context): Promise<Response> {
     try {
       const url = new URL(request.url);
+      const researchResponse = await handleResearchPublic(request, url, env.MEDIA_DB);
+      if (researchResponse) return researchResponse;
       const imageMatch = /^\/article-images\/([1-9]\d*)$/.exec(url.pathname);
       if (imageMatch) {
         if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
@@ -424,21 +435,27 @@ export default {
       if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
       const limit = boundedLimit(url);
       const before = decodeArticleCursor(url.searchParams.get('before'));
+      const selectedTopics = selectedTopicSlugs(url);
       const statement = env.MEDIA_DB.prepare(`SELECT a.id, a.source_key, a.canonical_url,
         a.title, a.display_title, a.display_title_origin, a.publisher, a.author,
         a.published_at, a.discovered_at, a.feed_sort_at,
         a.summary, a.why_it_matters, a.editorial_content_origin, a.featured,
         a.topics_json, a.pollutants_json, a.locations_json, a.og_image_url,
+    (SELECT coalesce(json_group_array(t.slug), '[]')
+      FROM media_article_topics at JOIN topics t ON t.id = at.topic_id AND t.is_active = 1
+      WHERE at.article_id = a.id) AS topic_slugs_json,
         a.image_policy AS article_image_policy, s.image_policy AS source_image_policy,
         li.source_image_url AS local_image_source_url,
         li.content_sha256 AS local_image_content_sha256
         FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
         LEFT JOIN media_article_local_images li ON li.article_id = a.id
         WHERE a.status = 'approved'
+        ${selectedTopics.length ? `AND ${allTopicsPredicate('a', 'media_article_topics')}` : ''}
         ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
         ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT ?`);
-      const { results } = await (before ? statement.bind(...before, limit + 1) :
-        statement.bind(limit + 1)).all<FeedRow>();
+      const { results } = await statement.bind(
+        ...(selectedTopics.length ? [JSON.stringify(selectedTopics)] : []),
+        ...(before ?? []), limit + 1).all<FeedRow>();
       const page = results.slice(0, limit);
       const last = page.at(-1);
       const articles = await publicArticles(url.origin, page);
