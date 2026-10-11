@@ -138,8 +138,8 @@ await assert.rejects(cycle, /topic_parent_cycle/);
 
 await admin('PATCH', `/admin/research/papers/${paperId}`, { editorial_status: 'hidden' });
 assert.equal((await pub('/research/papers?topic=source-apportionment'))?.status, 200);
-assert.equal((await responseJson(await pub('/research/papers?topic=source-apportionment'))
-  .then(value => value.papers) as unknown[]).length, 0);
+const afterHide = await responseJson(await pub('/research/papers?topic=source-apportionment'));
+assert.equal((afterHide.papers as unknown[]).length, 0);
 assert.equal((await pub(`/research/papers/${paperId}`))?.status, 404);
 sqlite.close();
 console.log('Research, DOI and topic catalogue checks passed');
