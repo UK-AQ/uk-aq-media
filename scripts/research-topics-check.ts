@@ -101,11 +101,10 @@ const final = await responseJson(await admin('POST',
   }));
 assert.ok(Number(preprint.id) > 0 && Number(final.id) > 0);
 assert.equal(final.doi, '10.5678/final');
-const conflict = await admin('POST', `/admin/research/papers/${paperId}/publications`, {
+await assert.rejects(admin('POST', `/admin/research/papers/${paperId}/publications`, {
   version_type: 'final', doi: 'HTTPS://DOI.ORG/10.5678/FINAL',
   publication_url: 'https://example.org/duplicate',
-});
-assert.equal(conflict?.status, 409);
+}), /doi_already_registered/);
 
 const assigned = await responseJson(await admin('PUT', `/admin/research/papers/${paperId}/topics`, {
   topic_ids: [woodId, researchTopicId],
