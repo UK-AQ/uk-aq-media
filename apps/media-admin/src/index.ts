@@ -18,6 +18,7 @@ import {
   requireCurrentGuardianImageRepairPlan,
 } from './guardian-image-bulk';
 import { handleEditorialDashboard } from './editorial-dashboard';
+import { handleResearchTopicsAdmin } from './research-topics';
 import { directPublishState, facebookEligibility, requireFacebookEligibility } from './direct-publish-eligibility';
 
 type Action = 'approve' | 'reject' | 'hide' | 'unhide';
@@ -1265,6 +1266,8 @@ export default {
       if (url.pathname === '/admin/facebook/connection-check') {
         return await facebookConnectionCheck(request, env);
       }
+      const researchResponse = await handleResearchTopicsAdmin(request, url, env.MEDIA_DB);
+      if (researchResponse) return researchResponse;
       const editorialResponse = await handleEditorialDashboard(request, env, url);
       if (editorialResponse) {
         return !url.pathname.startsWith('/admin/source-domain-blocks') && ['PUT', 'DELETE'].includes(request.method)
