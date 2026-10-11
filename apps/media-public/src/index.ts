@@ -13,7 +13,7 @@ type PreviewSelection = {
   local_image_content_sha256?: string | null;
 };
 type FeedRow = PublicArticle & PreviewSelection & { feed_sort_at: string; topics_json: string;
-  topic_slugs_json: string;
+  topic_slugs_json?: string;
   pollutants_json: string; locations_json: string };
 type ImageRow = {
   source_key: string;
@@ -118,7 +118,7 @@ async function publicArticles(origin: string, rows: FeedRow[]): Promise<unknown[
       local_image_source_url, local_image_content_sha256,
     }),
     featured: featured === 1,
-    topics: JSON.parse(topics_json), topic_slugs: JSON.parse(topic_slugs_json),
+    topics: JSON.parse(topics_json), topic_slugs: JSON.parse(topic_slugs_json ?? '[]'),
     pollutants: JSON.parse(pollutants_json),
     locations: JSON.parse(locations_json) })));
 }
