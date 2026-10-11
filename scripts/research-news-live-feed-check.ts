@@ -9,7 +9,8 @@
 import { readFileSync } from 'node:fs';
 import { SourceSchema } from '@uk-aq-media/core';
 import {
-  configuredPublisherRssRouteKeys, discoverPublisherRss, PUBLISHER_RSS_ROUTES,
+  configuredPublisherRssRouteKeys, discoverPublisherRss, mediaDeterministicRelevanceFilter,
+  PUBLISHER_RSS_ROUTES,
 } from '@uk-aq-media/discovery';
 
 const enabledKeys = ['research-news-bioengineer', 'research-news-scienmag'] as const;
@@ -41,12 +42,19 @@ for (const source of sources) {
       if (isLatest && result.items_seen === 0) {
         throw new Error('latest_feed_has_zero_items');
       }
+      const relevant = result.articles.filter(article =>
+        mediaDeterministicRelevanceFilter.evaluate({
+          title: article.title,
+          canonical_url: article.canonical_url,
+          categories: article.categories,
+        }).relevant);
       console.log(JSON.stringify({
         status: 'ok', source_key: source.source_key, route_key: routeKey,
         url: route.url, items_seen: result.items_seen,
         items_invalid: result.items_invalid,
-        relevant_articles: result.articles.length,
-        sample_title: result.articles[0]?.title ?? null,
+        candidate_articles: result.articles.length,
+        aq_relevant_articles: relevant.length,
+        sample_relevant_title: relevant[0]?.title ?? null,
       }));
     } catch (error) {
       failures++;
