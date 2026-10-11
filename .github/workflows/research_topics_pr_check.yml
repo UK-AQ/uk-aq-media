@@ -1,0 +1,31 @@
+name: Research and Topics checks
+
+on:
+  pull_request:
+    paths:
+      - 'migrations/0044_research_papers_shared_topics.sql'
+      - 'packages/core/src/research.ts'
+      - 'packages/core/src/index.ts'
+      - 'apps/media-admin/src/research-topics.ts'
+      - 'apps/media-admin/src/index.ts'
+      - 'apps/media-public/src/research.ts'
+      - 'apps/media-public/src/index.ts'
+      - 'scripts/research-topics-check.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/research_topics_pr_check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
