@@ -53,18 +53,11 @@ CREATE TABLE topics (
 );
 CREATE INDEX topics_active_order ON topics(is_active, display_order, name);
 CREATE INDEX topics_parent ON topics(parent_topic_id);
-CREATE TRIGGER topics_prevent_parent_cycle BEFORE UPDATE OF parent_topic_id ON topics
-WHEN NEW.parent_topic_id IS NOT NULL BEGIN
-  SELECT CASE WHEN EXISTS (
-    WITH RECURSIVE ancestors(id) AS (
-      SELECT NEW.parent_topic_id
-      UNION
-      SELECT t.parent_topic_id FROM topics t JOIN ancestors a ON t.id = a.id
-        WHERE t.parent_topic_id IS NOT NULL
-    )
-    SELECT 1 FROM ancestors WHERE id = NEW.id
-  ) THEN RAISE(ABORT, 'topic_parent_cycle') END;
-END;
+-- D1 migrations do not reliably handle semicolons within CREATE TRIGGER bodies.
+-- Parent cycles are prevented by the atomic recursive guard in the admin API,
+-- while the table CHECK constraint continues to block direct self-parenting.
+-- Never issue hierarchy mutations outside that guarded API.
+
 
 -- Old merged URLs remain addressable without becoming selectable topics.
 CREATE TABLE topic_slug_aliases (
