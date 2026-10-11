@@ -18,12 +18,12 @@ class Statement {
   }
   async all<T>(): Promise<D1Result<T>> {
     return { results: this.stmt.all(...this.params) as T[],
-      success: true, meta: {} as D1Meta };
+      success: true, meta: {} as D1Meta & Record<string, unknown> };
   }
   async run(): Promise<D1Result> {
     const result = this.stmt.run(...this.params);
     return { results: [], success: true,
-      meta: { last_row_id: Number(result.lastInsertRowid), changes: result.changes } as D1Meta };
+      meta: { last_row_id: Number(result.lastInsertRowid), changes: result.changes } as D1Meta & Record<string, unknown> };
   }
 }
 class Db {
