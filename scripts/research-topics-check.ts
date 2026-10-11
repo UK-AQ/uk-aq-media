@@ -86,13 +86,23 @@ assert.equal(normaliseDoi('DOI:10.1234/OTHER'), '10.1234/other');
 assert.equal(normaliseDoi(null), null);
 assert.throws(() => normaliseDoi('https://evil.example/10.1234/study'), /invalid_doi/);
 
-const wood = await responseJson(await admin('POST', '/admin/topics', {
-  slug: 'wood-burning', name: 'Wood Burning',
-}));
+const approvedSlugs = ['uk', 'worldwide', 'health', 'wood-burning', 'wildfires',
+  'traffic', 'monitoring', 'research', 'legislation', 'industry'];
+assert.deepEqual(
+  sqlite.prepare('SELECT slug FROM topics ORDER BY display_order').all().map(row => row.slug),
+  approvedSlugs,
+  'only the ten approved Topics should be seeded',
+);
+const seedSql = readFileSync('migrations/0045_initial_shared_topics.sql', 'utf8');
+sqlite.exec(seedSql);
+assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM topics').get()?.n, 10,
+  'reapplying the seed should not create duplicate topics');
+const wood = sqlite.prepare("SELECT id FROM topics WHERE slug = 'wood-burning'").get();
+assert.ok(wood && typeof wood.id === 'number', 'Wood Burning should be seeded');
 const researchTopic = await responseJson(await admin('POST', '/admin/topics', {
   slug: 'source-apportionment', name: 'Source Apportionment',
 }));
-const woodId = Number(wood.id);
+const woodId = wood.id;
 const researchTopicId = Number(researchTopic.id);
 assert.ok(woodId > 0 && researchTopicId > 0);
 const paper = await responseJson(await admin('POST', '/admin/research/papers', {
