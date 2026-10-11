@@ -57,6 +57,16 @@ not overwritten by the additive source migration. The deterministic headline fil
 recognises `wood smoke` and context-specific biomass combustion and source-apportionment
 phrases, with a regression fixture modelled on the Belgrade PM10 source-attribution article.
 
+**Pre-merge feed verification (11/10/2026):** all ten configured publisher RSS
+URLs (the main feed and four topic search feeds per publisher) returned valid
+RSS with items through Cloudflare Browser Rendering using the TEST Media
+account. Both targeted wood-smoke feeds included the Belgrade article. These
+checks verify public feed availability but do not establish an exact Worker
+`fetch` response, redirect behaviour or a completed production source scan.
+Run `npm run research-news:live-check` to exercise the actual RSS adapter
+against the current publisher responses, and separately validate on a TEST
+Worker before deployment.
+
 **Deployment validation:** the RSS URLs, especially the publisher's WordPress search-feed
 endpoints, must be checked from the deployed Worker and reviewed in `media_discovery_runs`
 for nonzero `items_seen` and sensible `items_filtered` counts. A mocked RSS test
