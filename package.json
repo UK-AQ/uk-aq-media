@@ -33,7 +33,8 @@
     "news-email:check": "tsx scripts/news-email-corrections-check.ts",
     "gdelt:run": "tsx scripts/gdelt-web-ngrams-batch.ts",
     "seed:generate": "tsx scripts/source-seed.ts",
-    "check": "npm run seed:check && npm run ai:check && npm run guardian-image:check && npm run article-head:check && npm run publisher-rss:check && npm run possible-duplicate:check && npm run dsawsp:check && npm run caws:check && npm run remote-preview-image:check && npm run local-image:check && npm run image-policy-admin:check && npm run admin-metadata-provider:check && npm run homepage-latest-six:check && npm run public-feed-cursor:check && npm run gdelt:check && npm run bluesky:check && npm run facebook:check && npm run news-email:check && npm run typecheck && npm run build",
+    "check": "npm run seed:check && npm run ai:check && npm run guardian-image:check && npm run article-head:check && npm run publisher-rss:check && npm run possible-duplicate:check && npm run dsawsp:check && npm run caws:check && npm run remote-preview-image:check && npm run local-image:check && npm run image-policy-admin:check && npm run admin-metadata-provider:check && npm run homepage-latest-six:check && npm run public-feed-cursor:check && npm run gdelt:check && npm run bluesky:check && npm run facebook:check && npm run news-email:check && npm run research-topics:check && npm run typecheck && npm run build",
+    "research-topics:check": "tsx scripts/research-topics-check.ts",
     "research-news:live-check": "tsx scripts/research-news-live-feed-check.ts"
   },
   "devDependencies": {
