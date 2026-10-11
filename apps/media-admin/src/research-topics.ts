@@ -14,7 +14,14 @@ const TopicBase = z.object({
   is_active: z.boolean().default(true),
   display_order: z.number().int().min(-100000).max(100000).default(0),
 }).strict();
-const TopicPatch = TopicBase.partial().refine(value => Object.keys(value).length > 0);
+const TopicPatch = z.object({
+  slug: Slug.optional(),
+  name: z.string().trim().min(1).max(150).optional(),
+  description: z.string().max(2000).nullable().optional(),
+  parent_topic_id: PositiveId.nullable().optional(),
+  is_active: z.boolean().optional(),
+  display_order: z.number().int().min(-100000).max(100000).optional(),
+}).strict().refine(value => Object.keys(value).length > 0);
 const Strings = z.array(z.string().trim().min(1).max(500)).max(100);
 const PaperBase = z.object({
   canonical_title: z.string().trim().min(1).max(1000),
@@ -27,9 +34,18 @@ const PaperBase = z.object({
   first_published_at: PublicationDate.nullable().default(null),
   discovered_from: z.string().max(250).nullable().default(null),
 }).strict();
-const PaperPatch = PaperBase.partial().extend({
+const PaperPatch = z.object({
+  canonical_title: z.string().trim().min(1).max(1000).optional(),
+  abstract: z.string().max(50000).nullable().optional(),
+  authors: Strings.optional(),
+  subjects: Strings.optional(),
+  countries: Strings.optional(),
+  canonical_paper_url: HttpUrl.nullable().optional(),
+  open_access_url: HttpUrl.nullable().optional(),
+  first_published_at: PublicationDate.nullable().optional(),
+  discovered_from: z.string().max(250).nullable().optional(),
   editorial_status: EditableStatus.optional(),
-}).refine(value => Object.keys(value).length > 0);
+}).strict().refine(value => Object.keys(value).length > 0);
 const PublicationBase = z.object({
   version_type: z.enum(['preprint','accepted','final']),
   doi: z.string().max(2048).nullable().default(null),
@@ -40,7 +56,16 @@ const PublicationBase = z.object({
   issue_date: PublicationDate.nullable().default(null),
   source_name: z.string().max(250).nullable().default(null),
 }).strict();
-const PublicationPatch = PublicationBase.partial().refine(value => Object.keys(value).length > 0);
+const PublicationPatch = z.object({
+  version_type: z.enum(['preprint','accepted','final']).optional(),
+  doi: z.string().max(2048).nullable().optional(),
+  publication_url: HttpUrl.optional(),
+  venue: z.string().max(300).nullable().optional(),
+  publisher: z.string().max(300).nullable().optional(),
+  first_online_date: PublicationDate.nullable().optional(),
+  issue_date: PublicationDate.nullable().optional(),
+  source_name: z.string().max(250).nullable().optional(),
+}).strict().refine(value => Object.keys(value).length > 0);
 const TopicAssignments = z.object({
   topic_ids: z.array(PositiveId).max(50).refine(ids => new Set(ids).size === ids.length),
 }).strict();
@@ -130,7 +155,7 @@ async function topicAdmin(request: Request, url: URL, db: D1Database): Promise<R
       input.parent_topic_id, Number(input.is_active), input.display_order).run();
     return json({ id: result.meta.last_row_id }, 201);
   }
-  const match = /^\/admin\/topics\/([1-9]\d+)(?:\/(merge))?$/u.exec(url.pathname);
+  const match = /^\/admin\/topics\/([1-9]\d*)(?:\/(merge))?$/u.exec(url.pathname);
   if (!match) return null;
   const id = idFromPath(match[1]);
   await exists(db, 'topics', id);
@@ -316,7 +341,7 @@ async function papersAdmin(request: Request, url: URL, db: D1Database): Promise<
       .bind(...Object.values(fields), id).run();
     return json({ updated: true, id });
   }
-  const paperMatch = /^\/admin\/research\/papers\/([1-9]\d+)(?:\/(topics|publications))?$/u.exec(url.pathname);
+  const paperMatch = /^\/admin\/research\/papers\/([1-9]\d*)(?:\/(topics|publications))?$/u.exec(url.pathname);
   if (!paperMatch) return null;
   const id = idFromPath(paperMatch[1]);
   if (paperMatch[2] === 'topics')
