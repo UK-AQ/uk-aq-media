@@ -575,3 +575,69 @@ exclusion, checked and unchecked rejected/hidden restores, idempotent request re
 oldest-first cooldown, deterministic title shortening, external cards, URI/CID retention,
 bounded failures, and scheduler reconciliation. Do not validate by posting before the
 operator has deliberately activated TEST.
+
+
+## Research catalogue and shared Topics (migration 0044)
+
+The canonical design contract is maintained in
+[`TEST-uk-aq/uk-aq-system-docs`](https://github.com/TEST-uk-aq/uk-aq-system-docs/blob/main/docs/contracts/research-topics-data-model.md).
+The Media D1 database contains the News and Research catalogues. Migration
+`0044_research_papers_shared_topics.sql` adds `research_papers`,
+`research_paper_publications`, `topics`,
+`media_article_research_papers`, `media_article_topics` and
+`research_paper_topics`, plus `topic_slug_aliases` for merge redirects.
+It is additive: existing `media_articles.topics_json` and source policy
+are preserved. The existing article does **not** receive a DOI column:
+many articles can cover one paper and an article can cover many papers.
+
+Each version of a paper has its own optional, normalised DOI. An internal
+`paper_id` groups verified related preprints, accepted manuscripts and final
+publications, without automatically treating preprints as peer reviewed.
+Original online and journal-issue dates are stored separately. Research
+editorial status is independent from News.
+
+**Admin API (bearer-authenticated through the existing Media admin token):**
+
+- `GET/POST /admin/topics`, `GET/PATCH /admin/topics/:id`,
+  `POST /admin/topics/:id/merge` with `{ "target_topic_id": 123 }`.
+- `GET/PUT /admin/articles/:id/topics` and
+  `GET/PUT /admin/research/papers/:id/topics`; PUT replaces the selected
+  topic IDs with `{ "topic_ids": [1, 2] }`. Assignment source is `manual`
+  and unchanged links preserve their creation timestamp.
+- `GET/POST /admin/research/papers`; `GET/PATCH /admin/research/papers/:id`
+  for research metadata and separate editorial status.
+- `POST /admin/research/papers/:id/publications` and
+  `PATCH /admin/research/publications/:id` for DOI/version information.
+  DOI collision returns a conflict; there is no automatic paper merge.
+- `GET/PUT /admin/articles/:id/research-papers` with
+  `{ "links": [{ "paper_id": 123, "relationship": "reports_on" }] }`.
+  Relationship values: reports_on, cites, discusses and critiques.
+
+**Public API:**
+
+- `GET /topics` lists active topics and separate approved News/Research counts.
+- `GET /articles?topic=wood-burning` filters the existing News feed;
+  `GET /articles/search?q=...&topic=wood-burning` also supports topics.
+  The existing `topics` response attribute remains sourced from
+  `topics_json`; `topic_slugs` exposes the new editorial catalogue.
+- `GET /research/papers?topic=wood-burning` returns only approved research,
+  with publication versions, topic metadata and cursor pagination.
+- `GET /research/papers/:id` includes approved related news, and
+  `GET /articles/:id/research` includes approved related papers.
+
+Repeat `topic` to filter by *all* specified topics (AND semantics); old
+merged slugs remain accepted through the alias mapping. Inactive topics
+are excluded from public listings. Neither private statuses nor unapproved
+related content are exposed by public endpoints.
+
+**Rollout:** These code changes do not apply migrations, deploy Workers,
+automatically classify historical article topics or schedule independent
+academic discovery. Apply/test D1 migrations in TEST first, then deploy
+admin/public Workers, then enable editorial topic assignment. Automatic
+research discovery (Crossref/OpenAlex/Europe PMC and journal feeds), DOI
+extraction from permitted source metadata and the website's News/Research
+topic-picker UI are subsequent separately tested integrations. Nothing
+in this patch fetches unlicensed publisher article bodies.
+
+Run `npm run research-topics:check` for schema/DOI/topic/API regression checks;
+`npm run check` also includes this check.
