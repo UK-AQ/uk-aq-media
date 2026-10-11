@@ -618,6 +618,21 @@ bounded failures, and scheduler reconciliation. Do not validate by posting befor
 operator has deliberately activated TEST.
 
 
+## Initial shared Topic catalogue (migration 0045)
+
+The approved initial catalogue contains exactly ten broad topics: **UK**,
+**Worldwide**, **Health**, **Wood Burning**, **Wildfires**, **Traffic**,
+**Monitoring**, **Research**, **Legislation** and **Industry**. The
+`0045_initial_shared_topics.sql` migration inserts stable slugs and concise
+definitions into the existing LIVE Media D1 topic catalogue.
+
+This is a catalogue seed only. It does **not** link or reclassify existing
+news articles or research papers and does not change `media_articles.topics_json`.
+UK denotes UK-related stories; Worldwide denotes overseas/international
+stories. A genuinely cross-border article may have both. Follow-on work
+must implement auditable article-topic backfill and ongoing topic assignment
+without creating new uncontrolled topics.
+
 ## Research catalogue and shared Topics (migration 0044)
 
 The canonical design contract is maintained in
