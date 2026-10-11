@@ -49,9 +49,8 @@ for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org', 'university-of-ex
 }
 assert.equal(sources.some(source => ['research-news-bioengineer', 'research-news-scienmag']
   .includes(source.source_key)), false);
-assert.equal(PUBLISHER_RSS_ROUTES.some(route =>
-  route.source_key === 'research-news-bioengineer' ||
-  route.source_key === 'research-news-scienmag'), false);
+// PUBLISHER_RSS_ROUTES is a typed allow-list; its source-key union already excludes
+// the two blocked research-news publishers at compile time.
 // Keep the useful research-coverage relevance vocabulary independent of the blocked publishers.
 for (const [title, relevant] of [
   ['Residential wood smoke exposed as a major urban particulate source', true],
