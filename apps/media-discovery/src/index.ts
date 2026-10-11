@@ -133,7 +133,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
     // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
     // Request data never participates in this internally selected, bounded work list.
     const [aqn, guardian, bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
-      bioengineer, scienmag, mumsForLungs, dsawsp, caws, ncas] = await Promise.all([
+      mumsForLungs, dsawsp, caws, ncas] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
       loadSource(env.MEDIA_DB, 'bbc-news'),
@@ -143,8 +143,6 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       loadSource(env.MEDIA_DB, 'openaq'),
       loadSource(env.MEDIA_DB, 'phys-org'),
       loadSource(env.MEDIA_DB, 'university-of-exeter'),
-      loadSource(env.MEDIA_DB, 'research-news-bioengineer'),
-      loadSource(env.MEDIA_DB, 'research-news-scienmag'),
       loadSource(env.MEDIA_DB, 'mums-for-lungs'),
       loadSource(env.MEDIA_DB, 'dsawsp'),
       loadSource(env.MEDIA_DB, 'communities-against-woodsmoke'),
@@ -159,7 +157,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       }
     }
     for (const source of [bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
-      bioengineer, scienmag, mumsForLungs]) {
+      mumsForLungs]) {
       if (!source?.enabled) continue;
       for (const routeKey of configuredPublisherRssRouteKeys(source)) {
         messages.push({ type: 'source_scan', source_key: source.source_key, route_key: routeKey });

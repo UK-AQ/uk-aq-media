@@ -34,46 +34,23 @@ image metadata use the generic RSS adapter and normal AQ relevance filter. Its p
 `search_index_policy='metadata_only'`; feed-body indexing must not be enabled until explicit
 publisher permission is obtained.
 
-## Research-news publisher discovery (News, not Research)
+## Excluded research-news publishers
 
-Bioengineer.org and Scienmag are enabled as **manually reviewed News publishers**. Their
-coverage of published scientific papers is news reporting and stays within the existing
-News queue; primary peer-reviewed journal papers belong to the website's separate Research
-page and are **not** imported directly by these routes.
+`bioengineer.org` and `scienmag.com` are intentionally excluded from the News pipeline.
+Migration `0043` historically added dedicated RSS discovery for the two publishers; migration
+`0046` retires those source rows and blocks both publisher domains through
+`media_source_domain_blocks`. Their ten RSS routes are no longer present in the checked-in
+publisher allow-list or scheduled discovery.
 
-Both publishers use the generic RSS adapter with one recent-news feed and four bounded
-WordPress search RSS routes each: `air pollution`, `wood smoke`, `particulate matter`, and
-`source apportionment`. The targeted feeds help catch relevant stories that may scroll off
-a high-volume general RSS feed between hourly scans. Each route is allowlisted with an exact
-publisher hostname, URL and 20-item ceiling; arbitrary URLs supplied at runtime are rejected.
-The scheduled Worker enqueues these routes only when their D1 source is enabled and its
-configuration matches the checked-in allowlist.
+The useful AQ relevance vocabulary introduced alongside the former feeds remains. Terms such as
+`wood smoke`, source apportionment and context-qualified biomass combustion can still identify
+relevant reporting from reputable publishers. When no suitable news coverage exists, the primary
+paper belongs in the separate Research workflow rather than being promoted through these blocked
+publishers.
 
-Both sources use `publication_policy='manual'`, `review_level='standard'`,
-`content_fetch_policy='discovery_metadata_only'`, `ai_content_policy='disabled'`,
-`search_index_policy='metadata_only'` and remote image previews. Their feed bodies are
-not persisted or used for AI. Existing editorial statuses and manual publisher records are
-not overwritten by the additive source migration. The deterministic headline filter now
-recognises `wood smoke` and context-specific biomass combustion and source-apportionment
-phrases, with a regression fixture modelled on the Belgrade PM10 source-attribution article.
-
-**Pre-merge feed verification (11/10/2026):** all ten configured publisher RSS
-URLs (the main feed and four topic search feeds per publisher) returned valid
-RSS with items through Cloudflare Browser Rendering using the TEST Media
-account. Both targeted wood-smoke feeds included the Belgrade article. These
-checks verify public feed availability but do not establish an exact Worker
-`fetch` response, redirect behaviour or a completed production source scan.
-Run `npm run research-news:live-check` to exercise the actual RSS adapter
-against the current publisher responses, and separately validate on a TEST
-Worker before deployment.
-
-**Deployment validation:** the RSS URLs, especially the publisher's WordPress search-feed
-endpoints, must be checked from the deployed Worker and reviewed in `media_discovery_runs`
-for nonzero `items_seen` and sensible `items_filtered` counts. A mocked RSS test
-confirms the parser and admission rules but does not prove the live publishers expose the
-search RSS format. If publishers do not provide working search feeds, replace only those
-routes with verified, equivalent publisher endpoints before enabling the scan. These
-sources do not auto-approve or publish content, even if the publisher is already known.
+Existing article and editorial history is preserved. The block prevents future publisher
+admission through the domain-block boundary and the retired sources are no longer scheduled; it
+does not rewrite historical article statuses.
 
 ## University of Exeter News publisher source
 
@@ -95,8 +72,8 @@ thumbnail; rediscovery does not replace a non-null stored thumbnail or editorial
 
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
-Independent RSS discovery, specialist Carbon Brief, OpenAQ, Phys.org, Mums for Lungs,
-University of Exeter News and research-news publisher RSS feeds, bounded DSAWSP, Communities Against Woodsmoke and NCAS
+Independent RSS discovery, specialist Carbon Brief, OpenAQ, Phys.org, Mums for Lungs and
+University of Exeter News feeds, bounded DSAWSP, Communities Against Woodsmoke and NCAS
 publisher-index adapters, and a
 separate global GDELT Web NGrams batch that retains English AQ candidates globally but
 promotes only relevant UK-publisher candidates into the existing Media system.
@@ -353,8 +330,8 @@ restores or updates the discovery Worker secret. Other Worker secrets, especiall
 
 The authenticated scheduling route and dormant `scheduled()` fallback share one
 helper that selects only allowlisted AQN, Guardian, BBC News, Sky News and Independent
-work, plus Carbon Brief, OpenAQ, Phys.org, University of Exeter News, the two
-research-news publishers, Mums for Lungs, DSAWSP, CAWS and NCAS when each D1 source is current, enabled and matches its supported adapter shape.
+work, plus Carbon Brief, OpenAQ, Phys.org, University of Exeter News, Mums for Lungs,
+DSAWSP, CAWS and NCAS when each D1 source is current, enabled and matches its supported adapter shape.
 The caller cannot supply source or
 route selection. AQN retains its route-less `source_scan`; every Guardian and generic
 publisher RSS route receives its own `source_scan`. The consumer reloads and validates

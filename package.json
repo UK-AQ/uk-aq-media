@@ -18,7 +18,6 @@
     "guardian-image:check": "tsx scripts/guardian-image-quality-check.ts",
     "article-head:check": "tsx scripts/article-head-metadata-check.ts",
     "publisher-rss:check": "tsx scripts/publisher-rss-discovery-check.ts",
-    "research-news:live-check": "tsx scripts/research-news-live-feed-check.ts",
     "possible-duplicate:check": "tsx scripts/possible-duplicate-check.ts",
     "dsawsp:check": "tsx scripts/dsawsp-discovery-check.ts",
     "caws:check": "tsx scripts/caws-discovery-check.ts",
