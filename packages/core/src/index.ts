@@ -14,3 +14,4 @@ export { z } from 'zod';
 
 export { wakeNewsEmailOutbox } from './news-email';
 export * from './source-domain-blocks';
+export * from './research';
