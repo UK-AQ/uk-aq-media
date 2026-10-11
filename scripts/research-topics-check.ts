@@ -52,7 +52,7 @@ for (const filename of readdirSync('migrations').filter(v => /^\d+.*\.sql$/u.tes
   if (filename === '0044_research_papers_shared_topics.sql') {
     // D1 runs migration statements individually. sqlite.exec() alone would
     // hide unsupported semicolons inside CREATE TRIGGER bodies.
-    assert.doesNotMatch(sql, /CREATE\s+TRIGGER\b/iu);
+    assert.doesNotMatch(sql.replace(/--[^\r\n]*/gu, ''), /CREATE\s+TRIGGER\b/iu);
     const statements = sql.split(/;\s*(?:\r?\n|$)/u).filter(value => value.trim());
     assert.ok(statements.length >= 15, 'expected all 0044 statements');
     for (const [index, statement] of statements.entries()) {
