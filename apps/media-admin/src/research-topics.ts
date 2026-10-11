@@ -104,7 +104,7 @@ async function readBody<T extends z.ZodType>(request: Request, schema: T): Promi
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   let parsed: unknown;
-  try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)); }
   catch { throw new HttpError(400, 'invalid_json'); }
   const valid = schema.safeParse(parsed);
   if (!valid.success) throw new HttpError(400, 'invalid_research_request');
