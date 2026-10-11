@@ -48,7 +48,20 @@ class Db {
 const sqlite = new DatabaseSync(':memory:');
 sqlite.exec('PRAGMA foreign_keys = ON;');
 for (const filename of readdirSync('migrations').filter(v => /^\d+.*\.sql$/u.test(v)).sort()) {
-  sqlite.exec(readFileSync(`migrations/${filename}`, 'utf8'));
+  const sql = readFileSync(`migrations/${filename}`, 'utf8');
+  if (filename === '0044_research_papers_shared_topics.sql') {
+    // D1 runs migration statements individually. sqlite.exec() alone would
+    // hide unsupported semicolons inside CREATE TRIGGER bodies.
+    assert.doesNotMatch(sql, /CREATE\s+TRIGGER\b/iu);
+    const statements = sql.split(/;\s*(?:\r?\n|$)/u).filter(value => value.trim());
+    assert.ok(statements.length >= 15, 'expected all 0044 statements');
+    for (const [index, statement] of statements.entries()) {
+      try { sqlite.exec(`${statement};`); }
+      catch (error) { throw new Error(`0044 D1 statement ${index + 1} failed`, { cause: error }); }
+    }
+  } else {
+    sqlite.exec(sql);
+  }
 }
 const db = new Db(sqlite) as unknown as D1Database;
 const base = 'https://media.example';
@@ -131,9 +144,19 @@ assert.equal(sqlite.prepare('SELECT count(*) AS n FROM research_paper_topics WHE
 
 const child = await responseJson(await admin('POST', '/admin/topics',
   { slug: 'child-topic', name: 'Child Topic', parent_topic_id: researchTopicId }));
+const grandchild = await responseJson(await admin('POST', '/admin/topics',
+  { slug: 'grandchild-topic', name: 'Grandchild Topic', parent_topic_id: Number(child.id) }));
 const cycle = admin('PATCH', `/admin/topics/${researchTopicId}`,
   { parent_topic_id: Number(child.id) });
 await assert.rejects(cycle, /topic_parent_cycle/);
+await assert.rejects(admin('PATCH', `/admin/topics/${researchTopicId}`,
+  { parent_topic_id: Number(grandchild.id) }), /topic_parent_cycle/);
+assert.equal(sqlite.prepare('SELECT parent_topic_id FROM topics WHERE id = ?')
+  .get(researchTopicId)?.parent_topic_id, null, 'rejected reparent must remain unchanged');
+await admin('PATCH', `/admin/topics/${grandchild.id}`, { parent_topic_id: researchTopicId });
+assert.equal(sqlite.prepare('SELECT parent_topic_id FROM topics WHERE id = ?')
+  .get(Number(grandchild.id))?.parent_topic_id, researchTopicId,
+  'legitimate reparent succeeds');
 
 await admin('PATCH', `/admin/research/papers/${paperId}`, { editorial_status: 'hidden' });
 assert.equal((await pub('/research/papers?topic=source-apportionment'))?.status, 200);
