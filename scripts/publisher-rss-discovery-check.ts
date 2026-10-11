@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  configuredPublisherRssRouteKeys, GUARDIAN_ROUTES, parsePublisherRssFeed,
-  PUBLISHER_RSS_ROUTES,
+  configuredPublisherRssRouteKeys, GUARDIAN_ROUTES, mediaDeterministicRelevanceFilter,
+  parsePublisherRssFeed, PUBLISHER_RSS_ROUTES,
 } from '@uk-aq-media/discovery';
 import {
   canonicalizeUrl, initialEditorialState, normaliseArticleAuthorForStorage,
@@ -17,10 +17,11 @@ const sources = z.array(SourceSchema).parse(JSON.parse(
 ));
 const publisherSources = sources.filter(source =>
   ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org',
-    'university-of-exeter', 'mums-for-lungs']
+    'university-of-exeter', 'research-news-bioengineer', 'research-news-scienmag',
+    'mums-for-lungs']
     .includes(source.source_key));
-assert.equal(PUBLISHER_RSS_ROUTES.length, 18);
-assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 30);
+assert.equal(PUBLISHER_RSS_ROUTES.length, 28);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 40);
 for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
@@ -47,6 +48,54 @@ for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org', 'university-of-ex
   assert.deepEqual(configuredPublisherRssRouteKeys({ ...configured,
     publication_policy: 'auto_approve' }), []);
 }
+// Regression: the 09/10/2026 Belgrade study was missed despite directly relevant
+// *news coverage*. Primary scientific papers are not publisher RSS news sources.
+const belgradeTitle = 'Wood Smoke Tops the List as Belgrade\'s Air Pollution Fingerprint ' +
+  'Revealed in Year-Long Study';
+for (const [key, domain, routeKey] of [
+  ['research-news-bioengineer', 'bioengineer.org', 'bioengineer-wood-smoke'],
+  ['research-news-scienmag', 'scienmag.com', 'scienmag-wood-smoke'],
+] as const) {
+  const candidate = publisherSources.find(source => source.source_key === key)!;
+  assert.equal(candidate.publication_policy, 'manual');
+  assert.equal(candidate.ai_content_policy, 'disabled');
+  assert.equal(candidate.content_fetch_policy, 'discovery_metadata_only');
+  assert.equal(candidate.search_index_policy, 'metadata_only');
+  assert.deepEqual(configuredPublisherRssRouteKeys({ ...candidate,
+    publication_policy: 'auto_approve' }), []);
+  assert.deepEqual(configuredPublisherRssRouteKeys({ ...candidate,
+    discovery_config: { ...candidate.discovery_config, routes: [
+      { route_key: routeKey, url: 'https://attacker.example/feed', max_items: 20 },
+    ] } }), []);
+  const parsed = await parsePublisherRssFeed(`<?xml version="1.0"?>
+    <rss version="2.0"><channel><item><title>${belgradeTitle.replaceAll('&', '&amp;')}</title>
+    <link>https://${domain}/wood-smoke-tops-the-list-as-belgrades-air-pollution-fingerprint-revealed-in-year-long-study/</link>
+    <pubDate>Fri, 09 Oct 2026 09:00:00 GMT</pubDate>
+    <content:encoded><![CDATA[<p>Copyright-sensitive article body.</p>]]></content:encoded>
+    </item></channel></rss>`, candidate, routeKey);
+  assert.equal(parsed.items_seen, 1);
+  assert.equal(parsed.items_invalid, 0);
+  assert.equal(parsed.articles[0]?.title, belgradeTitle);
+  assert.equal(parsed.articles[0]?.published_at, '2026-10-09T09:00:00.000Z');
+  assert.equal(parsed.articles[0]?.feed_body_html, null);
+  assert.equal(mediaDeterministicRelevanceFilter.evaluate({
+    title: parsed.articles[0]!.title,
+    canonical_url: parsed.articles[0]!.canonical_url,
+    categories: parsed.articles[0]!.categories,
+  }).relevant, true);
+}
+for (const [title, relevant] of [
+  ['Residential wood smoke exposed as a major urban particulate source', true],
+  ['Chemical source apportionment reveals PM10 contributions in Serbia', true],
+  ['Researchers analyse black carbon in ambient air', true],
+  ['Biomass combustion improves industrial boiler electricity output', false],
+  ['New gene discovered in laboratory mice', false],
+] as const) {
+  assert.equal(mediaDeterministicRelevanceFilter.evaluate({
+    title, canonical_url: 'https://bioengineer.org/test-story/', categories: [],
+  }).relevant, relevant, title);
+}
+
 const mumsForLungs = publisherSources.find(candidate => candidate.source_key === 'mums-for-lungs')!;
 const mumsImage = 'https://images.squarespace-cdn.com/content/v1/60fe62a6c0eb074f99a31664/' +
   '1783674678917-example/M4L+diesel.png?format=1500w';
