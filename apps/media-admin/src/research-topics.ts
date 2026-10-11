@@ -209,8 +209,28 @@ async function topicAdmin(request: Request, url: URL, db: D1Database): Promise<R
   const changes: Record<string, unknown> = { ...input, updated_at: now() };
   if (input.is_active !== undefined) changes.is_active = Number(input.is_active);
   const columns = Object.keys(changes);
-  await db.prepare(`UPDATE topics SET ${columns.map(column => `${column} = ?`).join(', ')}
-    WHERE id = ?`).bind(...columns.map(column => changes[column]), id).run();
+  // D1's migration statement splitter cannot safely apply a multi-statement
+  // CREATE TRIGGER body. Prevent indirect topic cycles in the same atomic
+  // UPDATE instead, including when two editors reparent concurrently.
+  const guardedParent = input.parent_topic_id !== undefined && input.parent_topic_id !== null;
+  const cycleGuard = guardedParent ? `AND NOT EXISTS (
+    WITH RECURSIVE ancestors(id) AS (
+      SELECT ?
+      UNION
+      SELECT t.parent_topic_id FROM topics t JOIN ancestors a ON t.id = a.id
+        WHERE t.parent_topic_id IS NOT NULL
+    )
+    SELECT 1 FROM ancestors WHERE id = ?
+  )` : '';
+  const result = await db.prepare(`UPDATE topics
+    SET ${columns.map(column => `${column} = ?`).join(', ')}
+    WHERE id = ? ${cycleGuard}`).bind(
+      ...columns.map(column => changes[column]), id,
+      ...(guardedParent ? [input.parent_topic_id, id] : []),
+    ).run();
+  if (guardedParent && result.meta.changes === 0) {
+    throw new HttpError(409, 'topic_parent_cycle');
+  }
   return json({ updated: true, id });
 }
 
