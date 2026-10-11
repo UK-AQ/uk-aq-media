@@ -671,14 +671,22 @@ merged slugs remain accepted through the alias mapping. Inactive topics
 are excluded from public listings. Neither private statuses nor unapproved
 related content are exposed by public endpoints.
 
-**Rollout:** These code changes do not apply migrations, deploy Workers,
-automatically classify historical article topics or schedule independent
-academic discovery. Apply/test D1 migrations in TEST first, then deploy
-admin/public Workers, then enable editorial topic assignment. Automatic
-research discovery (Crossref/OpenAlex/Europe PMC and journal feeds), DOI
-extraction from permitted source metadata and the website's News/Research
-topic-picker UI are subsequent separately tested integrations. Nothing
-in this patch fetches unlicensed publisher article bodies.
+**Rollout:** UK AQ Media uses the **LIVE** Cloudflare D1 database
+`uk-aq-media`; the TEST System Docs repository is documentation, not a
+separate TEST Media deployment. Validate migrations locally and in CI, then
+apply the migrations in order to LIVE D1 **before** deploying the updated
+public/admin/discovery Workers. A failed migration must stop the deployment.
+Verify `d1_migrations` and `sqlite_master` if a run fails or is retried.
+
+Migration 0044 intentionally has no SQLite trigger because the remote D1
+migration statement splitter can fail on semicolons inside trigger bodies
+(`incomplete input`). The authenticated admin topic PATCH uses an atomic
+recursive condition to reject indirect parent cycles; the database's CHECK
+constraint also rejects direct self-parenting. Do not modify topic parents
+directly through unguarded SQL. Automatic research discovery (Crossref,
+OpenAlex, Europe PMC and journal feeds), DOI extraction from permitted
+source metadata and the website's News/Research topic-picker UI remain
+separate integrations. No unlicensed publisher article bodies are fetched.
 
 Run `npm run research-topics:check` for schema/DOI/topic/API regression checks;
 `npm run check` also includes this check.
