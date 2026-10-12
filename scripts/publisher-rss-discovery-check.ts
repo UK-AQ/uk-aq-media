@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   configuredPublisherRssRouteKeys, GUARDIAN_ROUTES, mediaDeterministicRelevanceFilter,
-  parsePublisherRssFeed, PUBLISHER_RSS_ROUTES,
+  parsePublisherRssFeed, publisherRssArticleAllowed, PUBLISHER_RSS_ROUTES,
 } from '@uk-aq-media/discovery';
 import {
   canonicalizeUrl, initialEditorialState, normaliseArticleAuthorForStorage,
@@ -17,10 +17,10 @@ const sources = z.array(SourceSchema).parse(JSON.parse(
 ));
 const publisherSources = sources.filter(source =>
   ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org',
-    'university-of-exeter', 'mums-for-lungs']
+    'university-of-exeter', 'see-the-air', 'mums-for-lungs']
     .includes(source.source_key));
-assert.equal(PUBLISHER_RSS_ROUTES.length, 18);
-assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 30);
+assert.equal(PUBLISHER_RSS_ROUTES.length, 19);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 31);
 for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
@@ -37,11 +37,30 @@ assert.equal(publisherSources.find(source => source.source_key === 'phys-org')?.
   'disabled');
 assert.equal(publisherSources.find(source => source.source_key === 'university-of-exeter')
   ?.canonical_domain, 'news.exeter.ac.uk');
+const seeTheAir = publisherSources.find(source => source.source_key === 'see-the-air')!;
+assert.equal(seeTheAir.canonical_domain, 'seetheair.org');
+assert.equal(seeTheAir.publication_policy, 'manual');
+assert.equal(seeTheAir.ai_content_policy, 'disabled');
+assert.equal(seeTheAir.search_index_policy, 'metadata_only');
+assert.deepEqual(configuredPublisherRssRouteKeys(seeTheAir), ['see-the-air-feed']);
+for (const [title, categories, allowed] of [
+  ['The Sleeping Giant in Apple’s Hardware: Why Cupertino Holds the Key to Universal Indoor Air Quality Tracking', [], true],
+  ['Review: AirGradient Open Air', ['air quality'], false],
+  ['Comparison: CO2 Monitors - Why do we need them in indoor environments?', ['Comparison'], false],
+  ['Year in Review 2025', ['air quality'], false],
+  ['Launching the Air Quality Monitoring Market Matrix (GO AQM3)', ['air quality'], false],
+  ['AirGradient webinar on the future of indoor air quality standards', ['air quality'], false],
+  ['Indoor air quality buying guide', ['air quality'], false],
+  ['The Hidden Threat in Our Air: Why Measuring Indoor Ultrafine Particles Is a Modern Regulatory Maze', [], true],
+] as const) {
+  assert.equal(publisherRssArticleAllowed('see-the-air', { title, categories: [...categories] }),
+    allowed, title);
+}
 assert.equal(PUBLISHER_RSS_ROUTES.find(route => route.source_key === 'openaq' &&
   route.route_key === 'openaq-medium' && 'content_encoded_preview_scan_bytes' in route)
   ?.content_encoded_preview_scan_bytes, MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES);
 assert.equal(PUBLISHER_RSS_ROUTES.filter(route =>
-  'content_encoded_preview_scan_bytes' in route).length, 1);
+  'content_encoded_preview_scan_bytes' in route).length, 2);
 for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org', 'university-of-exeter']) {
   const configured = publisherSources.find(source => source.source_key === sourceKey)!;
   assert.deepEqual(configuredPublisherRssRouteKeys({ ...configured,

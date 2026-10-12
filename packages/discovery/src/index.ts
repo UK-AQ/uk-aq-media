@@ -15,7 +15,7 @@ import { CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, discoverCaws } from './caws'
 import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
 import { configuredNcasRouteKeys, discoverNcas, type NcasRouteKey } from './ncas';
 import {
-  configuredPublisherRssRouteKeys, discoverPublisherRss,
+  configuredPublisherRssRouteKeys, discoverPublisherRss, publisherRssArticleAllowed,
 } from './publisher-rss';
 import {
   configuredGuardianRouteKeys, discoverGuardian, guardianProfileRule, guardianRouteKind,
@@ -54,7 +54,7 @@ export {
 export type { NcasRouteKey } from './ncas';
 export {
   configuredPublisherRssRouteKeys, discoverPublisherRss, parsePublisherRssFeed,
-  PUBLISHER_RSS_ROUTES,
+  publisherRssArticleAllowed, PUBLISHER_RSS_ROUTES,
 } from './publisher-rss';
 export type { PublisherRssSourceKey } from './publisher-rss';
 export {
@@ -406,6 +406,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     // At most article, possible-duplicate hold and provider-evidence statements per item remain
     // below D1's batch bound, and their stable order makes an earlier same-batch insert visible.
     for (const article of unique.values()) {
+      if (!publisherRssArticleAllowed(sourceKey, article)) {
+        filtered++;
+        continue;
+      }
       if (blockedHosts.has(publisherHostname(article.canonical_url)) ||
           blockedHosts.has(publisherHostname(article.original_url))) {
         filtered++;

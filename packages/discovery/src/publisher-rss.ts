@@ -52,12 +52,35 @@ export const PUBLISHER_RSS_ROUTES = [
   { source_key: 'university-of-exeter', route_key: 'university-of-exeter-news',
     url: 'https://news.exeter.ac.uk/feed/', canonical_domain: 'news.exeter.ac.uk',
     max_items: 20 },
+  { source_key: 'see-the-air', route_key: 'see-the-air-feed',
+    url: 'https://seetheair.org/feed/', canonical_domain: 'seetheair.org', max_items: 20,
+    content_encoded_preview_scan_bytes: MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES },
   { source_key: 'mums-for-lungs', route_key: 'mums-for-lungs-news',
     url: 'https://www.mumsforlungs.org/news?format=rss', canonical_domain: 'mumsforlungs.org',
     max_items: 20 },
 ] as const;
 
 export type PublisherRssSourceKey = typeof PUBLISHER_RSS_ROUTES[number]['source_key'];
+
+function normaliseEditorialText(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase('en-GB')
+    .replace(/[\u2010-\u2015]+/g, '-').replace(/\s+/g, ' ').trim();
+}
+
+export function publisherRssArticleAllowed(sourceKey: string,
+  article: Pick<DiscoveredArticle, 'title' | 'categories'>): boolean {
+  if (sourceKey !== 'see-the-air') return true;
+  const title = normaliseEditorialText(article.title);
+  const categories = article.categories.map(normaliseEditorialText);
+
+  // See The Air mixes original AQ analysis with product/commercial and promotional posts.
+  // Reject only obvious non-News forms here; ambiguous posts remain manual-review candidates.
+  if (/^(?:review|comparison)\b(?:\s*[:\-])?/.test(title)) return false;
+  if (/\byear in review\b|\b(?:buying|shopping|gift) guide\b|\bmarket matrix\b|\bwebinar\b/
+      .test(title)) return false;
+  if (categories.some(category => /^(?:comparison|reviews?)$/.test(category))) return false;
+  return true;
+}
 
 const PUBLISHER_RSS_AUTHOR_POLICIES = new Map<string, 'none'>([
   ['mums-for-lungs', 'none'],
