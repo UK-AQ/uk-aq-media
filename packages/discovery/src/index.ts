@@ -542,10 +542,13 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     }
     const eligibleCountSql = (newIdentity: boolean): string => {
       const rows = acceptedArticles.filter(article => existingHashes.has(article.canonical_url_hash) !== newIdentity);
-      return rows.length ? `(SELECT sum(eligible) FROM (${rows.map(article =>
-        `SELECT CASE WHEN ${publisherAdmissionSql([article.canonical_url, article.original_url,
-          ...(article.publisher_resolved_urls ?? [])])} THEN 1 ELSE 0 END AS eligible`)
-        .join(' UNION ALL ')}))` : '0';
+      // Cloudflare D1 limits compound SELECTs to five terms. Build a bounded
+      // scalar sum instead, retaining late domain-block admission in the same
+      // atomic persistence batch (rather than trusting earlier filter results).
+      return rows.length ? `(${rows.map(article =>
+        `(CASE WHEN ${publisherAdmissionSql([article.canonical_url, article.original_url,
+          ...(article.publisher_resolved_urls ?? [])])} THEN 1 ELSE 0 END)`)
+        .join(' + ')})` : '0';
     };
     statements.push(db.prepare(`UPDATE media_discovery_runs SET status = 'succeeded',
       finished_at = ?, updated_at = ?, items_seen = ?, items_inserted = ${eligibleCountSql(true)}, items_updated = ${eligibleCountSql(false)},
