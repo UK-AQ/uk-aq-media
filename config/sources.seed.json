@@ -472,7 +472,7 @@
     "canonical_domain": "mumsforlungs.org",
     "source_type": "publisher",
     "enabled": true,
-    "publication_policy": "manual",
+    "publication_policy": "auto_approve",
     "review_level": "standard",
     "priority": 50,
     "discovery_method": "rss",

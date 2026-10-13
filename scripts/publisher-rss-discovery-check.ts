@@ -25,9 +25,10 @@ for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
       .map(route => route.route_key));
-  assert.deepEqual(initialEditorialState(configured), {
-    status: 'pending', approval_method: null, approval_author_rule_key: null,
-  });
+  assert.deepEqual(initialEditorialState(configured), configured.source_key === 'mums-for-lungs'
+    ? { status: 'approved', approval_method: 'trusted_source_auto',
+      approval_author_rule_key: null }
+    : { status: 'pending', approval_method: null, approval_author_rule_key: null });
 }
 assert.equal(publisherSources.find(source => source.source_key === 'carbon-brief')?.ai_content_policy,
   'metadata_only');
@@ -84,6 +85,9 @@ for (const [title, relevant] of [
 }
 
 const mumsForLungs = publisherSources.find(candidate => candidate.source_key === 'mums-for-lungs')!;
+assert.equal(mumsForLungs.publication_policy, 'auto_approve');
+assert.deepEqual(configuredPublisherRssRouteKeys({ ...mumsForLungs,
+  publication_policy: 'manual' }), []);
 const mumsImage = 'https://images.squarespace-cdn.com/content/v1/60fe62a6c0eb074f99a31664/' +
   '1783674678917-example/M4L+diesel.png?format=1500w';
 const mumsParsed = await parsePublisherRssFeed(`<?xml version="1.0"?>
