@@ -105,7 +105,10 @@ function configuredRoute(source: Source, routeKey: string): {
   const route = source.discovery_config.routes?.find(candidate => candidate.route_key === routeKey);
   if (!expected || !route || source.source_type !== 'publisher' || !source.enabled ||
       source.canonical_domain !== expected.canonical_domain || source.discovery_method !== 'rss' ||
-      source.publication_policy !== 'manual' || source.review_level !== 'standard' ||
+      // Mums for Lungs is the sole auto-approved generic RSS source; every other
+      // configured publisher still requires the contracted manual review policy.
+      source.publication_policy !== (source.source_key === 'mums-for-lungs'
+        ? 'auto_approve' : 'manual') || source.review_level !== 'standard' ||
       source.content_fetch_policy !== 'discovery_metadata_only' ||
       source.ai_content_policy !== expectedAiContentPolicy(source.source_key) ||
       source.image_policy !== 'remote_preview' ||
