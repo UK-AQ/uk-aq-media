@@ -18,6 +18,7 @@ import {
   requireCurrentGuardianImageRepairPlan,
 } from './guardian-image-bulk';
 import { handleEditorialDashboard } from './editorial-dashboard';
+import { readMediaHealth } from './health';
 import { handleResearchTopicsAdmin } from './research-topics';
 import { directPublishState, facebookEligibility, requireFacebookEligibility } from './direct-publish-eligibility';
 
@@ -1325,6 +1326,10 @@ export default {
         const id = Number(titleEdit[1]);
         if (!Number.isSafeInteger(id)) throw new HttpError(400, 'invalid_article_id');
         return await setHumanDisplayTitle(request, env.MEDIA_DB, id);
+      }
+      if (url.pathname === '/admin/health') {
+        if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+        return json(await readMediaHealth(env.MEDIA_DB));
       }
       if (url.pathname === '/admin/ai-usage') {
         if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);

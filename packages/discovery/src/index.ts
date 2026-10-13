@@ -38,7 +38,7 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('article_enrich'), article_id: z.number().int().positive() }).strict(),
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
-export { parseAqnFeed } from './aqn';
+export { parseAqnFeed, AQN_FEED } from './aqn';
 export {
   configuredCawsIndex, discoverCaws, extractCawsIndexCandidates,
   CAWS_INDEX_ROUTE_KEY, CAWS_INDEX_URL, CAWS_MAX_ITEMS,
@@ -305,6 +305,16 @@ async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
   return blockedHashes;
 }
 
+function scanFailureCategory(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  if (/D1_ERROR|SQLITE_|database|sql execution/i.test(message)) return 'database';
+  if (/cpu time|memory limit|resource limit|out of memory/i.test(message)) return 'resource';
+  if (/timeout|timed out|abort/i.test(message)) return 'timeout';
+  if (/fetch failed|network|connection/i.test(message)) return 'network';
+  if (error instanceof TypeError) return 'type_error';
+  return 'unexpected';
+}
+
 export async function runSourceScan(db: D1Database, sourceKey: string, routeKey: string | undefined,
   messageId: string, attempt: number, displayTitleAi?: DisplayTitleAiRuntime): Promise<void> {
   const runId = crypto.randomUUID();
@@ -317,6 +327,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
   let seen = 0;
   let invalid = 0;
   let filtered = 0;
+  let stage = 'load_source';
   try {
     const source = await loadSource(db, sourceKey);
     if (!source || !source.enabled) {
@@ -357,6 +368,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       }
       return response;
     };
+    stage = 'fetch_feed';
     let result: { articles: DiscoveredArticle[]; items_seen: number; items_invalid: number };
     let rules: AuthorRule[] = [];
     if (sourceKey === 'air-quality-news' && routeKey === undefined) {
@@ -394,6 +406,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     seen = result.items_seen;
     invalid = result.items_invalid;
     if (seen > 0 && result.articles.length === 0) throw new ScanError('no_valid_feed_entries');
+    stage = 'filter_articles';
     const unique = new Map(result.articles.map(article => [article.canonical_url_hash, article]));
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
@@ -431,6 +444,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       acceptedArticles.push(article);
       acceptedRules.set(article.canonical_url_hash, matchedRules);
     }
+    stage = 'article_metadata';
     const metadataBlocked = await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
     filtered += metadataBlocked.size;
     acceptedArticles = acceptedArticles.filter(article => !metadataBlocked.has(article.canonical_url_hash));
@@ -443,6 +457,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       if (blocked) filtered++;
       return !blocked;
     });
+    stage = 'prepare_persistence';
     const acceptedHashes = acceptedArticles.map(article => article.canonical_url_hash);
     const existingHashes = acceptedHashes.length === 0 ? new Set<string>() : new Set(
       (await db.prepare(`SELECT canonical_url_hash FROM media_articles
@@ -481,6 +496,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       items_invalid = ?, items_filtered = ? WHERE id = ?`).bind(now, now, seen,
         invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
+    stage = 'commit_persistence';
     await db.batch(statements);
     // Body indexing is separately permission-gated and best effort: discovery remains valid if
     // derived-index refresh fails. Feed HTML is never written to durable storage.
@@ -526,7 +542,15 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       }
     }
   } catch (error) {
-    const code = error instanceof ScanError ? error.code : 'source_scan_failed';
+    const category = scanFailureCategory(error);
+    const code = error instanceof ScanError ? error.code : 'source_scan_' + stage + '_' + category;
+    // Never persist publisher HTML, full exception messages or raw URLs.
+    // Structured logs retain the run correlation needed for a targeted diagnosis.
+    console.error(JSON.stringify({ event: 'source_scan_exception',
+      run_id: runId, source_key: sourceKey, route_key: routeKey ?? null,
+      stage, category, code,
+      exception_type: error instanceof Error
+        ? error.name.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 60) : 'unknown' }));
     if (code === 'publisher_domain_blocked') {
       await finishRun(db, runId, 'skipped', seen, invalid, filtered, code);
       return;
