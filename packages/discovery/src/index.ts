@@ -315,6 +315,58 @@ function scanFailureCategory(error: unknown): string {
   return 'unexpected';
 }
 
+
+type SafeD1Failure = { reason: string; sqlite_code: string | null };
+
+// D1 exceptions can embed SQL text and parameter values. Never log or persist
+// an unfiltered message, stack, or cause. Only emit fixed, allow-listed labels.
+function safeD1Failure(error: unknown): SafeD1Failure {
+  const messages: string[] = [];
+  const visited = new Set<unknown>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 3 && current && !visited.has(current); depth++) {
+    visited.add(current);
+    if (typeof current !== 'object') break;
+    const record = current as { message?: unknown; cause?: unknown; code?: unknown };
+    if (typeof record.message === 'string') messages.push(record.message);
+    if (typeof record.code === 'string') messages.push(record.code);
+    current = record.cause;
+  }
+  const evidence = messages.join(' ');
+  const sqliteMatch = /\bSQLITE_(?:CONSTRAINT(?:_[A-Z_]+)?|BUSY(?:_[A-Z_]+)?|LOCKED|ERROR|RANGE|TOOBIG|FULL|NOMEM|INTERRUPT|MISUSE)\b/i.exec(evidence);
+  const patterns: ReadonlyArray<readonly [RegExp, string]> = [
+    [/too many (?:sql )?variables|too many bound parameters/i, 'too_many_variables'],
+    [/too many terms in compound select/i, 'too_many_compound_terms'],
+    [/expression tree is too (?:large|deep)/i, 'expression_tree_limit'],
+    [/parser stack overflow/i, 'parser_stack_overflow'],
+    [/statement too long|sql statement too long/i, 'statement_too_long'],
+    [/incorrect number of bindings|wrong number of (?:bindings|parameters)/i, 'binding_count'],
+    [/bind or column index out of range/i, 'binding_range'],
+    [/foreign key constraint failed/i, 'foreign_key_constraint'],
+    [/unique constraint failed/i, 'unique_constraint'],
+    [/not null constraint failed/i, 'not_null_constraint'],
+    [/check constraint failed/i, 'check_constraint'],
+    [/constraint failed/i, 'constraint'],
+    [/database is locked|SQLITE_LOCKED/i, 'database_locked'],
+    [/database is busy|SQLITE_BUSY/i, 'database_busy'],
+    [/no such column/i, 'missing_column'],
+    [/no such table/i, 'missing_table'],
+    [/no such function/i, 'missing_function'],
+    [/no such index/i, 'missing_index'],
+    [/misuse of aggregate/i, 'aggregate_misuse'],
+    [/ambiguous column name/i, 'ambiguous_column'],
+    [/datatype mismatch/i, 'datatype_mismatch'],
+    [/database or disk is full/i, 'database_full'],
+    [/out of memory/i, 'out_of_memory'],
+    [/cpu time|cpu usage|cpu limit/i, 'cpu_limit'],
+    [/timed out|timeout/i, 'timeout'],
+    [/syntax error/i, 'sql_syntax'],
+    [/incomplete input/i, 'incomplete_input'],
+  ];
+  const reason = patterns.find(([pattern]) => pattern.test(evidence))?.[1] ?? 'unclassified';
+  return { reason, sqlite_code: sqliteMatch?.[0].toUpperCase() ?? null };
+}
+
 export async function runSourceScan(db: D1Database, sourceKey: string, routeKey: string | undefined,
   messageId: string, attempt: number, displayTitleAi?: DisplayTitleAiRuntime): Promise<void> {
   const runId = crypto.randomUUID();
@@ -328,6 +380,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
   let invalid = 0;
   let filtered = 0;
   let stage = 'load_source';
+  let batchDiagnostic: {
+    accepted_articles: number; new_articles: number;
+    existing_articles: number; statements: number;
+  } | null = null;
   try {
     const source = await loadSource(db, sourceKey);
     if (!source || !source.enabled) {
@@ -497,6 +553,14 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         invalid, filtered, runId));
     // D1 batch is atomic: articles, trigger events, evidence and successful run state commit together.
     stage = 'commit_persistence';
+    batchDiagnostic = {
+      accepted_articles: acceptedArticles.length,
+      new_articles: acceptedArticles.filter(article =>
+        !existingHashes.has(article.canonical_url_hash)).length,
+      existing_articles: acceptedArticles.filter(article =>
+        existingHashes.has(article.canonical_url_hash)).length,
+      statements: statements.length,
+    };
     await db.batch(statements);
     // Body indexing is separately permission-gated and best effort: discovery remains valid if
     // derived-index refresh fails. Feed HTML is never written to durable storage.
@@ -543,12 +607,17 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     }
   } catch (error) {
     const category = scanFailureCategory(error);
-    const code = error instanceof ScanError ? error.code : 'source_scan_' + stage + '_' + category;
+    const d1 = stage === 'commit_persistence' && category === 'database'
+      ? safeD1Failure(error) : null;
+    const code = error instanceof ScanError ? error.code : 'source_scan_' + stage + '_' +
+      category + (d1 && d1.reason !== 'unclassified' ? '_' + d1.reason : '');
     // Never persist publisher HTML, full exception messages or raw URLs.
     // Structured logs retain the run correlation needed for a targeted diagnosis.
     console.error(JSON.stringify({ event: 'source_scan_exception',
       run_id: runId, source_key: sourceKey, route_key: routeKey ?? null,
       stage, category, code,
+      ...(d1 ? { d1_reason: d1.reason, sqlite_code: d1.sqlite_code,
+        batch: batchDiagnostic } : {}),
       exception_type: error instanceof Error
         ? error.name.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 60) : 'unknown' }));
     if (code === 'publisher_domain_blocked') {
