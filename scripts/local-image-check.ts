@@ -52,12 +52,20 @@ await assert.rejects(storeLocalImage({} as D1Database, {
 assert.equal(r2Writes, 0, 'remote_preview must fail before any R2 write');
 
 let publisherFetches = 0;
+let imageInfoReads = 0;
+let imageTransforms = 0;
 const originalFetch = globalThis.fetch;
 globalThis.fetch = (async () => { publisherFetches++; throw new Error('unexpected_fetch'); }) as typeof fetch;
 try {
-  const thumbnail = await loadThumbnail({ MEDIA_IMAGES: {
-    get: async () => ({ arrayBuffer: async () => png.bytes.slice().buffer }),
-  } } as unknown as MediaDiscoveryEnv, {
+  // A landscape image below Bluesky's byte limit must use its original R2 bytes.
+  // Simulate only the free Images.info inspection; no transformation is permitted.
+  const thumbnail = await loadThumbnail({
+    MEDIA_IMAGES: { get: async () => ({ arrayBuffer: async () => png.bytes.slice().buffer }) },
+    IMAGES: {
+      info: async () => { imageInfoReads++; return { width: 1600, height: 900 }; },
+      input: () => { imageTransforms++; throw new Error('unexpected_image_transform'); },
+    },
+  } as unknown as MediaDiscoveryEnv, {
     id: 7, revision: 2, canonical_url: 'https://publisher.example/story', title: 'Story',
     publisher: 'Publisher', og_image_url: 'https://publisher.example/image.png',
     image_policy: 'local_copy_permitted', source_key: 'publisher',
@@ -68,6 +76,10 @@ try {
     local_image_content_type: 'image/png',
   });
   assert.equal(thumbnail.type, 'image/png');
+  assert.deepEqual(new Uint8Array(thumbnail.bytes), png.bytes,
+    'a correctly sized 16:9 thumbnail must retain the original image bytes');
+  assert.equal(imageInfoReads, 1, 'Images.info must inspect the thumbnail once');
+  assert.equal(imageTransforms, 0, 'an already suitable thumbnail must not be transformed');
   assert.equal(publisherFetches, 0, 'a valid retained local image must prevent publisher re-fetch');
 } finally { globalThis.fetch = originalFetch; }
 
