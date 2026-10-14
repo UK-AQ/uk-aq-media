@@ -163,6 +163,11 @@ async function prepareBlueskyThumbnail(env: MediaDiscoveryEnv,
   } catch {
     throw new PublicationError('thumbnail_invalid');
   }
+  // SVG metadata has only a format field; the thumbnail path accepts raster
+  // dimensions only. Narrow the union before reading width and height.
+  if (!('width' in info) || !('height' in info)) {
+    throw new PublicationError('thumbnail_invalid');
+  }
   const { width, height } = info;
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
       width < 2 || height < 2) throw new PublicationError('thumbnail_invalid');
@@ -171,7 +176,7 @@ async function prepareBlueskyThumbnail(env: MediaDiscoveryEnv,
     return original;
   }
 
-  // aspect-crop, unlike cover, will not upscale small publisher previews.
+  // Crop without upscaling: target width/height never exceed the source.
   // Start at higher quality and only spend another transformation if needed.
   for (const pass of [
     { maximumWidth: 1200, quality: 82 },
@@ -184,7 +189,7 @@ async function prepareBlueskyThumbnail(env: MediaDiscoveryEnv,
     try {
       const output = await env.IMAGES.input(new Blob([original.bytes]).stream())
         .transform({ width: targetWidth, height: targetHeight,
-          fit: 'aspect-crop', gravity: { x: 0.5, y: 0.5 } })
+          fit: 'crop', gravity: 'center' })
         .output({ format: 'image/jpeg', quality: pass.quality, anim: false });
       const response = output.response();
       if (!response.ok ||
