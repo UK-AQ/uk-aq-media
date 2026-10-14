@@ -101,10 +101,19 @@ export async function readMediaHealth(db: D1Database): Promise<unknown> {
       'FROM media_sources WHERE enabled = 1 AND retired_at IS NULL')
       .all<SourceRow>(),
     db.prepare(runSql).bind(start).all<RunStat>(),
-    db.prepare("SELECT 'bluesky' AS channel, article_id, status, publication_reason, " +
-      'last_error_code, updated_at FROM media_bluesky_publications ' +
-      "WHERE publication_reason = 'auto_approved' AND status != 'posted' " +
-      'ORDER BY updated_at DESC LIMIT 30').all<SocialRow>(),
+    // Resolved or deliberately withdrawn automatic attempts remain in the
+    // publication history, but must not count as current operational warnings.
+    db.prepare("SELECT 'bluesky' AS channel, p.article_id, p.status, p.publication_reason, " +
+      'p.last_error_code, p.updated_at FROM media_bluesky_publications p ' +
+      'JOIN media_articles a ON a.id = p.article_id ' +
+      "WHERE p.publication_reason = 'auto_approved' AND p.status != 'posted' " +
+      "AND NOT (p.status = 'blocked' AND (" +
+      "p.last_error_code = 'operator_cancelled' " +
+      "OR a.status IN ('hidden', 'rejected') " +
+      'OR EXISTS (SELECT 1 FROM media_bluesky_publications posted ' +
+      'WHERE posted.article_id = p.article_id AND posted.status = \'posted\' ' +
+      'AND posted.post_uri IS NOT NULL))) ' +
+      'ORDER BY p.updated_at DESC LIMIT 30').all<SocialRow>(),
     db.prepare("SELECT 'facebook' AS channel, article_id, status, publication_reason, " +
       'last_error_code, updated_at FROM media_facebook_publications ' +
       "WHERE publication_reason = 'auto_approved' AND status != 'posted' " +
