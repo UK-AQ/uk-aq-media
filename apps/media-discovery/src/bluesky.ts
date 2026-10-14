@@ -1,5 +1,6 @@
 import {
-  BLUESKY_HANDLE, BLUESKY_THUMBNAIL_BYTES, deterministicTid, fetchRemotePreviewImage,
+  BLUESKY_HANDLE, BLUESKY_THUMBNAIL_BYTES, MAX_LOCAL_IMAGE_BYTES,
+  deterministicTid, fetchRemotePreviewImage,
   isBlueskyWakeup, readBoundedImageResponse, remotePreviewUrl, renderBlueskyPost,
   reconcileHomepageLatestSix, storeLocalImage, validateLocalImageBytes,
   reconcileBlueskyPublications,
@@ -148,6 +149,61 @@ export async function authenticate(password: string): Promise<{ accessJwt: strin
   return { accessJwt: body.accessJwt, did: body.did };
 }
 
+type BlueskyThumbnail = { bytes: ArrayBuffer; type: string };
+
+// Images.info is free. An image is transformed only if its original dimensions
+// do not approximate 16:9 or its byte length exceeds the Bluesky blob limit.
+// Keep publisher bytes unchanged in D1/R2/public image caches.
+async function prepareBlueskyThumbnail(env: MediaDiscoveryEnv,
+  original: BlueskyThumbnail): Promise<BlueskyThumbnail> {
+  if (!env.IMAGES) throw new PublicationError('thumbnail_transform_unavailable');
+  let info;
+  try {
+    info = await env.IMAGES.info(new Blob([original.bytes]).stream());
+  } catch {
+    throw new PublicationError('thumbnail_invalid');
+  }
+  const { width, height } = info;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+      width < 2 || height < 2) throw new PublicationError('thumbnail_invalid');
+  const ratioDeviation = Math.abs((width / height) / (16 / 9) - 1);
+  if (ratioDeviation <= 0.015 && original.bytes.byteLength < BLUESKY_THUMBNAIL_BYTES) {
+    return original;
+  }
+
+  // aspect-crop, unlike cover, will not upscale small publisher previews.
+  // Start at higher quality and only spend another transformation if needed.
+  for (const pass of [
+    { maximumWidth: 1200, quality: 82 },
+    { maximumWidth: 900, quality: 70 },
+    { maximumWidth: 720, quality: 60 },
+  ]) {
+    const targetWidth = Math.max(2, Math.min(pass.maximumWidth, width,
+      Math.floor(height * 16 / 9)));
+    const targetHeight = Math.max(1, Math.round(targetWidth * 9 / 16));
+    try {
+      const output = await env.IMAGES.input(new Blob([original.bytes]).stream())
+        .transform({ width: targetWidth, height: targetHeight,
+          fit: 'aspect-crop', gravity: { x: 0.5, y: 0.5 } })
+        .output({ format: 'image/jpeg', quality: pass.quality, anim: false });
+      const response = output.response();
+      if (!response.ok ||
+          response.headers.get('content-type')?.split(';', 1)[0]?.toLowerCase() !== 'image/jpeg') {
+        await response.body?.cancel();
+        throw new PublicationError('thumbnail_transform_failed');
+      }
+      const bytes = await boundedBytes(response, BLUESKY_THUMBNAIL_BYTES);
+      if (!bytes.byteLength) throw new PublicationError('thumbnail_transform_failed');
+      return { bytes, type: 'image/jpeg' };
+    } catch (error) {
+      if (error instanceof PublicationError && error.code === 'thumbnail_too_large') continue;
+      if (error instanceof PublicationError) throw error;
+      throw new PublicationError('thumbnail_transform_failed');
+    }
+  }
+  throw new PublicationError('thumbnail_too_large');
+}
+
 export async function loadThumbnail(env: MediaDiscoveryEnv,
   article: Article): Promise<{ bytes: ArrayBuffer; type: string }> {
   if (!article.og_image_url || !remotePreviewUrl(article.og_image_url, article)) {
@@ -165,10 +221,9 @@ export async function loadThumbnail(env: MediaDiscoveryEnv,
       try {
         const validated = await validateLocalImageBytes(
           new Uint8Array(await object.arrayBuffer()), article.local_image_content_type);
-        if (validated.bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
-          throw new PublicationError('thumbnail_too_large');
-        }
-        return { bytes: validated.bytes.buffer as ArrayBuffer, type: validated.contentType };
+        return prepareBlueskyThumbnail(env, {
+          bytes: validated.bytes.buffer as ArrayBuffer, type: validated.contentType,
+        });
       } catch (error) {
         if (error instanceof PublicationError) throw error;
         throw new PublicationError('thumbnail_invalid');
@@ -193,15 +248,13 @@ export async function loadThumbnail(env: MediaDiscoveryEnv,
         throw new PublicationError('thumbnail_invalid');
       }
       const declared = Number(fetched.response.headers.get('content-length') ?? 0);
-      if (declared > BLUESKY_THUMBNAIL_BYTES) {
+      if (declared > MAX_LOCAL_IMAGE_BYTES) {
         await fetched.response.body?.cancel();
         throw new PublicationError('thumbnail_too_large');
       }
-      const bytes = await boundedBytes(fetched.response, BLUESKY_THUMBNAIL_BYTES);
-      if (!bytes.byteLength || bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
-        throw new PublicationError(bytes.byteLength ? 'thumbnail_too_large' : 'thumbnail_invalid');
-      }
-      return { bytes, type };
+      const bytes = await boundedBytes(fetched.response, MAX_LOCAL_IMAGE_BYTES);
+      if (!bytes.byteLength) throw new PublicationError('thumbnail_invalid');
+      return prepareBlueskyThumbnail(env, { bytes, type });
     }
     let validated;
     try {
@@ -222,10 +275,9 @@ export async function loadThumbnail(env: MediaDiscoveryEnv,
       if (code === 'local_image_stale_write') throw new PublicationError('publication_state_conflict');
       throw new PublicationError('thumbnail_invalid');
     }
-    if (validated.bytes.byteLength > BLUESKY_THUMBNAIL_BYTES) {
-      throw new PublicationError('thumbnail_too_large');
-    }
-    return { bytes: validated.bytes.buffer as ArrayBuffer, type: validated.contentType };
+    return prepareBlueskyThumbnail(env, {
+      bytes: validated.bytes.buffer as ArrayBuffer, type: validated.contentType,
+    });
   } catch (error) {
     if (controller.signal.aborted) throw new PublicationError('thumbnail_timeout', true);
     if (error instanceof PublicationError) throw error;
