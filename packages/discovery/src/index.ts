@@ -12,6 +12,9 @@ import {
 import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
 import { discoverAqn } from './aqn';
 import { CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, discoverCaws } from './caws';
+import {
+  CLEAN_AIR_FUND_INDEX_ROUTE_KEY, configuredCleanAirFundIndex, discoverCleanAirFund,
+} from './clean-air-fund';
 import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
 import { configuredNcasRouteKeys, discoverNcas, type NcasRouteKey } from './ncas';
 import {
@@ -51,6 +54,10 @@ export {
 export {
   configuredNcasRouteKeys, discoverNcas, extractNcasIndexCandidates, NCAS_TAG_ROUTES,
 } from './ncas';
+export {
+  CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_INDEX_URL,
+  configuredCleanAirFundIndex, discoverCleanAirFund, extractCleanAirFundIndexCandidates,
+} from './clean-air-fund';
 export type { NcasRouteKey } from './ncas';
 export {
   configuredPublisherRssRouteKeys, discoverPublisherRss, parsePublisherRssFeed,
@@ -439,6 +446,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         return;
       }
       result = await discoverGuardian(source, routeKey, guardedFetcher);
+    } else if (sourceKey === 'clean-air-fund' &&
+        routeKey === CLEAN_AIR_FUND_INDEX_ROUTE_KEY &&
+        configuredCleanAirFundIndex(source)) {
+      result = await discoverCleanAirFund(source, guardedFetcher);
     } else if (sourceKey === 'communities-against-woodsmoke' &&
         routeKey === CAWS_INDEX_ROUTE_KEY &&
         configuredCawsIndex(source)) {
@@ -489,7 +500,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
       const publisherRelevant = ![
         'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp',
-        'communities-against-woodsmoke', 'ncas',
+        'communities-against-woodsmoke', 'ncas', 'clean-air-fund',
       ].includes(sourceKey)
         ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
           canonical_url: article.canonical_url, categories: article.categories }).relevant : true;

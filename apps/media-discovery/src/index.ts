@@ -1,6 +1,7 @@
 import {
   DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
-  CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, configuredDsawspIndex,
+  CAWS_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_INDEX_ROUTE_KEY, configuredCawsIndex,
+  configuredCleanAirFundIndex, configuredDsawspIndex,
   configuredNcasRouteKeys, configuredPublisherRssRouteKeys, DSAWSP_INDEX_ROUTE_KEY,
   scheduledGuardianRouteKeys,
   type DiscoveryMessage, type DisplayTitleAiRuntime,
@@ -133,7 +134,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
     // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
     // Request data never participates in this internally selected, bounded work list.
     const [aqn, guardian, bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
-      seeTheAir, mumsForLungs, dsawsp, caws, ncas] = await Promise.all([
+      seeTheAir, mumsForLungs, cleanAirFund, dsawsp, caws, ncas] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
       loadSource(env.MEDIA_DB, 'bbc-news'),
@@ -145,6 +146,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       loadSource(env.MEDIA_DB, 'university-of-exeter'),
       loadSource(env.MEDIA_DB, 'see-the-air'),
       loadSource(env.MEDIA_DB, 'mums-for-lungs'),
+      loadSource(env.MEDIA_DB, 'clean-air-fund'),
       loadSource(env.MEDIA_DB, 'dsawsp'),
       loadSource(env.MEDIA_DB, 'communities-against-woodsmoke'),
       loadSource(env.MEDIA_DB, 'ncas'),
@@ -163,6 +165,10 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       for (const routeKey of configuredPublisherRssRouteKeys(source)) {
         messages.push({ type: 'source_scan', source_key: source.source_key, route_key: routeKey });
       }
+    }
+    if (cleanAirFund?.enabled && configuredCleanAirFundIndex(cleanAirFund)) {
+      messages.push({ type: 'source_scan', source_key: 'clean-air-fund',
+        route_key: CLEAN_AIR_FUND_INDEX_ROUTE_KEY });
     }
     if (dsawsp?.enabled && configuredDsawspIndex(dsawsp)) {
       messages.push({ type: 'source_scan', source_key: 'dsawsp',
