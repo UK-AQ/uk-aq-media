@@ -336,7 +336,7 @@ async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
   };
 }
 
-export function metadataFromOpenAqRss(canonicalUrl: string, publisher: string,
+function metadataFromPublisherRss(canonicalUrl: string, publisher: string,
   articles: ReadonlyArray<{
     canonical_url: string;
     title: string;
@@ -355,6 +355,12 @@ export function metadataFromOpenAqRss(canonicalUrl: string, publisher: string,
     image_error: article.preview_url ? null : 'preview_image_metadata_missing',
     checked_at: checkedAt,
   };
+}
+
+// Keep the existing OpenAQ API while sharing the bounded RSS metadata extraction.
+export function metadataFromOpenAqRss(canonicalUrl: string, publisher: string,
+  articles: Parameters<typeof metadataFromPublisherRss>[2], checkedAt: string): HeadMetadata | null {
+  return metadataFromPublisherRss(canonicalUrl, publisher, articles, checkedAt);
 }
 
 export function requireOpenAqRssMetadata(canonicalUrl: string, publisher: string,
@@ -378,12 +384,56 @@ async function fetchOpenAqRssMetadata(db: D1Database, canonicalUrl: string,
     new Date().toISOString());
 }
 
-async function fetchMetadata(db: D1Database, canonicalUrl: string,
+// Sky sometimes returns HTTP 403 to Workers requesting article HTML. Only the
+// publisher's existing, configured RSS routes may be used as a metadata fallback.
+async function fetchSkyRssMetadata(db: D1Database, articleId: number,
+  canonicalUrl: string, sourceName: string): Promise<HeadMetadata | null> {
+  const source = await loadSource(db, 'sky-news');
+  if (!source?.enabled || source.image_policy !== 'remote_preview') return null;
+  const configuredRoutes = configuredPublisherRssRouteKeys(source);
+  if (configuredRoutes.length === 0) return null;
+
+  // Prefer routes that discovered this article, rather than scanning unrelated feeds.
+  const { results } = await db.prepare(`SELECT route_key FROM media_article_discovery_evidence
+    WHERE article_id = ? AND source_key = 'sky-news' AND provider_key = 'publisher_rss'
+    ORDER BY last_seen_at DESC LIMIT 4`).bind(articleId).all<{ route_key: string }>();
+  const observedRoutes = [...new Set(results.map(row => row.route_key)
+    .filter(routeKey => configuredRoutes.includes(routeKey)))];
+  const routeKeys = observedRoutes.length > 0 ? observedRoutes : configuredRoutes;
+
+  let matchedWithoutImage: HeadMetadata | null = null;
+  for (const routeKey of routeKeys) {
+    try {
+      const { articles } = await discoverPublisherRss(source, routeKey);
+      const metadata = metadataFromPublisherRss(canonicalUrl, sourceName, articles,
+        new Date().toISOString());
+      if (metadata?.image_url) return metadata;
+      if (metadata) matchedWithoutImage ??= metadata;
+    } catch {
+      console.warn(JSON.stringify({
+        event: 'sky_rss_metadata_fallback_route_failed', article_id: articleId,
+        route_key: routeKey,
+      }));
+    }
+  }
+  return matchedWithoutImage;
+}
+
+async function fetchMetadata(db: D1Database, articleId: number, canonicalUrl: string,
   source: Pick<SourceRow, 'source_key' | 'name' | 'canonical_domain' |
     'content_fetch_policy' | 'image_policy'>): Promise<HeadMetadata> {
-  return metadataProviderFor(source.source_key) === 'publisher_rss'
-    ? fetchOpenAqRssMetadata(db, canonicalUrl, source.name)
-    : fetchHeadMetadata(canonicalUrl, source);
+  if (metadataProviderFor(source.source_key) === 'publisher_rss') {
+    return fetchOpenAqRssMetadata(db, canonicalUrl, source.name);
+  }
+  try {
+    return await fetchHeadMetadata(canonicalUrl, source);
+  } catch (error) {
+    if (source.source_key !== 'sky-news' || !(error instanceof HttpError) ||
+        error.message !== 'article_head_http_403') throw error;
+    const fallback = await fetchSkyRssMetadata(db, articleId, canonicalUrl, source.name);
+    if (fallback) return fallback;
+    throw error;
+  }
 }
 
 export function articleHeadHttpError(error: unknown): HttpError {
@@ -1077,7 +1127,7 @@ async function previewMetadata(db: D1Database, id: number): Promise<Response> {
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     WHERE a.id = ?`).bind(id).first<Record<string, unknown> & SourceRow>();
   if (!row) throw new HttpError(404, 'article_not_found');
-  const metadata = await fetchMetadata(db, String(row.canonical_url), row);
+  const metadata = await fetchMetadata(db, id, String(row.canonical_url), row);
   const changes = {
     image: metadata.image_url && metadata.image_url !== row.og_image_url
       ? { current: row.og_image_url ?? null, proposed: metadata.image_url,
@@ -1104,7 +1154,7 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
   if (row.og_image_url !== parsed.data.expected_current_image_url) {
     throw new HttpError(409, 'metadata_current_image_changed');
   }
-  const metadata = await fetchMetadata(db, String(row.canonical_url), row);
+  const metadata = await fetchMetadata(db, id, String(row.canonical_url), row);
   const mayChangeImage = metadataImageChange(row.og_image_url,
     parsed.data.expected_proposed_image_url, metadata.image_url,
     parsed.data.replace_existing_image);
