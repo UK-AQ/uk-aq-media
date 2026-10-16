@@ -59,6 +59,18 @@ first-party `https://news.exeter.ac.uk/feed/` RSS feed. It uses the generic publ
 adapter, metadata-only indexing and the normal deterministic AQ relevance filter, so unrelated
 University news is discarded before article persistence. Title AI remains disabled.
 
+## Impact on Urban Health publisher source
+
+Impact on Urban Health is an enabled, manually reviewed UK publisher discovered through its
+first-party `https://urbanhealth.org.uk/feed` RSS feed. The existing bounded generic RSS
+adapter applies deterministic air-quality relevance filtering to its wider urban-health
+coverage. Discovery is metadata-only, retains no RSS body or excerpt and does not use AI;
+publisher images remain remote previews unless separately authorised.
+
+Migration `0049` promotes the existing manual `urbanhealth.org.uk` source into the
+configured publisher, preserving previously entered article IDs, URLs, approval decisions,
+title choices and image selections. Existing IoUH articles do not become auto-approved.
+
 ## See The Air publisher source
 
 See The Air is an enabled **manual/Standard** specialist publisher discovered through its
@@ -94,7 +106,7 @@ thumbnail; rediscovery does not replace a non-null stored thumbnail or editorial
 Standalone repository implementation: three Cloudflare Workers sharing authoritative
 D1 state, with Queue-driven Air Quality News, Guardian, BBC News, Sky News and The
 Independent RSS discovery, specialist Carbon Brief, OpenAQ, Phys.org, Mums for Lungs,
-University of Exeter News and See The Air feeds, bounded DSAWSP, Communities Against Woodsmoke and NCAS
+University of Exeter News, Impact on Urban Health and See The Air feeds, bounded DSAWSP, Communities Against Woodsmoke and NCAS
 publisher-index adapters, and a
 separate global GDELT Web NGrams batch that retains English AQ candidates globally but
 promotes only relevant UK-publisher candidates into the existing Media system.
