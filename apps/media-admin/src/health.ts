@@ -3,15 +3,18 @@ import {
   AQN_FEED, configuredPublisherRssRouteKeys, scheduledGuardianRouteKeys,
   configuredCawsIndex, CAWS_INDEX_ROUTE_KEY, configuredDsawspIndex,
   DSAWSP_INDEX_ROUTE_KEY, configuredNcasRouteKeys,
+  CLEAN_AIR_FUND_INDEX_ROUTE_KEY, configuredCleanAirFundIndex, PUBLISHER_RSS_ROUTES,
 } from '@uk-aq-media/discovery';
 
 // Mirror the explicit source allow-list in media-discovery's scheduler.
 // This endpoint is read-only and must never enqueue scans or alter publications.
-const DIRECT_SOURCE_KEYS = [
-  'air-quality-news', 'the-guardian', 'bbc-news', 'sky-news', 'the-independent',
-  'carbon-brief', 'openaq', 'phys-org', 'university-of-exeter', 'see-the-air',
-  'mums-for-lungs', 'dsawsp', 'communities-against-woodsmoke', 'ncas',
-] as const;
+const DIRECT_SOURCE_KEYS = new Set<string>([
+  'air-quality-news', 'the-guardian', 'clean-air-fund',
+  'dsawsp', 'communities-against-woodsmoke', 'ncas',
+  // Derive generic RSS publisher coverage from the same allow-list used by discovery.
+  // Adding a new RSS publisher can no longer silently omit it from health monitoring.
+  ...PUBLISHER_RSS_ROUTES.map(route => route.source_key),
+]);
 const STALE_AFTER_MS = 5 * 60 * 60 * 1000;
 const LOG_WINDOW_MS = 45 * 24 * 60 * 60 * 1000;
 type SourceRow = { source_key: string; enabled: number; discovery_config_json: string; [key: string]: unknown };
@@ -40,6 +43,9 @@ function configuredRoutes(source: Source, guardianAuto: string[]): string[] {
       ? [''] : [];
   }
   if (source.source_key === 'the-guardian') return guardianAuto;
+  if (source.source_key === 'clean-air-fund') {
+    return configuredCleanAirFundIndex(source) ? [CLEAN_AIR_FUND_INDEX_ROUTE_KEY] : [];
+  }
   if (source.source_key === 'dsawsp') {
     return configuredDsawspIndex(source) ? [DSAWSP_INDEX_ROUTE_KEY] : [];
   }

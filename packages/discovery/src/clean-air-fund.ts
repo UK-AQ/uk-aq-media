@@ -73,16 +73,101 @@ export type CleanAirFundIndexCandidate = {
   canonical_url: string; title: string; published_at: string; categories: string[];
 };
 
+// Publisher cards may separate their linked image, heading and date into sibling
+// elements. Walk only the bounded HTML already fetched and find the smallest
+// enclosing element holding one article identity, a heading and a date.
+type IndexElement = {
+  tag: string; start: number; end: number; opening: string; parent: number | null;
+};
+const VOID_HTML_TAGS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
+  'meta', 'param', 'source', 'track', 'wbr',
+]);
+const MAX_CARD_HTML_BYTES = 12 * 1024;
+
+function indexElements(html: string): IndexElement[] {
+  const nodes: IndexElement[] = [];
+  const stack: number[] = [];
+  const tags = /<(\/?)([a-z][a-z0-9:-]*)\b[^>]*>/gi;
+  for (const token of html.matchAll(tags)) {
+    const tag = token[2]!.toLowerCase();
+    if (token[1] === '/') {
+      const match = stack.findLastIndex(index => nodes[index]!.tag === tag);
+      if (match < 0) continue;
+      for (let i = stack.length - 1; i >= match; i--) {
+        nodes[stack[i]!]!.end = i === match ? token.index + token[0].length : token.index;
+      }
+      stack.length = match;
+    } else if (!VOID_HTML_TAGS.has(tag) && !token[0].endsWith('/>')) {
+      nodes.push({ tag, start: token.index, end: html.length,
+        opening: token[0], parent: stack.at(-1) ?? null });
+      stack.push(nodes.length - 1);
+    }
+  }
+  return nodes;
+}
+
+function cardTitle(fragment: string, anchorOpening: string): string | null {
+  // Heading elements are the first choice. Some publisher card variants use
+  // a classed text element rather than a semantic heading.
+  const headings = [...fragment.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi)]
+    .map(match => plainText(match[2] ?? ''));
+  for (const heading of headings) {
+    if (heading.length >= 8 && heading.length <= 300) return heading;
+  }
+  for (const element of fragment.matchAll(
+    /<(p|span|div)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi,
+  )) {
+    const classes = attribute(element[2] ?? '', 'class') ?? '';
+    if (!/(?:title|heading)/i.test(classes)) continue;
+    const title = plainText(element[3] ?? '');
+    if (title.length >= 8 && title.length <= 300) return title;
+  }
+  const label = attribute(anchorOpening, 'aria-label');
+  return label && label.length >= 8 && label.length <= 300 ? label : null;
+}
+
+function candidateFromCard(fragment: string, anchorOpening: string,
+  canonical: string, source: Source): CleanAirFundIndexCandidate | null {
+  // Never use dates or titles from a listing section that contains a different
+  // news-item URL. Repeated links to the same article are harmless.
+  for (const anchor of fragment.matchAll(/<a\b([^>]*)>/gi)) {
+    const raw = attribute(anchor[1] ?? '', 'href');
+    if (!raw) continue;
+    let link: string | null = null;
+    try {
+      const permitted = publisherHttpsUrl(new URL(raw, CLEAN_AIR_FUND_INDEX_URL).href, source);
+      if (permitted) {
+        const url = new URL(permitted);
+        if (/^\/news-item\/[a-z0-9-]+\/$/i.test(url.pathname) && !url.search && !url.hash) {
+          link = canonicalizeUrl(permitted, source);
+        }
+      }
+    } catch { /* The existing publisher and canonicalisation boundaries reject this link. */ }
+    if (link !== null && link !== canonical) return null;
+  }
+  const dated = publicationDate(plainText(fragment));
+  const title = cardTitle(fragment, anchorOpening);
+  if (!dated || !title) return null;
+  return { canonical_url: canonical, title, published_at: dated.date,
+    categories: [dated.category] };
+}
+
 export function extractCleanAirFundIndexCandidates(html: string,
   source: Source): CleanAirFundIndexCandidate[] {
   if (!configuredCleanAirFundIndex(source)) throw new ScanError('clean_air_fund_config_mismatch');
+  // Script and style contents are not publisher cards. Preserve offsets while
+  // masking them to keep the element scan confined to real markup.
+  const markup = html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
+    value => ' '.repeat(value.length));
+  const elements = indexElements(markup);
   const candidates: CleanAirFundIndexCandidate[] = [];
   const seen = new Set<string>();
-  // A Clean Air Fund index card links to /news-item/<slug>/, including its Blog entries.
-  // Card headings provide titles; introductory text, descriptions and navigation never do.
-  for (const anchor of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)) {
+  for (let anchorIndex = 0; anchorIndex < elements.length; anchorIndex++) {
     if (candidates.length >= CLEAN_AIR_FUND_MAX_ITEMS) break;
-    const href = attribute(anchor[1] ?? '', 'href');
+    const anchor = elements[anchorIndex]!;
+    if (anchor.tag !== 'a') continue;
+    const href = attribute(anchor.opening, 'href');
     if (!href) continue;
     let canonical: string;
     try {
@@ -93,14 +178,17 @@ export function extractCleanAirFundIndexCandidates(html: string,
       canonical = canonicalizeUrl(permitted, source);
     } catch { continue; }
     if (seen.has(canonical)) continue;
-    const card = anchor[2] ?? '';
-    const heading = /<h([2-5])\b[^>]*>([\s\S]*?)<\/h\1\s*>/i.exec(card);
-    const title = plainText(heading?.[2] ?? attribute(anchor[1] ?? '', 'aria-label') ?? '');
-    const dated = publicationDate(plainText(card));
-    if (!dated || title.length < 8 || title.length > 300) continue;
-    seen.add(canonical);
-    candidates.push({ canonical_url: canonical, title, published_at: dated.date,
-      categories: [dated.category] });
+    for (let index: number | null = anchorIndex; index !== null;
+      index = elements[index]!.parent) {
+      const element = elements[index]!;
+      if (element.end - element.start > MAX_CARD_HTML_BYTES) break;
+      const candidate = candidateFromCard(markup.slice(element.start, element.end),
+        anchor.opening, canonical, source);
+      if (!candidate) continue;
+      seen.add(canonical);
+      candidates.push(candidate);
+      break;
+    }
   }
   if (candidates.length === 0) throw new ScanError('clean_air_fund_no_valid_index_candidates');
   return candidates;
