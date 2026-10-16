@@ -92,7 +92,10 @@ function indexElements(html: string): IndexElement[] {
   for (const token of html.matchAll(tags)) {
     const tag = token[2]!.toLowerCase();
     if (token[1] === '/') {
-      const match = stack.findLastIndex(index => nodes[index]!.tag === tag);
+      let match = -1;
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (nodes[stack[i]!]!.tag === tag) { match = i; break; }
+      }
       if (match < 0) continue;
       for (let i = stack.length - 1; i >= match; i--) {
         nodes[stack[i]!]!.end = i === match ? token.index + token[0].length : token.index;
