@@ -320,6 +320,31 @@
     "search_index_policy": "metadata_only"
   },
   {
+    "source_key": "impact-on-urban-health",
+    "name": "Impact on Urban Health",
+    "canonical_domain": "urbanhealth.org.uk",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "impact-on-urban-health-feed",
+          "url": "https://urbanhealth.org.uk/feed",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
     "source_key": "see-the-air",
     "name": "See The Air",
     "canonical_domain": "seetheair.org",
