@@ -17,10 +17,10 @@ const sources = z.array(SourceSchema).parse(JSON.parse(
 ));
 const publisherSources = sources.filter(source =>
   ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org',
-    'university-of-exeter', 'see-the-air', 'mums-for-lungs']
+    'university-of-exeter', 'impact-on-urban-health', 'see-the-air', 'mums-for-lungs']
     .includes(source.source_key));
-assert.equal(PUBLISHER_RSS_ROUTES.length, 19);
-assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 31);
+assert.equal(PUBLISHER_RSS_ROUTES.length, 20);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 32);
 for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
@@ -38,6 +38,13 @@ assert.equal(publisherSources.find(source => source.source_key === 'phys-org')?.
   'disabled');
 assert.equal(publisherSources.find(source => source.source_key === 'university-of-exeter')
   ?.canonical_domain, 'news.exeter.ac.uk');
+const impactOnUrbanHealth = publisherSources.find(
+  source => source.source_key === 'impact-on-urban-health')!;
+assert.equal(impactOnUrbanHealth.canonical_domain, 'urbanhealth.org.uk');
+assert.equal(impactOnUrbanHealth.publication_policy, 'manual');
+assert.equal(impactOnUrbanHealth.search_index_policy, 'metadata_only');
+assert.deepEqual(configuredPublisherRssRouteKeys(impactOnUrbanHealth),
+  ['impact-on-urban-health-feed']);
 const seeTheAir = publisherSources.find(source => source.source_key === 'see-the-air')!;
 assert.equal(seeTheAir.canonical_domain, 'seetheair.org');
 assert.equal(seeTheAir.publication_policy, 'manual');
