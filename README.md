@@ -534,6 +534,15 @@ real-operation validation, known limits and rollback.
 
 ## Bluesky article publishing
 
+Migration `0050_bluesky_wakeup_singleton.sql` adds a single durable D1 scheduling
+slot for the Bluesky Queue. Discovery scans, GDELT chunks and admin operations
+all reconcile through one atomic claim instead of independently creating Queue
+messages. The next eligible publication is scheduled once, respecting existing
+cooldown and stale-claim barriers. An expiring lease lets the normal scheduler
+recover an accepted-but-lost Queue message or interrupted Worker. Redundant and
+legacy wake-ups can be acknowledged without creating further messages. Publication
+outbox state, record keys, retry limits and editorial authorisation are unchanged.
+
 Bluesky publication is a downstream, durable outbox operation and never changes an
 article's Media approval result. Migration `0021_bluesky_publications.sql` adds the
 singleton `media_bluesky_settings`, the audited `media_bluesky_publications` outbox,

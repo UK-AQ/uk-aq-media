@@ -180,6 +180,11 @@ function message() {
 function environment(rows: PublicationRow[], now: () => number) {
   const wakes: Wake[] = [];
   const claimedIds: number[] = [];
+  // The fake D1 slot represents one existing queued wake-up.
+  let wakeState: 'idle' | 'scheduled' | 'processing' = 'scheduled';
+  let wakeDue = now() - 1;
+  let wakeLease = wakeDue + 600_000;
+  let wakeGeneration = 1;
   const settings = {
     publishing_enabled: 1,
     activation_event_id: 1,
@@ -194,6 +199,27 @@ function environment(rows: PublicationRow[], now: () => number) {
       const statement = {
         bind(...values: unknown[]) { bindings = values; return statement; },
         async first() {
+          if (normal.startsWith('UPDATE media_bluesky_wakeup_schedule') &&
+              normal.includes("SET state = 'processing'")) {
+            if (wakeState !== 'scheduled' || wakeDue > Date.parse(String(bindings[2]))) {
+              return null;
+            }
+            wakeState = 'processing';
+            wakeLease = Date.parse(String(bindings[0]));
+            return { generation: wakeGeneration };
+          }
+          if (normal.startsWith('UPDATE media_bluesky_wakeup_schedule') &&
+              normal.includes('SET generation = generation + 1')) {
+            const due = Date.parse(String(bindings[0]));
+            const instant = Date.parse(String(bindings[3]));
+            if (wakeState !== 'idle' && wakeLease > instant &&
+                !(wakeState === 'scheduled' && wakeDue > due)) return null;
+            wakeState = 'scheduled';
+            wakeDue = due;
+            wakeLease = Date.parse(String(bindings[1]));
+            wakeGeneration++;
+            return { generation: wakeGeneration };
+          }
           if (normal.includes('FROM media_bluesky_settings')) return settings;
           if (normal.startsWith('SELECT next_attempt_at FROM media_bluesky_publications')) {
             const queued = rows.filter(row => row.status === 'queued').sort((left, right) => {
@@ -229,7 +255,15 @@ function environment(rows: PublicationRow[], now: () => number) {
         },
         async run() {
           let changes = 0;
-          if (normal.includes("SET status = 'queued'") && normal.includes("WHERE status = 'posting'")) {
+          if (normal.startsWith('UPDATE media_bluesky_wakeup_schedule') &&
+              normal.includes("SET state = 'idle'")) {
+            if (Number(bindings[1]) === wakeGeneration &&
+                wakeState === (normal.includes("state = 'processing'")
+                  ? 'processing' : 'scheduled')) {
+              wakeState = 'idle';
+              changes = 1;
+            }
+          } else if (normal.includes("SET status = 'queued'") && normal.includes("WHERE status = 'posting'")) {
             const cutoff = String(bindings[1]);
             for (const row of rows) {
               if (row.status === 'posting' &&
@@ -580,7 +614,9 @@ async function checkDirectPublishContract(): Promise<void> {
     initialEvents);
   assert.equal(scalar(sqlite, 'SELECT revision AS value FROM media_articles WHERE id = 301'),
     initialRevision);
-  assert.equal(wakes.length, 2);
+  // Bluesky publishing is disabled in this fixture, so no wake-up is enqueued.
+  // Facebook still gets its existing wake-up request.
+  assert.equal(wakes.length, 1);
   const replay = await invokeStatus(env, directRequest([301], key, true, true));
   assert.equal(replay.status, 200);
   assert.equal(replay.body.replayed, true);
@@ -1004,6 +1040,9 @@ async function checkThumbnailWaitingCorrection(): Promise<void> {
   assert.deepEqual(sqlite.prepare('PRAGMA table_info(media_bluesky_publications)').all(), priorColumns);
   assert.equal(scalar(sqlite, 'SELECT count(*) AS value FROM media_bluesky_publications WHERE article_id = 601'), 0);
   sqlite.exec(readFileSync('migrations/0037_possible_duplicate_auto_approval_hold.sql', 'utf8'));
+  // The standalone fixture intentionally applies older migrations first.
+  // Install the new independent wake-up table before exercising live consumers.
+  sqlite.exec(readFileSync('migrations/0050_bluesky_wakeup_singleton.sql', 'utf8'));
 
   insertStatusFixture(sqlite, 603, 'approved', false, 'trusted_source_auto');
   insertStatusFixture(sqlite, 604, 'approved', true, 'trusted_source_auto');
@@ -1090,9 +1129,13 @@ async function checkThumbnailWaitingCorrection(): Promise<void> {
   // Queue delivery failure leaves durable recovery intact for scheduler retry.
   sqlite.exec(`UPDATE media_bluesky_publications SET status = 'blocked',
     last_error_code = 'thumbnail_pending' WHERE article_id = 603`);
+  sqlite.exec(`UPDATE media_bluesky_wakeup_schedule SET
+    state='idle', due_at=NULL, lease_expires_at=NULL WHERE id=1`);
   await assert.rejects(reconcileBlueskyPublications(db, {
     async send() { throw new Error('fixture_queue_failure'); },
   }), /fixture_queue_failure/);
+  // A failed send releases the singleton for another safe wake-up.
+  await reconcileBlueskyPublications(db, env.MEDIA_BLUESKY_QUEUE);
   assert.equal(publication(603).status, 'queued');
 
   // Process only the oldest row with lost image identity: no network/post call.

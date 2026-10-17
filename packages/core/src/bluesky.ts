@@ -175,13 +175,102 @@ export async function releaseBlueskyThumbnailPending(db: D1Database): Promise<nu
   return Number(result.meta.changes ?? 0);
 }
 
+// One durable scheduling slot is shared by admin, discovery and GDELT producers.
+// A lease spans the requested delivery time and allows scheduled recovery of
+// a lost Queue message. UPDATE ... RETURNING atomically elects one producer.
+type BlueskyWakeSettings = {
+  publishing_enabled: number; activation_event_id: number | null;
+  cooldown_seconds: number; last_successful_post_at: string | null;
+};
+const WAKE_RECOVERY_MS = 10 * 60 * 1000;
+const WAKE_POSTING_STALE_MS = 10 * 60 * 1000;
+const MAX_WAKE_DELAY_SECONDS = 43_200;
+
+export async function scheduleBlueskyWake(db: D1Database, queue: Pick<Queue, 'send'>,
+  settings?: BlueskyWakeSettings): Promise<boolean> {
+  const configured = settings ?? await db.prepare(
+    'SELECT publishing_enabled, activation_event_id, cooldown_seconds, ' +
+    'last_successful_post_at FROM media_bluesky_settings WHERE id = 1'
+  ).first<BlueskyWakeSettings>();
+  if (!configured || !configured.publishing_enabled ||
+    configured.activation_event_id === null) return false;
+  const [queued, posting] = await Promise.all([
+    db.prepare(`SELECT next_attempt_at FROM media_bluesky_publications
+      WHERE status = 'queued'
+      ORDER BY CASE WHEN next_attempt_at IS NULL THEN 0 ELSE 1 END,
+        next_attempt_at, id LIMIT 1`)
+      .first<{ next_attempt_at: string | null }>(),
+    db.prepare(`SELECT last_attempted_at FROM media_bluesky_publications
+      WHERE status = 'posting'
+      ORDER BY CASE WHEN last_attempted_at IS NULL THEN 0 ELSE 1 END,
+        last_attempted_at, id LIMIT 1`)
+      .first<{ last_attempted_at: string | null }>(),
+  ]);
+  if (!queued && !posting) return false;
+  const now = Date.now();
+  const timestamp = (date: string | null): number =>
+    date && Number.isFinite(Date.parse(date)) ? Date.parse(date) : now;
+  const queuedAt = queued ? timestamp(queued.next_attempt_at) : Number.POSITIVE_INFINITY;
+  const postingAt = posting ? timestamp(posting.last_attempted_at) +
+    (posting.last_attempted_at ? WAKE_POSTING_STALE_MS : 0) : now;
+  const cooldownAt = configured.last_successful_post_at
+    ? timestamp(configured.last_successful_post_at) + configured.cooldown_seconds * 1000 : now;
+  const desiredAt = Math.max(now, cooldownAt, posting ? postingAt : queuedAt);
+  const delaySeconds = Math.min(MAX_WAKE_DELAY_SECONDS,
+    Math.max(0, Math.ceil((desiredAt - now) / 1000)));
+  // Use stable requested time to avoid millisecond rounding causing a new
+  // delayed wake-up on every repeated discovery reconciliation.
+  const dueAt = new Date(Math.min(desiredAt, now + MAX_WAKE_DELAY_SECONDS * 1000)).toISOString();
+  const nowIso = new Date(now).toISOString();
+  const leaseUntil = new Date(now + delaySeconds * 1000 + WAKE_RECOVERY_MS).toISOString();
+  const claimed = await db.prepare(`UPDATE media_bluesky_wakeup_schedule
+    SET generation = generation + 1, state = 'scheduled', due_at = ?,
+      lease_expires_at = ?, updated_at = ?
+    WHERE id = 1 AND (
+      state = 'idle' OR lease_expires_at <= ?
+      OR (state = 'scheduled' AND due_at > ?)
+    ) RETURNING generation`)
+    .bind(dueAt, leaseUntil, nowIso, nowIso, dueAt).first<{ generation: number }>();
+  if (!claimed) return false;
+  try {
+    await queue.send({ type: 'bluesky_wakeup' } satisfies BlueskyWakeup,
+      delaySeconds ? { delaySeconds } : undefined);
+    return true;
+  } catch (error) {
+    // D1 is authoritative. If the send outcome is unknown, a later re-send is
+    // safe because only one consumer can acquire the singleton processing slot.
+    await db.prepare(`UPDATE media_bluesky_wakeup_schedule
+      SET state = 'idle', due_at = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = 1 AND generation = ? AND state = 'scheduled'`)
+      .bind(new Date(Date.now()).toISOString(), claimed.generation).run();
+    throw error;
+  }
+}
+
+export async function claimBlueskyWake(db: D1Database): Promise<number | null> {
+  const now = new Date(Date.now());
+  const row = await db.prepare(`UPDATE media_bluesky_wakeup_schedule
+    SET state = 'processing', lease_expires_at = ?, updated_at = ?
+    WHERE id = 1 AND state = 'scheduled' AND due_at <= ?
+    RETURNING generation`)
+    .bind(new Date(now.getTime() + WAKE_RECOVERY_MS).toISOString(),
+      now.toISOString(), now.toISOString()).first<{ generation: number }>();
+  return row?.generation ?? null;
+}
+
+export async function completeBlueskyWake(db: D1Database, generation: number): Promise<void> {
+  await db.prepare(`UPDATE media_bluesky_wakeup_schedule
+    SET state = 'idle', due_at = NULL, lease_expires_at = NULL, updated_at = ?
+    WHERE id = 1 AND generation = ? AND state = 'processing'`)
+    .bind(new Date(Date.now()).toISOString(), generation).run();
+}
+
 export async function reconcileBlueskyPublications(db: D1Database,
   queue: Pick<Queue, 'send'>): Promise<void> {
   await releaseBlueskyThumbnailPending(db);
-  const runnable = await db.prepare(
-    "SELECT id FROM media_bluesky_publications WHERE status IN ('queued', 'posting') LIMIT 1").first();
-  if (runnable) await queue.send({ type: 'bluesky_wakeup' } satisfies BlueskyWakeup);
+  await scheduleBlueskyWake(db, queue);
 }
+
 export function isBlueskyWakeup(value: unknown): value is BlueskyWakeup {
   if (!value || typeof value !== 'object') return false;
   const body = value as Record<string, unknown>;

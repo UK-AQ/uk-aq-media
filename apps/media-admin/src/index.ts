@@ -635,7 +635,7 @@ async function blueskySettings(request: Request, env: MediaAdminEnv): Promise<Re
   // Replays also reissue the harmless generic wake so a lost post-commit Queue
   // send is repaired without waiting for the two-hour scheduler reconciliation.
   if (parsed.data.publishing_enabled) {
-    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    try { await reconcileBlueskyPublications(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE); }
     catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
   }
   const settings = await env.MEDIA_DB.prepare(`SELECT publishing_enabled, cooldown_seconds,
@@ -785,7 +785,7 @@ async function statusMutationResponse(env: MediaAdminEnv, id: number, receipt: N
   Awaited<ReturnType<typeof statusMutationReceipt>>>, replayed: boolean): Promise<Response> {
   await reconcileHomepageLatestSix(env.MEDIA_DB);
   if (receipt.blueskyPublication) {
-    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    try { await reconcileBlueskyPublications(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE); }
     catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', article_id: id })); }
   }
   if (receipt.facebookPublication) {
@@ -948,7 +948,7 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
   }
   await reconcileHomepageLatestSix(env.MEDIA_DB);
   if (publications.length) {
-    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    try { await reconcileBlueskyPublications(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE); }
     catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', request_key: key })); }
   }
   if (facebookPublications.length) {
@@ -995,7 +995,7 @@ async function directPublishResponse(env: MediaAdminEnv, key: string,
   kind: 'single' | 'bulk', ids: number[], receipt: NonNullable<
     Awaited<ReturnType<typeof directPublishReceipt>>>, replayed: boolean): Promise<Response> {
   if (receipt.bluesky.length) {
-    try { await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' }); }
+    try { await reconcileBlueskyPublications(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE); }
     catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', request_key: key })); }
   }
   if (receipt.facebook.length) {

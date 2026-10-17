@@ -3,8 +3,8 @@ import {
   deterministicTid, fetchRemotePreviewImage,
   isBlueskyWakeup, readBoundedImageResponse, remotePreviewUrl, renderBlueskyPost,
   reconcileHomepageLatestSix, storeLocalImage, validateLocalImageBytes,
-  reconcileBlueskyPublications,
-  type BlueskyWakeup, type Source,
+  reconcileBlueskyPublications, scheduleBlueskyWake, claimBlueskyWake, completeBlueskyWake,
+  type Source,
 } from '@uk-aq-media/core';
 import { fetchArticleHeadMetadata, type ArticleHeadMetadata } from '@uk-aq-media/discovery';
 
@@ -22,7 +22,6 @@ type Article = { canonical_url: string; title: string;
 const XRPC = 'https://bsky.social/xrpc/';
 const MAX_ATTEMPTS = 5;
 const XRPC_TIMEOUT_MS = 15_000;
-const MAX_QUEUE_DELAY_SECONDS = 43_200;
 const MAX_XRPC_JSON_BYTES = 256 * 1024;
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
@@ -378,48 +377,36 @@ export async function reconcileBlueskyQueue(env: MediaDiscoveryEnv): Promise<voi
 
 export async function scheduleNextBacklogWake(env: MediaDiscoveryEnv,
   settings: Settings): Promise<boolean> {
-  const [nextQueued, nextPosting] = await Promise.all([
-    env.MEDIA_DB.prepare(`SELECT next_attempt_at FROM media_bluesky_publications
-      WHERE status = 'queued'
-      ORDER BY CASE WHEN next_attempt_at IS NULL THEN 0 ELSE 1 END, next_attempt_at, id LIMIT 1`)
-      .first<{ next_attempt_at: string | null }>(),
-    env.MEDIA_DB.prepare(`SELECT last_attempted_at FROM media_bluesky_publications
-      WHERE status = 'posting'
-      ORDER BY CASE WHEN last_attempted_at IS NULL THEN 0 ELSE 1 END,
-        last_attempted_at, id LIMIT 1`).first<{ last_attempted_at: string | null }>(),
-  ]);
-  if (!nextQueued && !nextPosting) return false;
-  const now = Date.now();
-  const queuedAt = nextQueued ? nextQueued.next_attempt_at
-    ? Date.parse(nextQueued.next_attempt_at) : now : Number.POSITIVE_INFINITY;
-  const parsedPostingAt = nextPosting?.last_attempted_at
-    ? Date.parse(nextPosting.last_attempted_at) + STALE_CLAIM_MS : now;
-  const postingAt = Number.isFinite(parsedPostingAt) ? parsedPostingAt : now;
-  // A live claim is a global barrier. Queued eligibility cannot outrank the
-  // earliest claim-recovery threshold in the remote-success/D1-crash window.
-  const workAt = nextPosting ? postingAt : queuedAt;
-  const cooldownAt = settings.last_successful_post_at
-    ? Date.parse(settings.last_successful_post_at) + settings.cooldown_seconds * 1000 : now;
-  const delaySeconds = Math.max(0, Math.ceil((Math.max(workAt, cooldownAt) - now) / 1000));
-  await env.MEDIA_BLUESKY_QUEUE.send({ type: 'bluesky_wakeup' } satisfies BlueskyWakeup,
-    delaySeconds ? { delaySeconds: Math.min(delaySeconds, MAX_QUEUE_DELAY_SECONDS) } : undefined);
-  return true;
+  return scheduleBlueskyWake(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE, settings);
 }
 
 export async function consumeBluesky(message: Message<unknown>, env: MediaDiscoveryEnv): Promise<void> {
   if (!isBlueskyWakeup(message.body)) { message.ack(); return; }
+  // Legacy or duplicate wake-ups are acknowledged without generating more.
+  // A pending scheduling row is the only authority to process a publication.
+  const wakeGeneration = await claimBlueskyWake(env.MEDIA_DB);
+  if (wakeGeneration === null) { message.ack(); return; }
   const settings = await env.MEDIA_DB.prepare('SELECT * FROM media_bluesky_settings WHERE id = 1')
     .first<Settings>();
   if (!settings || settings.activation_event_id === null || !settings.publishing_enabled) {
+    await completeBlueskyWake(env.MEDIA_DB, wakeGeneration);
     message.ack(); return;
   }
+  const settle = async (wakeSettings: Settings): Promise<void> => {
+    await completeBlueskyWake(env.MEDIA_DB, wakeGeneration);
+    // A Queue outage after the publication commits must not retry the remote
+    // post with a new key. The scheduler safely recovers later from D1.
+    try { await scheduleNextBacklogWake(env, wakeSettings); }
+    catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+    message.ack();
+  };
   const now = Date.now();
   if (settings.last_successful_post_at) {
     const remaining = Math.ceil((Date.parse(settings.last_successful_post_at) +
       settings.cooldown_seconds * 1000 - now) / 1000);
     if (remaining > 0) {
-      await scheduleNextBacklogWake(env, settings);
-      message.ack(); return;
+      await settle(settings);
+      return;
     }
   }
   // Recover claims older than ten minutes. Any claim still posting is a global
@@ -432,16 +419,16 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
   const livePosting = await env.MEDIA_DB.prepare(`SELECT id FROM media_bluesky_publications
     WHERE status = 'posting' ORDER BY last_attempted_at, id LIMIT 1`).first();
   if (livePosting) {
-    await scheduleNextBacklogWake(env, settings);
-    message.ack(); return;
+    await settle(settings);
+    return;
   }
   const publication = await env.MEDIA_DB.prepare(`SELECT id, article_id, publication_key, status,
     publication_reason, attempt_count, record_key, created_at FROM media_bluesky_publications
     WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
     ORDER BY id LIMIT 1`).bind(new Date(now).toISOString()).first<Publication>();
   if (!publication) {
-    await scheduleNextBacklogWake(env, settings);
-    message.ack(); return;
+    await settle(settings);
+    return;
   }
   const recordKey = publication.record_key ?? deterministicTid(publication.created_at, publication.id);
   const claimed = await env.MEDIA_DB.prepare(`UPDATE media_bluesky_publications
@@ -452,8 +439,8 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
     .bind(recordKey, new Date(now).toISOString(),
       new Date(now).toISOString(), publication.id).run();
   if (!claimed.meta.changes) {
-    await scheduleNextBacklogWake(env, settings);
-    message.ack(); return;
+    await settle(settings);
+    return;
   }
   let wakeSettings = settings;
   try {
@@ -523,11 +510,5 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
     console.error(JSON.stringify({ event: waiting ? 'bluesky_thumbnail_pending' : 'bluesky_publication_failed',
       publication_id: publication.id, error_code: waiting ? 'thumbnail_pending' : error.code }));
   }
-  try {
-    await scheduleNextBacklogWake(env, wakeSettings);
-    message.ack();
-  } catch {
-    console.error(JSON.stringify({ event: 'bluesky_wakeup_failed', publication_id: publication.id }));
-    message.retry({ delaySeconds: 30 });
-  }
+  await settle(wakeSettings);
 }
