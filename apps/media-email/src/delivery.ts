@@ -4,18 +4,13 @@ import { digestCursorRequest, digestRunStateAfterCursor, hash, iso, newDelivery,
 import { dailyWorkStillMatches, digestRequiresOperator } from './delivery-policy';
 import { MessageSizeError, serialize, submission, type Message } from './message';
 import { articleMessage, confirmationMessage, type EmailArticle } from './presentation';
-import { publicPreviewImageUrl, type PublicPreviewSelection } from '@uk-aq-media/core';
+import { emailPreviewImageUrl, type EmailPreviewSelection } from './preview-image';
 import { submit } from './transport';
-type Article = Omit<EmailArticle,'preview_image_url'> & PublicPreviewSelection;
-// Current standalone Media public origin from the system Media contract. This
-// serves images for both TEST and future public-site links, independent of tokens.
-const MEDIA_PUBLIC_ORIGIN='https://uk-aq-media-public.uk-aq-media.workers.dev';
-const articleColumns=`a.id,a.source_key,coalesce(a.display_title,a.title) AS title,
+type Article = Omit<EmailArticle,'preview_image_url'> & EmailPreviewSelection;
+const articleColumns=`a.id,a.source_key,a.status,s.canonical_domain,coalesce(a.display_title,a.title) AS title,
   a.publisher,a.canonical_url,a.published_at,a.og_image_url,
-  a.image_policy AS article_image_policy,s.image_policy AS source_image_policy,
-  li.source_image_url AS local_image_source_url,li.content_sha256 AS local_image_content_sha256`;
-const imageJoins=`JOIN media_sources s ON s.source_key=a.source_key
-  LEFT JOIN media_article_local_images li ON li.article_id=a.id`;
+  a.image_policy AS article_image_policy,s.image_policy AS source_image_policy`;
+const imageJoins=`JOIN media_sources s ON s.source_key=a.source_key`;
 const terminal=new Set(['accepted','unknown','permanent_failure','cancelled']);
 export async function cancel(env:Env,id:string):Promise<void> {
   await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='cancelled'
@@ -57,8 +52,8 @@ async function links(env:Env,sub:Subscription):Promise<{manage_url:string;unsubs
 async function activeMessage(env:Env,sub:Subscription,articles:Article[],kind:'immediate'|'daily',
   date:string):Promise<Message|null> {
   const urls=await links(env,sub); if(!urls) return null;
-  const presentation=await Promise.all(articles.map(async article=>({...article,
-    preview_image_url:await publicPreviewImageUrl(MEDIA_PUBLIC_ORIGIN,article)})));
+  const presentation=articles.map(article=>({...article,
+    preview_image_url:emailPreviewImageUrl(article)}));
   return articleMessage(env.NEWS_EMAIL_SITE_ORIGIN,presentation,kind,urls,date);
 }
 export async function confirmation(env:Env,id:string,w:Work):Promise<void> {
