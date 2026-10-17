@@ -1,4 +1,4 @@
-import { allTopicsPredicate, selectedTopicSlugs, boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, meaningfulSearchTerms, MAX_SEARCH_QUERY_CHARACTERS, reconcileHomepageLatestSix, remotePreviewUrl, sourcePresentationPlaceholderPath,
+import { allTopicsPredicate, selectedTopicSlugs, boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, meaningfulSearchTerms, MAX_SEARCH_QUERY_CHARACTERS, reconcileHomepageLatestSix, remotePreviewUrl, currentLocalImageVersion, permittedStoredImageUrl, publicPreviewImageUrl,
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 import { handleResearchPublic } from './research';
@@ -44,36 +44,8 @@ type HomepageRow = {
   published_at: string | null;
 } & PreviewSelection;
 
-function permittedStoredImageUrl(article: PreviewSelection): string | null {
-  return article.article_image_policy === 'remote_preview' &&
-    article.source_image_policy === 'remote_preview' ? article.og_image_url : null;
-}
-
-function currentLocalImageVersion(article: Pick<PreviewSelection, 'og_image_url' |
-  'article_image_policy' | 'source_image_policy' | 'local_image_source_url' |
-  'local_image_content_sha256'>): string | null {
-  return article.article_image_policy === 'local_copy_permitted' &&
-    article.source_image_policy === 'local_copy_permitted' &&
-    article.og_image_url !== null && article.local_image_source_url === article.og_image_url &&
-    article.local_image_content_sha256
-    ? article.local_image_content_sha256.slice(0, 32) : null;
-}
-
-export async function publicPreviewImageUrl(origin: string,
-  article: PreviewSelection): Promise<string | null> {
-  const publisherImageUrl = permittedStoredImageUrl(article);
-  if (publisherImageUrl) {
-    return versionedArticleImageUrl(origin, article.id, publisherImageUrl);
-  }
-  const localVersion = currentLocalImageVersion(article);
-  if (localVersion) {
-    const url = new URL(`/article-images/${article.id}`, origin);
-    url.searchParams.set('v', localVersion);
-    return url.href;
-  }
-  const placeholderPath = sourcePresentationPlaceholderPath(article);
-  return placeholderPath ? new URL(placeholderPath, origin).href : null;
-}
+// Retain the public module interface used by existing structural checks.
+export { publicPreviewImageUrl } from '@uk-aq-media/core';
 
 export function decodeArticleCursor(raw: string | null): [string, number] | null {
   if (!raw) return null;

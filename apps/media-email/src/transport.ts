@@ -1,5 +1,5 @@
-import { boundedBody, encoder, type Env, type Transport } from './common';
-import { serialize, type Submission } from './message';
+import { boundedBody, type Env, type Transport } from './common';
+import { fallbackRequest, serialize, type Submission } from './message';
 import { result, smtpSubmit, type Outcome, type Result } from './smtp';
 import { classifyDefiniteProRejection } from './transport-policy';
 
@@ -34,8 +34,8 @@ export async function submit(env:Env,transport:Transport,message:Submission,befo
   let url:URL;
   try { url=fallbackEndpoint(env,'/send'); }
   catch { return result('permanent_failure','fallback_not_configured'); }
-  const body=JSON.stringify(message);
-  if(encoder.encode(body).length>200000) return result('permanent_failure','fallback_message_too_large');
+  // serialize already bounded the complete MIME and this exact JSON envelope.
+  const body=fallbackRequest(message);
   try { await beforeSubmit(); }
   catch { return result('temporary_failure','submission_claim_unavailable'); }
   // The HTTP request may reach Pro SMTP even when no HTTP receipt comes back.

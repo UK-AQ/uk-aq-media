@@ -6,6 +6,7 @@ import { normalizeSupportedMailbox } from '../apps/media-email/src/mailbox';
 import { dailyCutoffIsDue, dailyTimestampIdentity, dailyWorkIdentity, dailyWorkStillMatches,
   digestRequiresOperator } from '../apps/media-email/src/delivery-policy';
 import { serialize } from '../apps/media-email/src/message';
+import { articleMessage } from '../apps/media-email/src/presentation';
 import { classifyDefiniteProRejection } from '../apps/media-email/src/transport-policy';
 
 let rpcHeaders=new Headers();
@@ -93,20 +94,23 @@ assert.equal(classifyDefiniteProRejection(401, undefined), null);
 const linkToken='b'.repeat(64);
 const manage=`https://test.example/news/#manage=${linkToken}`;
 const unsubscribe=`https://test.example/news/#unsubscribe=${linkToken}`;
-const text=`AQ NEWS\n\nManage preferences: ${manage}\nUnsubscribe: ${unsubscribe}\n`;
+const {text,html}=articleMessage('https://test.example',[{title:'Example article',
+  publisher:'Example publisher',canonical_url:'https://publisher.example/article',
+  published_at:'2026-10-06T07:00:00.000Z',preview_image_url:null}],
+  'daily',{manage_url:manage,unsubscribe_url:unsubscribe},'2026-10-06T08:00:00.000Z');
 const wire=serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
   NEWS_EMAIL_PUBLIC_API_ORIGIN:'https://api.example'} as Env,{
-  kind:'daily',to:'reader@example.org',text,manage_url:manage,unsubscribe_url:unsubscribe,
+  kind:'daily',to:'reader@example.org',text,html,manage_url:manage,unsubscribe_url:unsubscribe,
   message_id:`<news.${'a'.repeat(64)}@ukaq.co.uk>`,date:'2026-10-06T08:00:00.000Z',
 });
 assert.equal(/(^|[^\r])\n/.test(wire),false);
 assert.match(wire,/List-Unsubscribe: <https:\/\/api\.example\/one-click\/[a-f0-9]{64}>\r\n/);
-const encodedBody=wire.split('\r\n\r\n',2)[1]!.trim().replace(/\r\n/g,'');
+const encodedBody=/Content-Type: text\/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+)/.exec(wire)![1]!.trim().replace(/\r\n/g,'');
 assert.equal(Buffer.from(encodedBody,'base64').toString('utf8'),text.replace(/\n/g,'\r\n'));
 assert.throws(()=>serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
   NEWS_EMAIL_PUBLIC_API_ORIGIN:'https://api.example'} as Env,{
-  kind:'confirmation',to:'míke@example.org',text:'AQ NEWS\n',
+  kind:'confirmation',to:'míke@example.org',text:'AQ in the News\n',html,
   message_id:`<news.${'a'.repeat(64)}@ukaq.co.uk>`,date:'2026-10-06T08:00:00.000Z',
 }));
 
-console.log('AQ NEWS email correction checks passed.');
+console.log('AQ in the News email correction checks passed.');
