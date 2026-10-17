@@ -2,9 +2,20 @@ import { digestCursorRequest, digestRunStateAfterCursor, hash, iso, newDelivery,
   recordConfirmationOutcome, rpc, token, type CursorAdvanceReceipt, type Delivery,
   type DigestCursorReason, type Env, type Subscription, type Work } from './common';
 import { dailyWorkStillMatches, digestRequiresOperator } from './delivery-policy';
-import { submission, type Message } from './message';
+import { MessageSizeError, serialize, submission, type Message } from './message';
+import { articleMessage, confirmationMessage, type EmailArticle } from './presentation';
+import { publicPreviewImageUrl, type PublicPreviewSelection } from '@uk-aq-media/core';
 import { submit } from './transport';
-interface Article { title:string; publisher:string; canonical_url:string; published_at:string|null }
+type Article = Omit<EmailArticle,'preview_image_url'> & PublicPreviewSelection;
+// Current standalone Media public origin from the system Media contract. This
+// serves images for both TEST and future public-site links, independent of tokens.
+const MEDIA_PUBLIC_ORIGIN='https://uk-aq-media-public.uk-aq-media.workers.dev';
+const articleColumns=`a.id,a.source_key,coalesce(a.display_title,a.title) AS title,
+  a.publisher,a.canonical_url,a.published_at,a.og_image_url,
+  a.image_policy AS article_image_policy,s.image_policy AS source_image_policy,
+  li.source_image_url AS local_image_source_url,li.content_sha256 AS local_image_content_sha256`;
+const imageJoins=`JOIN media_sources s ON s.source_key=a.source_key
+  LEFT JOIN media_article_local_images li ON li.article_id=a.id`;
 const terminal=new Set(['accepted','unknown','permanent_failure','cancelled']);
 export async function cancel(env:Env,id:string):Promise<void> {
   await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='cancelled'
@@ -43,16 +54,12 @@ async function links(env:Env,sub:Subscription):Promise<{manage_url:string;unsubs
   return {manage_url:`${env.NEWS_EMAIL_SITE_ORIGIN}/news/#manage=${manage}`,
     unsubscribe_url:`${env.NEWS_EMAIL_SITE_ORIGIN}/news/#unsubscribe=${unsubscribe}`};
 }
-function articleText(articles:Article[]):string {
-  return articles.map(a=>{
-    const url=new URL(a.canonical_url);
-    if(!['https:','http:'].includes(url.protocol)||url.username||url.password) throw new Error('invalid_publisher_url');
-    return `${a.title}\n${a.publisher}${a.published_at?` · ${a.published_at.slice(0,10)}`:''}\n${url.href}`;
-  }).join('\n\n');
-}
-async function activeMessage(env:Env,sub:Subscription,articles:Article[],kind:string):Promise<Message|null> {
+async function activeMessage(env:Env,sub:Subscription,articles:Article[],kind:'immediate'|'daily',
+  date:string):Promise<Message|null> {
   const urls=await links(env,sub); if(!urls) return null;
-  return {kind,...urls,text:`AQ NEWS\n${kind==='daily'?`Daily update · ${new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/London'}).format(new Date())} · ${articles.length} articles\n`:''}\n${articleText(articles)}\n\nView all AQ NEWS: ${env.NEWS_EMAIL_SITE_ORIGIN}/news/\n\nManage preferences: ${urls.manage_url}\nUnsubscribe: ${urls.unsubscribe_url}\n`};
+  const presentation=await Promise.all(articles.map(async article=>({...article,
+    preview_image_url:await publicPreviewImageUrl(MEDIA_PUBLIC_ORIGIN,article)})));
+  return articleMessage(env.NEWS_EMAIL_SITE_ORIGIN,presentation,kind,urls,date);
 }
 export async function confirmation(env:Env,id:string,w:Work):Promise<void> {
   const sub=await rpc<Subscription>(env,'get',{subscription_id:w.subscription_id});
@@ -66,20 +73,19 @@ export async function confirmation(env:Env,id:string,w:Work):Promise<void> {
     await recordConfirmationOutcome(env,id,w.generation!,delivery.state==='sending'?'unknown':'cancelled'); return;
   }
   const link=`${env.NEWS_EMAIL_SITE_ORIGIN}/news/#confirm=${await token(env,`confirmation:${w.generation}`)}`;
-  const outcome=await send(env,delivery,sub,{kind:'confirmation',text:`AQ NEWS\n\nPlease confirm your email address to activate your requested AQ NEWS subscription.\n\n${link}\n\nThis link expires after 24 hours. If you did not request this subscription, ignore this email. No subscription will activate.\n`});
+  const outcome=await send(env,delivery,sub,confirmationMessage(env.NEWS_EMAIL_SITE_ORIGIN,link));
   await recordConfirmationOutcome(env,id,w.generation!,outcome);
 }
 export async function immediate(env:Env,id:string,w:Work):Promise<void> {
   const delivery=await newDelivery(env,id,w.subscription_id!,'immediate',w.event_id!);
   if(terminal.has(delivery.state)) return;
   const sub=await rpc<Subscription>(env,'get',{subscription_id:w.subscription_id});
-  const article=await env.MEDIA_DB.prepare(`SELECT coalesce(a.display_title,a.title) AS title,
-    a.publisher,a.canonical_url,a.published_at,e.approved_at FROM media_news_approval_events e
-    JOIN media_articles a ON a.id=e.article_id WHERE e.id=? AND a.status='approved'`)
+  const article=await env.MEDIA_DB.prepare(`SELECT ${articleColumns},e.approved_at FROM media_news_approval_events e
+    JOIN media_articles a ON a.id=e.article_id ${imageJoins} WHERE e.id=? AND a.status='approved'`)
     .bind(w.event_id).first<Article & {approved_at:string}>();
   if(sub.status!=='active'||sub.delivery_mode!=='immediate'||!article ||
       Date.parse(sub.mode_since_at)>=Date.parse(article.approved_at)) { await cancel(env,id); return; }
-  const message=await activeMessage(env,sub,[article],'immediate');
+  const message=await activeMessage(env,sub,[article],'immediate',delivery.created_at);
   if(!message) { await cancel(env,id); return; }
   // Resolve both authorities again immediately before final submission.
   const current=await rpc<Subscription>(env,'get',{subscription_id:sub.id});
@@ -104,9 +110,8 @@ export async function digest(env:Env,id:string,w:Work):Promise<void> {
   if(terminal.has(delivery.state)) return;
   const sub=await rpc<Subscription>(env,'get',{subscription_id:w.subscription_id});
   if(!dailyWorkStillMatches(w,sub)) { await cancel(env,id); return; }
-  const {results:articles}=await env.MEDIA_DB.prepare(`SELECT coalesce(a.display_title,a.title) AS title,
-    a.publisher,a.canonical_url,a.published_at FROM media_news_approval_events e
-    JOIN media_articles a ON a.id=e.article_id WHERE e.approved_at>? AND e.approved_at<=?
+  const {results:articles}=await env.MEDIA_DB.prepare(`SELECT ${articleColumns} FROM media_news_approval_events e
+    JOIN media_articles a ON a.id=e.article_id ${imageJoins} WHERE e.approved_at>? AND e.approved_at<=?
     AND a.status='approved' ORDER BY a.feed_sort_at DESC,a.id DESC LIMIT 501`)
     .bind(w.start,w.cutoff).all<Article>();
   // Fail closed instead of silently dropping part of a large window or sending a partial digest.
@@ -117,9 +122,14 @@ export async function digest(env:Env,id:string,w:Work):Promise<void> {
     await env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET state='empty',item_count=0 WHERE id=?`).bind(id).run();
     await cancel(env,id); await finishDigest(env,id,w,'empty'); return;
   }
-  const message=await activeMessage(env,sub,articles,'daily');
+  const message=await activeMessage(env,sub,articles,'daily',w.cutoff!);
   if(!message) { await cancel(env,id); return; }
-  if(digestRequiresOperator(articles.length,new TextEncoder().encode(message.text).length)) {
+  try {
+    // Includes UTF-8, both base64 alternatives, CID assets, headers/boundaries,
+    // and the fallback JSON envelope. Never deliver a truncated article window.
+    serialize(env,submission(delivery,sub.email,message));
+  } catch(error) {
+    if(!(error instanceof MessageSizeError)) throw error;
     await holdDigest(env,id,articles.length); return;
   }
   const current=await rpc<Subscription>(env,'get',{subscription_id:sub.id});

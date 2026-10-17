@@ -12,7 +12,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "types": "node scripts/worker-tools.mjs types",
-    "build": "node scripts/worker-tools.mjs build",
+    "build": "node scripts/news-email-branding.mjs --check && node scripts/worker-tools.mjs build",
     "seed:check": "tsx scripts/source-seed.ts --check",
     "ai:check": "tsx scripts/display-title-ai-accounting-check.ts",
     "guardian-image:check": "tsx scripts/guardian-image-quality-check.ts",

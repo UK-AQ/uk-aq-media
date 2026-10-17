@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Optional Pro fallback: loopback HTTP -> Workspace App-Password SMTP, stdlib only.
 
-Normal AQ NEWS delivery uses direct Cloudflare SMTP/XOAUTH2 without this service.
+Normal AQ in the News delivery uses direct Cloudflare SMTP/XOAUTH2 without this service.
 The SQLite journal is a transport receipt cache, not subscriber/editorial authority.
 A process crash during DATA is quarantined as unknown on restart. Never log requests.
 """
+import base64
 import hashlib
 import hmac
 import json
@@ -14,8 +15,6 @@ import smtplib
 import sqlite3
 import ssl
 from datetime import datetime
-from email.message import EmailMessage
-from email.policy import SMTP
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -23,8 +22,10 @@ from urllib.parse import urlparse
 
 MAX_REQUEST = 200_000
 FROM = 'news@ukaq.co.uk'
-SUBJECTS = {'confirmation': 'Confirm your AQ NEWS email subscription',
-            'immediate': 'AQ NEWS: a newly approved article', 'daily': 'Your daily AQ NEWS update'}
+MAX_MIME = 250_000
+BRANDING_PATH = Path(__file__).resolve().parents[2] / 'images' / 'news-email-branding.json'
+SUBJECTS = {'confirmation': 'Confirm your AQ in the News subscription',
+            'immediate': 'AQ in the News: New article', 'daily': 'Your daily AQ in the News update'}
 
 
 def required(name):
@@ -34,46 +35,94 @@ def required(name):
     return value
 
 
+def crlf(value):
+    return re.sub(r'\r\n|\r|\n', '\r\n', value)
+
+
+def base64_lines(value):
+    return '\r\n'.join(re.findall(r'.{1,76}', base64.b64encode(value).decode('ascii')))
+
+
+def text_part(content_type, value):
+    return (f'Content-Type: {content_type}; charset=UTF-8\r\n'
+            f'Content-Transfer-Encoding: base64\r\n\r\n'
+            f'{base64_lines(crlf(value).encode("utf-8"))}\r\n')
+
+
 def compose(data):
-    if set(data) - {'kind', 'to', 'text', 'message_id', 'date', 'manage_url', 'unsubscribe_url'}:
+    if set(data) - {'kind', 'to', 'text', 'html', 'message_id', 'date', 'manage_url', 'unsubscribe_url'}:
         raise ValueError('unexpected fields')
     kind = data['kind']
     recipient = data['to']
-    if kind not in SUBJECTS or not isinstance(recipient, str) or len(recipient) > 254:
+    if kind not in SUBJECTS or not isinstance(recipient, str) or len(recipient) > 254 or not recipient.isascii():
         raise ValueError('invalid message')
-    if not re.fullmatch(r'[^\s@<>\x00-\x1f]+@[^\s@<>\x00-\x1f]+\.[^\s@<>\x00-\x1f]+', recipient):
+    parts = recipient.split('@')
+    if len(parts) != 2 or not 1 <= len(parts[0]) <= 64:
+        raise ValueError('invalid recipient')
+    local, domain = parts
+    if (not re.fullmatch(r"[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+)*", local)
+            or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+', domain)
+            or any(len(label) > 63 for label in domain.split('.'))):
         raise ValueError('invalid recipient')
     if not re.fullmatch(r'<news\.[a-f0-9]{64}@ukaq\.co\.uk>', data['message_id']):
         raise ValueError('invalid message id')
-    text = data['text']
-    if not isinstance(text, str) or not text.startswith('AQ NEWS\n') or len(text.encode()) > 180_000:
+    text, html = data['text'], data['html']
+    if (not isinstance(text, str) or not text.startswith('AQ in the News\n')
+            or not isinstance(html, str) or not html.startswith('<!doctype html>')
+            or 'AQ in the News' not in html or len(text.encode()) > 180_000 or len(html.encode()) > 200_000):
         raise ValueError('invalid content')
-    message = EmailMessage(policy=SMTP)
-    message['From'] = f'UK AQ News <{FROM}>'
-    message['Reply-To'] = FROM
-    message['To'] = recipient
-    message['Subject'] = SUBJECTS[kind]
-    message['Message-ID'] = data['message_id']
     date = datetime.fromisoformat(data['date'].replace('Z', '+00:00'))
     if date.tzinfo is None:
         raise ValueError('invalid date')
-    message['Date'] = format_datetime(date)
+    alternative = 'news-alt-' + data['message_id'][6:46]
+    related = 'news-related-' + data['message_id'][6:46]
+    headers = [f'From: UK AQ News <{FROM}>', f'Reply-To: {FROM}',
+               f'To: <{recipient}>', f'Subject: {SUBJECTS[kind]}',
+               f'Date: {format_datetime(date)}', f'Message-ID: {data["message_id"]}',
+               'MIME-Version: 1.0',
+               f'Content-Type: multipart/alternative;\r\n boundary="{alternative}"']
     site = required('NEWS_EMAIL_SITE_ORIGIN').rstrip('/')
     if kind != 'confirmation':
         for purpose, field in [('manage', 'manage_url'), ('unsubscribe', 'unsubscribe_url')]:
             link = data[field]
             if not re.fullmatch(re.escape(site) + r'/news/#' + purpose + r'=[a-f0-9]{64}', link):
                 raise ValueError('invalid subscription link')
-            if link not in text:
+            if link not in text or f'href="{link}"' not in html:
                 raise ValueError('missing visible subscription link')
         token = data['unsubscribe_url'].split('=', 1)[1]
-        endpoint = required('NEWS_EMAIL_PUBLIC_API_ORIGIN').rstrip('/')
-        if urlparse(endpoint).scheme != 'https':
+        endpoint = required('NEWS_EMAIL_PUBLIC_API_ORIGIN')
+        parsed = urlparse(endpoint)
+        if (parsed.scheme != 'https' or not parsed.netloc or parsed.username or parsed.password
+                or parsed.path or parsed.query or parsed.fragment or any(c.isspace() for c in endpoint)):
             raise ValueError('invalid public API origin')
-        message['List-Unsubscribe'] = f'<{endpoint}/one-click/{token}>'
-        message['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click'
-    message.set_content(text)
-    return recipient, message.as_bytes()
+        headers.extend([f'List-Unsubscribe: <{endpoint}/one-click/{token}>',
+                        'List-Unsubscribe-Post: List-Unsubscribe=One-Click'])
+    # The same generated, fixed UK AQ assets are bundled by the Worker. Never take
+    # attachment bytes, CIDs or filenames from an HTTP caller or publisher article.
+    assets = json.loads(BRANDING_PATH.read_text())
+    images = []
+    for key, filename, cid in (
+            ('heading', 'UK-AQ-NEWS-1line-email-w900.png', 'aq-in-the-news@ukaq.co.uk'),
+            ('logo', 'UK-AQ-Logo-v3-2Lines-email.png', 'uk-aq-logo@ukaq.co.uk')):
+        asset = assets[key]
+        content = base64.b64decode(asset['base64'], validate=True)
+        if (asset['filename'] != filename or asset['content_id'] != cid or len(content) > 60_000
+                or not content.startswith(b'\x89PNG\r\n\x1a\n') or f'src="cid:{cid}"' not in html):
+            raise ValueError('invalid branding')
+        message_cid = cid.replace('@', '.' + data['message_id'][6:70] + '@')
+        html = html.replace(f'cid:{cid}', f'cid:{message_cid}')
+        images.append(f'--{related}\r\nContent-Type: image/png\r\n'
+                      f'Content-Transfer-Encoding: base64\r\nContent-ID: <{message_cid}>\r\n'
+                      f'Content-Disposition: inline;\r\n filename="{filename}"\r\n\r\n'
+                      f'{base64_lines(content)}\r\n')
+    wire = ('\r\n'.join(headers) + f'\r\n\r\n--{alternative}\r\n'
+            + text_part('text/plain', text) + f'--{alternative}\r\n'
+            + f'Content-Type: multipart/related; type="text/html";\r\n boundary="{related}"\r\n\r\n'
+            + f'--{related}\r\n' + text_part('text/html', html) + ''.join(images)
+            + f'--{related}--\r\n--{alternative}--\r\n').encode('ascii')
+    if len(wire) > MAX_MIME:
+        raise ValueError('message too large')
+    return recipient, wire
 
 
 def smtp_submit(recipient, wire):
