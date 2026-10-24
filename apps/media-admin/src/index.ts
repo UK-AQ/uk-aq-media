@@ -1259,7 +1259,7 @@ export default {
     let authenticated = false;
     try {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
-      if (!await bearerMatches(request, env.MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
+      if (!await bearerMatches(request, env.UK_AQ_MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       authenticated = true;
       const url = new URL(request.url);
       if (url.pathname === '/admin/bluesky/settings') return await blueskySettings(request, env);

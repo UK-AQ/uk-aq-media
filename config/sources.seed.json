@@ -550,5 +550,55 @@
     "ai_content_policy": "disabled",
     "image_policy": "remote_preview",
     "search_index_policy": "metadata_only"
+  },
+  {
+    "source_key": "climate-with-brian",
+    "name": "Climate Thoughts with Brian",
+    "canonical_domain": "climatewithbrian.com",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "climate-with-brian-feed",
+          "url": "https://climatewithbrian.com/feed/",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
+    "source_key": "healthy-air-coalition",
+    "name": "Healthy Air Coalition",
+    "canonical_domain": "healthyair.org.uk",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "healthy-air-coalition-feed",
+          "url": "https://www.healthyair.org.uk/feed/",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   }
 ]

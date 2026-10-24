@@ -20,7 +20,7 @@ INSERT INTO media_sources
    review_level, priority, discovery_method, discovery_config_json, content_fetch_policy,
    ai_content_policy, image_policy, search_index_policy)
 VALUES
-  ('mums-for-lungs', 'Mums for Lungs', 'mumsforlungs.org', 'publisher', 1, 'manual',
+  ('mums-for-lungs', 'Mums for Lungs', 'mumsforlungs.org', 'publisher', 1, 'auto_approve',
    'standard', 50, 'rss',
    '{"routes":[{"route_key":"mums-for-lungs-news","url":"https://www.mumsforlungs.org/news?format=rss","max_items":20}],"retain_excerpt":false}',
    'discovery_metadata_only', 'disabled', 'remote_preview', 'metadata_only')

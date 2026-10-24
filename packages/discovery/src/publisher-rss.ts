@@ -58,6 +58,12 @@ export const PUBLISHER_RSS_ROUTES = [
   { source_key: 'see-the-air', route_key: 'see-the-air-feed',
     url: 'https://seetheair.org/feed/', canonical_domain: 'seetheair.org', max_items: 20,
     content_encoded_preview_scan_bytes: MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES },
+  { source_key: 'climate-with-brian', route_key: 'climate-with-brian-feed',
+    url: 'https://climatewithbrian.com/feed/', canonical_domain: 'climatewithbrian.com',
+    max_items: 20 },
+  { source_key: 'healthy-air-coalition', route_key: 'healthy-air-coalition-feed',
+    url: 'https://www.healthyair.org.uk/feed/', canonical_domain: 'healthyair.org.uk',
+    max_items: 20 },
   { source_key: 'mums-for-lungs', route_key: 'mums-for-lungs-news',
     url: 'https://www.mumsforlungs.org/news?format=rss', canonical_domain: 'mumsforlungs.org',
     max_items: 20 },
@@ -86,6 +92,7 @@ export function publisherRssArticleAllowed(sourceKey: string,
 }
 
 const PUBLISHER_RSS_AUTHOR_POLICIES = new Map<string, 'none'>([
+  ['healthy-air-coalition', 'none'], // WordPress technical author `hacadmin`.
   ['mums-for-lungs', 'none'],
 ]);
 

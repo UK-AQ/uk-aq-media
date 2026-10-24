@@ -15,86 +15,140 @@ function text(value: unknown, maximum: number): string | null {
     : null;
 }
 
+// An application bound, below the Queues delay limit; never persist arbitrary header text.
+export const MAX_FEED_RETRY_SECONDS = 12 * 60 * 60;
+export interface FeedRetryAfter {
+  value: string | null;
+  state: 'missing' | 'invalid' | 'expired' | 'valid' | 'capped';
+  delay_seconds: number | null;
+}
+export interface FeedFailureDiagnostics {
+  http_status: number | null;
+  request_duration_ms: number;
+  failure_stage: 'fetch_request' | 'http_response' | 'feed_stream_read';
+  failure_kind: 'http' | 'timeout' | 'network' | 'validation';
+  retry_after: FeedRetryAfter;
+  cf_ray: string | null;
+}
+export interface ScanRetry {
+  delaySeconds: number;
+  notBefore: string;
+  reason: 'retry_after' | 'backoff';
+}
+export interface ScanErrorDetails {
+  feed?: FeedFailureDiagnostics;
+  retry?: ScanRetry;
+  run_id?: string;
+}
 export class ScanError extends Error {
-  constructor(public readonly code: string) { super(code); }
+  constructor(public readonly code: string, public readonly details: ScanErrorDetails = {}) {
+    super(code);
+  }
 }
 
-type FeedFetchPhase = 'fetch_request' | 'feed_stream_read';
-
-function logUnexpectedFeedError(adapterKey: string, phase: FeedFetchPhase, error: unknown): void {
-  const errorName = error instanceof Error && error.name ? error.name : 'NonErrorThrown';
-  const errorMessage = error instanceof Error
-    ? error.message
-    : `Unexpected thrown value of type ${typeof error}`;
-  console.error(JSON.stringify({
-    event: `${adapterKey}_feed_fetch_error`,
-    phase,
-    error_name: errorName.slice(0, 100),
-    error_message: errorMessage.slice(0, 500),
-  }));
+export function feedRetryAfter(value: string | null, now = Date.now()): FeedRetryAfter {
+  if (value === null) return { value: null, state: 'missing', delay_seconds: null };
+  if (value.length > 64) return { value: null, state: 'invalid', delay_seconds: null };
+  const raw = value.trim();
+  // Date.parse alone also accepts negative numbers and other non-HTTP dates.
+  // Accept the three HTTP-date wire formats, as well as integer delta-seconds.
+  const day = '(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)';
+  const month = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)';
+  const httpDate = new RegExp(`^(?:${day}, \\d{2} ${month} \\d{4} \\d{2}:\\d{2}:\\d{2} GMT|` +
+    `(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \\d{2}-${month}-\\d{2} ` +
+    `\\d{2}:\\d{2}:\\d{2} GMT|${day} ${month} [ \\d]\\d \\d{2}:\\d{2}:\\d{2} \\d{4})$`);
+  const parsedDateMs = httpDate.test(raw) ? Date.parse(raw) : NaN;
+  // Date.parse can normalise impossible dates (for example, 31 February).
+  const dateMs = Number.isFinite(parsedDateMs) &&
+    new Date(parsedDateMs).getUTCDate() === Number(/\d+/.exec(raw)?.[0]) ? parsedDateMs : NaN;
+  if (Number.isFinite(dateMs) && dateMs <= now) {
+    return { value: raw, state: 'expired', delay_seconds: null };
+  }
+  const seconds = /^\d+$/.test(raw) ? Number(raw) : Math.ceil((dateMs - now) / 1000);
+  if (!Number.isFinite(seconds)) return { value: null, state: 'invalid', delay_seconds: null };
+  return { value: raw, state: seconds > MAX_FEED_RETRY_SECONDS ? 'capped' : 'valid',
+    delay_seconds: Math.min(seconds, MAX_FEED_RETRY_SECONDS) };
 }
 
 export async function readRssFeed(url: string, adapterKey: string,
   allowedManualRedirectUrl?: string, fetcher: typeof fetch = fetch): Promise<string> {
   const controller = new AbortController();
+  const started = Date.now();
   const timeout = setTimeout(() => controller.abort(), FEED_TIMEOUT_MS);
-  const request = (requestUrl: string): Promise<Response> => fetcher(requestUrl, {
-    redirect: 'manual', signal: controller.signal,
-    headers: {
-      Accept: 'application/rss+xml, application/xml, text/xml',
-      'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)',
-    },
-  });
+  let phase: FeedFailureDiagnostics['failure_stage'] = 'fetch_request';
+  let status: number | null = null;
+  let retryAfter = feedRetryAfter(null);
+  let cfRay: string | null = null;
+  const cancelBody = async (response: Response): Promise<void> => {
+    try { await response.body?.cancel(); } catch { /* Preserve the original HTTP failure. */ }
+  };
+  const request = async (requestUrl: string): Promise<Response> => {
+    phase = 'fetch_request';
+    status = null; cfRay = null; retryAfter = feedRetryAfter(null);
+    const response = await fetcher(requestUrl, {
+      redirect: 'manual', signal: controller.signal,
+      headers: {
+        Accept: 'application/rss+xml, application/xml, text/xml',
+        'User-Agent': 'UK-AQ-Media/0.1 (+https://github.com/TEST-uk-aq/uk-aq-media)',
+      },
+    });
+    phase = 'http_response';
+    status = response.status;
+    retryAfter = feedRetryAfter(response.headers.get('Retry-After'));
+    const ray = response.headers.get('CF-Ray');
+    cfRay = ray && /^[a-f0-9]{16,32}(?:-[a-z]{3})?$/i.test(ray) ? ray : null;
+    return response;
+  };
   try {
-    let response: Response;
-    try {
-      response = await request(url);
+    let response = await request(url);
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('Location');
+      await cancelBody(response);
+      let resolvedLocation: string | null = null;
+      try { resolvedLocation = location ? new URL(location, url).href : null; } catch { /* reject */ }
+      if (!allowedManualRedirectUrl || resolvedLocation !== allowedManualRedirectUrl) {
+        throw new ScanError('feed_redirect_rejected');
+      }
+      response = await request(allowedManualRedirectUrl);
       if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('Location');
-        await response.body?.cancel();
-        let resolvedLocation: string | null = null;
-        try { resolvedLocation = location ? new URL(location, url).href : null; } catch { /* reject */ }
-        if (!allowedManualRedirectUrl || resolvedLocation !== allowedManualRedirectUrl) {
-          throw new ScanError('feed_redirect_rejected');
-        }
-        response = await request(allowedManualRedirectUrl);
-        if (response.status >= 300 && response.status < 400) {
-          await response.body?.cancel();
-          throw new ScanError('feed_redirect_chain_rejected');
-        }
+        await cancelBody(response);
+        throw new ScanError('feed_redirect_chain_rejected');
       }
-    } catch (error) {
-      if (error instanceof ScanError) throw error;
-      if (controller.signal.aborted) throw new ScanError('feed_timeout');
-      logUnexpectedFeedError(adapterKey, 'fetch_request', error);
-      throw new ScanError('feed_fetch_failed');
     }
-
+    if (!response.ok || !response.body) {
+      await cancelBody(response);
+      throw new ScanError(`feed_http_${response.status}`);
+    }
+    phase = 'feed_stream_read';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+    let bytes = 0;
+    let xml = '';
     try {
-      if (!response.ok || !response.body) {
-        await response.body?.cancel();
-        throw new ScanError(`feed_http_${response.status}`);
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > MAX_FEED_BYTES) throw new ScanError('feed_too_large');
+        xml += decoder.decode(value, { stream: true });
       }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
-      let bytes = 0;
-      let xml = '';
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          bytes += value.byteLength;
-          if (bytes > MAX_FEED_BYTES) throw new ScanError('feed_too_large');
-          xml += decoder.decode(value, { stream: true });
-        }
-        return xml + decoder.decode();
-      } finally { await reader.cancel(); }
-    } catch (error) {
-      if (error instanceof ScanError) throw error;
-      if (controller.signal.aborted) throw new ScanError('feed_timeout');
-      logUnexpectedFeedError(adapterKey, 'feed_stream_read', error);
-      throw new ScanError('feed_fetch_failed');
+      return xml + decoder.decode();
+    } finally {
+      try { await reader.cancel(); } catch { /* Preserve the original stream failure. */ }
     }
+  } catch (error) {
+    const code = error instanceof ScanError ? error.code
+      : controller.signal.aborted ? 'feed_timeout' : 'feed_fetch_failed';
+    const feed: FeedFailureDiagnostics = {
+      http_status: status, request_duration_ms: Math.max(0, Date.now() - started),
+      failure_stage: phase,
+      failure_kind: code === 'feed_timeout' ? 'timeout' : code === 'feed_fetch_failed'
+        ? 'network' : code.startsWith('feed_http_') ? 'http' : 'validation',
+      retry_after: retryAfter, cf_ray: cfRay,
+    };
+    // No exception messages, request URLs, bodies or unrestricted HTTP headers.
+    console.error(JSON.stringify({ event: `${adapterKey}_feed_fetch_error`, ...feed }));
+    throw new ScanError(code, { ...(error instanceof ScanError ? error.details : {}), feed });
   } finally { clearTimeout(timeout); }
 }
 

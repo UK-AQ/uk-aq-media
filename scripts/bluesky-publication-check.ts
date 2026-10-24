@@ -337,7 +337,7 @@ function statusRaceDatabase(through = '9999'): { sqlite: DatabaseSync; facade: S
     MEDIA_DB: facade as unknown as D1Database,
     MEDIA_BLUESKY_QUEUE: queue,
     MEDIA_FACEBOOK_QUEUE: queue,
-    MEDIA_ADMIN_TOKEN: FIXTURE_ADMIN_TOKEN,
+    UK_AQ_MEDIA_ADMIN_TOKEN: FIXTURE_ADMIN_TOKEN,
   } as MediaAdminEnv, wakes };
 }
 

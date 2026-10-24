@@ -30,6 +30,7 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.UK_AQ_MEDIA_CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.UK_AQ_MEDIA_CFLARE_API_TOKEN }}
+      UK_AQ_MEDIA_CFLARE_D1DB_ID: ${{ vars.UK_AQ_MEDIA_CFLARE_D1DB_ID }}
 
     steps:
       - name: Check out repository
@@ -49,16 +50,27 @@ jobs:
 
       - name: Verify Cloudflare configuration and required secrets
         env:
+          UK_AQ_MEDIA_ADMIN_TOKEN: ${{ secrets.UK_AQ_MEDIA_ADMIN_TOKEN }}
           UK_AQ_MEDIA_WORKER_HTTP_SECRET: ${{ secrets.UK_AQ_MEDIA_WORKER_HTTP_SECRET }}
           UK_AQ_MEDIA_GDELT_INGEST_SECRET: ${{ secrets.UK_AQ_MEDIA_GDELT_INGEST_SECRET }}
           UK_AQ_MEDIA_BLUESKY_APP_PSWD: ${{ secrets.UK_AQ_MEDIA_BLUESKY_APP_PSWD }}
+          UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN: ${{ secrets.UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::Missing repository variable UK_AQ_MEDIA_CLOUDFLARE_ACCOUNT_ID"; exit 1; }
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::Missing repository secret UK_AQ_MEDIA_CFLARE_API_TOKEN"; exit 1; }
+          test -n "$UK_AQ_MEDIA_ADMIN_TOKEN" || { echo "::error::Missing repository secret UK_AQ_MEDIA_ADMIN_TOKEN"; exit 1; }
+          test -n "$UK_AQ_MEDIA_CFLARE_D1DB_ID" || { echo "::error::Missing repository variable UK_AQ_MEDIA_CFLARE_D1DB_ID"; exit 1; }
           test -n "$UK_AQ_MEDIA_WORKER_HTTP_SECRET" || { echo "::error::Missing repository secret UK_AQ_MEDIA_WORKER_HTTP_SECRET"; exit 1; }
           test -n "$UK_AQ_MEDIA_GDELT_INGEST_SECRET" || { echo "::error::Missing repository secret UK_AQ_MEDIA_GDELT_INGEST_SECRET"; exit 1; }
           test -n "$UK_AQ_MEDIA_BLUESKY_APP_PSWD" || { echo "::error::Missing repository secret UK_AQ_MEDIA_BLUESKY_APP_PSWD"; exit 1; }
+          test -n "$UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN" || { echo "::error::Missing repository secret UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN"; exit 1; }
+
+      - name: Render account-specific Wrangler bindings
+        run: node scripts/render-wrangler-config.mjs core
+
+      - name: Verify D1 belongs to the selected Cloudflare account
+        run: node scripts/verify-media-d1.mjs
 
       - name: Ensure News email Queue exists before producer deployment
         run: |
@@ -79,6 +91,14 @@ jobs:
       - name: Deploy public Worker
         run: npx wrangler deploy --config apps/media-public/wrangler.jsonc
 
+      - name: Apply admin Worker secret
+        env:
+          UK_AQ_MEDIA_ADMIN_TOKEN: ${{ secrets.UK_AQ_MEDIA_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          node -e 'process.stdout.write(JSON.stringify({UK_AQ_MEDIA_ADMIN_TOKEN: process.env.UK_AQ_MEDIA_ADMIN_TOKEN}))' |
+            npx wrangler secret bulk --config apps/media-admin/wrangler.jsonc --name uk-aq-media-admin
+
       - name: Deploy admin Worker
         run: npx wrangler deploy --config apps/media-admin/wrangler.jsonc
 
@@ -87,18 +107,22 @@ jobs:
           UK_AQ_MEDIA_WORKER_HTTP_SECRET: ${{ secrets.UK_AQ_MEDIA_WORKER_HTTP_SECRET }}
           UK_AQ_MEDIA_GDELT_INGEST_SECRET: ${{ secrets.UK_AQ_MEDIA_GDELT_INGEST_SECRET }}
           UK_AQ_MEDIA_BLUESKY_APP_PSWD: ${{ secrets.UK_AQ_MEDIA_BLUESKY_APP_PSWD }}
+          UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN: ${{ secrets.UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN }}
         run: |
           set -euo pipefail
           secrets_json="$(jq -n \
             --arg UK_AQ_MEDIA_WORKER_HTTP_SECRET "${UK_AQ_MEDIA_WORKER_HTTP_SECRET}" \
             --arg UK_AQ_MEDIA_GDELT_INGEST_SECRET "${UK_AQ_MEDIA_GDELT_INGEST_SECRET}" \
             --arg UK_AQ_MEDIA_BLUESKY_APP_PSWD "${UK_AQ_MEDIA_BLUESKY_APP_PSWD}" \
+            --arg UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN "${UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN}" \
             '{UK_AQ_MEDIA_WORKER_HTTP_SECRET: $UK_AQ_MEDIA_WORKER_HTTP_SECRET,
               UK_AQ_MEDIA_GDELT_INGEST_SECRET: $UK_AQ_MEDIA_GDELT_INGEST_SECRET,
-              UK_AQ_MEDIA_BLUESKY_APP_PSWD: $UK_AQ_MEDIA_BLUESKY_APP_PSWD}')"
+              UK_AQ_MEDIA_BLUESKY_APP_PSWD: $UK_AQ_MEDIA_BLUESKY_APP_PSWD,
+              UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN: $UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN}')"
           unset UK_AQ_MEDIA_WORKER_HTTP_SECRET
           unset UK_AQ_MEDIA_GDELT_INGEST_SECRET
           unset UK_AQ_MEDIA_BLUESKY_APP_PSWD
+          unset UK_AQ_MEDIA_FACEBOOK_PAGE_TOKEN
           for attempt in 1 2 3; do
             if printf '%s' "$secrets_json" | npx wrangler secret bulk \
               --config apps/media-discovery/wrangler.jsonc \

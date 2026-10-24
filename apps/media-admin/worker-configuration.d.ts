@@ -12,7 +12,7 @@ interface __BaseEnv_MediaAdminEnv {
 	MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY: 10000;
 	MEDIA_AI_MAX_TITLES_PER_REQUEST: 5;
 	MEDIA_AI_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-	MEDIA_ADMIN_TOKEN: string;
+	UK_AQ_MEDIA_ADMIN_TOKEN: string;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
@@ -25,5 +25,5 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "MEDIA_AI_DAILY_NEURON_BUDGET" | "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY" | "MEDIA_AI_MAX_TITLES_PER_REQUEST" | "MEDIA_AI_MODEL" | "MEDIA_ADMIN_TOKEN">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "MEDIA_AI_DAILY_NEURON_BUDGET" | "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY" | "MEDIA_AI_MAX_TITLES_PER_REQUEST" | "MEDIA_AI_MODEL" | "UK_AQ_MEDIA_ADMIN_TOKEN">> {}
 }

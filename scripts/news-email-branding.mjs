@@ -1,4 +1,4 @@
-// Rebuild the shared inline assets after changing either approved email PNG.
+// Rebuild the shared inline assets after changing any approved email PNG.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -6,6 +6,7 @@ const root = new URL('../', import.meta.url);
 const specifications = [
   ['heading', 'UK-AQ-NEWS-1line-email-w900.png', 'aq-in-the-news@ukaq.co.uk'],
   ['logo', 'UK-AQ-Logo-v3-2Lines-email.png', 'uk-aq-logo@ukaq.co.uk'],
+  ['divider', 'UK-AQ-NEWS-gradient-divider-email-w900.png', 'aq-in-the-news-divider@ukaq.co.uk'],
 ];
 const assets = Object.fromEntries(specifications.map(([key, filename, content_id]) => {
   const bytes = readFileSync(new URL(`images/${filename}`, root));

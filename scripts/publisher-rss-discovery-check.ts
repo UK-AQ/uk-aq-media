@@ -17,10 +17,11 @@ const sources = z.array(SourceSchema).parse(JSON.parse(
 ));
 const publisherSources = sources.filter(source =>
   ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org',
-    'university-of-exeter', 'impact-on-urban-health', 'see-the-air', 'mums-for-lungs']
+    'university-of-exeter', 'impact-on-urban-health', 'see-the-air',
+    'climate-with-brian', 'healthy-air-coalition', 'mums-for-lungs']
     .includes(source.source_key));
-assert.equal(PUBLISHER_RSS_ROUTES.length, 20);
-assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 32);
+assert.equal(PUBLISHER_RSS_ROUTES.length, 22);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 34);
 for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
@@ -45,6 +46,19 @@ assert.equal(impactOnUrbanHealth.publication_policy, 'manual');
 assert.equal(impactOnUrbanHealth.search_index_policy, 'metadata_only');
 assert.deepEqual(configuredPublisherRssRouteKeys(impactOnUrbanHealth),
   ['impact-on-urban-health-feed']);
+const climateWithBrian = publisherSources.find(source => source.source_key === 'climate-with-brian')!;
+assert.equal(climateWithBrian.canonical_domain, 'climatewithbrian.com');
+assert.equal(climateWithBrian.publication_policy, 'manual');
+assert.equal(climateWithBrian.ai_content_policy, 'disabled');
+assert.equal(climateWithBrian.search_index_policy, 'metadata_only');
+assert.deepEqual(configuredPublisherRssRouteKeys(climateWithBrian), ['climate-with-brian-feed']);
+const healthyAirCoalition = publisherSources.find(
+  source => source.source_key === 'healthy-air-coalition')!;
+assert.equal(healthyAirCoalition.canonical_domain, 'healthyair.org.uk');
+assert.equal(healthyAirCoalition.publication_policy, 'manual');
+assert.equal(healthyAirCoalition.search_index_policy, 'metadata_only');
+assert.deepEqual(configuredPublisherRssRouteKeys(healthyAirCoalition),
+  ['healthy-air-coalition-feed']);
 const seeTheAir = publisherSources.find(source => source.source_key === 'see-the-air')!;
 assert.equal(seeTheAir.canonical_domain, 'seetheair.org');
 assert.equal(seeTheAir.publication_policy, 'manual');

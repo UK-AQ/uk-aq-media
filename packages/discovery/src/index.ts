@@ -26,7 +26,8 @@ import {
   type GuardianRouteKey,
 } from './guardian';
 import { mediaDeterministicRelevanceFilter } from './relevance';
-import { ScanError } from './rss';
+import { ScanError, type FeedFailureDiagnostics, type ScanRetry } from './rss';
+import { publisherRssRetry } from './publisher-rss-retry';
 import {
   persistArticle, persistDiscoveryEvidence, persistPossibleDuplicateHold,
   publicationAuthorRule,
@@ -41,6 +42,8 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('article_enrich'), article_id: z.number().int().positive() }).strict(),
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
+export { ScanError } from './rss';
+export { publisherRssCooldowns, publisherRssDeliveryGate } from './publisher-rss-retry';
 export { parseAqnFeed, AQN_FEED } from './aqn';
 export {
   configuredCawsIndex, discoverCaws, extractCawsIndexCandidates,
@@ -501,6 +504,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const publisherRelevant = ![
         'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp',
         'communities-against-woodsmoke', 'ncas', 'clean-air-fund',
+        'healthy-air-coalition',
       ].includes(sourceKey)
         ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
           canonical_url: article.canonical_url, categories: article.categories }).relevant : true;
@@ -620,6 +624,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       }
     }
   } catch (error) {
+    const retry = publisherRssRetry(sourceKey, routeKey, error, attempt);
+    const feed = error instanceof ScanError ? error.details.feed : undefined;
     const category = scanFailureCategory(error);
     const d1 = stage === 'commit_persistence' && category === 'database'
       ? safeD1Failure(error) : null;
@@ -629,7 +635,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     // Structured logs retain the run correlation needed for a targeted diagnosis.
     console.error(JSON.stringify({ event: 'source_scan_exception',
       run_id: runId, source_key: sourceKey, route_key: routeKey ?? null,
+      queue_message_id: messageId, attempt,
       stage, category, code,
+      ...(feed ? { feed, retry_delay_seconds: retry?.delaySeconds ?? null,
+        retry_not_before: retry?.notBefore ?? null, retry_reason: retry?.reason ?? null } : {}),
       ...(d1 ? { d1_reason: d1.reason, sqlite_code: d1.sqlite_code,
         batch: batchDiagnostic } : {}),
       exception_type: error instanceof Error
@@ -638,18 +647,25 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       await finishRun(db, runId, 'skipped', seen, invalid, filtered, code);
       return;
     }
-    try { await finishRun(db, runId, 'failed', seen, invalid, filtered, code); }
+    try { await finishRun(db, runId, 'failed', seen, invalid, filtered, code, feed, retry); }
     catch { console.error(JSON.stringify({ event: 'run_evidence_unavailable', run_id: runId })); }
+    if (error instanceof ScanError) {
+      throw new ScanError(code, { ...error.details, retry, run_id: runId });
+    }
     throw error;
   }
 }
 
 async function finishRun(db: D1Database, id: string, status: 'failed' | 'skipped',
-  seen: number, invalid: number, filtered: number, code: string): Promise<void> {
+  seen: number, invalid: number, filtered: number, code: string,
+  feed?: FeedFailureDiagnostics, retry?: ScanRetry): Promise<void> {
   const now = new Date().toISOString();
   await db.prepare(`UPDATE media_discovery_runs SET status = ?, finished_at = ?, updated_at = ?,
-    items_seen = ?, items_invalid = ?, items_filtered = ?, error_code = ? WHERE id = ?`)
-    .bind(status, now, now, seen, invalid, filtered, code, id).run();
+    items_seen = ?, items_invalid = ?, items_filtered = ?, error_code = ?,
+    feed_diagnostics = ?, retry_not_before = ? WHERE id = ?`)
+    .bind(status, now, now, seen, invalid, filtered, code,
+      feed ? JSON.stringify({ ...feed, retry_delay_seconds: retry?.delaySeconds ?? null,
+        retry_reason: retry?.reason ?? null }) : null, retry?.notBefore ?? null, id).run();
 }
 
 /** Best-effort bounded evidence for enqueue/unsupported-work failures. D1 outages can only log. */

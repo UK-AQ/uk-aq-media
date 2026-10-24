@@ -4,6 +4,7 @@ import {
   configuredCleanAirFundIndex, configuredDsawspIndex,
   configuredNcasRouteKeys, configuredPublisherRssRouteKeys, DSAWSP_INDEX_ROUTE_KEY,
   scheduledGuardianRouteKeys,
+  publisherRssCooldowns, publisherRssDeliveryGate, ScanError,
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
 import { wakeNewsEmailOutbox, json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
@@ -134,7 +135,8 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
     // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
     // Request data never participates in this internally selected, bounded work list.
     const [aqn, guardian, bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
-      impactOnUrbanHealth, seeTheAir, mumsForLungs, cleanAirFund, dsawsp, caws, ncas] = await Promise.all([
+      impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition, mumsForLungs,
+      cleanAirFund, dsawsp, caws, ncas] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
       loadSource(env.MEDIA_DB, 'bbc-news'),
@@ -146,6 +148,8 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       loadSource(env.MEDIA_DB, 'university-of-exeter'),
       loadSource(env.MEDIA_DB, 'impact-on-urban-health'),
       loadSource(env.MEDIA_DB, 'see-the-air'),
+      loadSource(env.MEDIA_DB, 'climate-with-brian'),
+      loadSource(env.MEDIA_DB, 'healthy-air-coalition'),
       loadSource(env.MEDIA_DB, 'mums-for-lungs'),
       loadSource(env.MEDIA_DB, 'clean-air-fund'),
       loadSource(env.MEDIA_DB, 'dsawsp'),
@@ -153,6 +157,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       loadSource(env.MEDIA_DB, 'ncas'),
     ]);
     const messages: DiscoveryMessage[] = [];
+    const cooldowns = await publisherRssCooldowns(env.MEDIA_DB);
     if (aqn?.enabled) messages.push({ type: 'source_scan', source_key: 'air-quality-news' });
     if (guardian?.enabled) {
       const rules = await loadAuthorRules(env.MEDIA_DB, 'the-guardian');
@@ -160,9 +165,17 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
         messages.push({ type: 'source_scan', source_key: 'the-guardian', route_key: routeKey });
       }
     }
+    // Broad-topic RSS publishers use AQ relevance filtering. Specialist sources
+    // apply their existing source-specific inclusion rules; manual ones stay Pending.
     for (const source of [bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
-      impactOnUrbanHealth, seeTheAir, mumsForLungs]) {
+      impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition, mumsForLungs]) {
       if (!source?.enabled) continue;
+      const notBefore = cooldowns.get(source.source_key);
+      if (notBefore) {
+        console.info(JSON.stringify({ event: 'publisher_rss_schedule_deferred',
+          source_key: source.source_key, retry_not_before: notBefore }));
+        continue;
+      }
       for (const routeKey of configuredPublisherRssRouteKeys(source)) {
         messages.push({ type: 'source_scan', source_key: source.source_key, route_key: routeKey });
       }
@@ -259,14 +272,37 @@ export default {
         continue;
       }
       try {
+        const gate = await publisherRssDeliveryGate(env.MEDIA_DB, parsed.data.source_key,
+          parsed.data.route_key, message.timestamp);
+        if (gate) {
+          console.info(JSON.stringify({ event: `publisher_rss_message_${gate.kind}`,
+            source_key: parsed.data.source_key, route_key: parsed.data.route_key ?? null,
+            run_id: gate.run_id, queue_message_id: message.id, attempt: message.attempts,
+            ...(gate.kind === 'cooldown' ? { retry_delay_seconds: gate.delaySeconds,
+              retry_not_before: gate.notBefore } : {}) }));
+          if (gate.kind === 'cooldown') message.retry({ delaySeconds: gate.delaySeconds });
+          else message.ack();
+          continue;
+        }
         await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
           message.id, message.attempts, configuredDisplayTitleAi(env));
         if (ctx) ctx.waitUntil(wakeNewsEmailOutbox(env));
         await reconcileSocialQueues(env);
         message.ack();
-      } catch {
-        console.error(JSON.stringify({ event: 'discovery_message_failed', message_id: message.id }));
-        message.retry({ delaySeconds: 300 });
+      } catch (error) {
+        const retry = error instanceof ScanError ? error.details.retry : undefined;
+        const delaySeconds = retry
+          ? Math.min(retry.delaySeconds,
+            Math.max(1, Math.ceil((Date.parse(retry.notBefore) - Date.now()) / 1000))) : 300;
+        console.error(JSON.stringify({ event: 'discovery_message_failed',
+          message_id: message.id, source_key: parsed.data.source_key,
+          route_key: parsed.data.route_key ?? null, attempt: message.attempts,
+          run_id: error instanceof ScanError ? error.details.run_id ?? null : null,
+          error_code: error instanceof ScanError ? error.code : 'source_scan_failed',
+          retry_delay_seconds: delaySeconds, retry_not_before: retry?.notBefore ?? null,
+          retry_reason: retry?.reason ?? 'default',
+          ...(error instanceof ScanError && error.details.feed ? { feed: error.details.feed } : {}) }));
+        message.retry({ delaySeconds });
       }
     }
   },

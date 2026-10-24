@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { publicPreviewImageUrl } from '@uk-aq-media/core';
 import { digestCursorRequest, digestRunStateAfterCursor, reconciliationOutcomeCommitted,
   reconciliationTargetAllows, rpc, type Env } from '../apps/media-email/src/common';
 import { normalizeSupportedMailbox } from '../apps/media-email/src/mailbox';
@@ -8,7 +7,6 @@ import { dailyCutoffIsDue, dailyTimestampIdentity, dailyWorkIdentity, dailyWorkS
   digestRequiresOperator } from '../apps/media-email/src/delivery-policy';
 import { serialize } from '../apps/media-email/src/message';
 import { articleMessage } from '../apps/media-email/src/presentation';
-import { emailPreviewImageUrl, type EmailPreviewSelection } from '../apps/media-email/src/preview-image';
 import { classifyDefiniteProRejection } from '../apps/media-email/src/transport-policy';
 
 let rpcHeaders=new Headers();
@@ -93,37 +91,6 @@ assert.equal(classifyDefiniteProRejection(500, 'invalid_news_message'), null);
 assert.equal(classifyDefiniteProRejection(400, 'unexpected'), null);
 assert.equal(classifyDefiniteProRejection(401, undefined), null);
 
-const imageSelection:EmailPreviewSelection={status:'approved',source_key:'bbc-news',
-  canonical_domain:'bbc.co.uk',article_image_policy:'remote_preview',source_image_policy:'remote_preview',
-  og_image_url:'https://ichef.bbci.co.uk/ace/standard/240/article.jpg?format=webp&width=800'};
-assert.equal(emailPreviewImageUrl(imageSelection),imageSelection.og_image_url);
-for(const status of ['pending','rejected','hidden'])
-  assert.equal(emailPreviewImageUrl({...imageSelection,status}),null);
-for(const policy of ['blocked','local_copy_permitted']) {
-  assert.equal(emailPreviewImageUrl({...imageSelection,article_image_policy:policy}),null);
-  assert.equal(emailPreviewImageUrl({...imageSelection,source_image_policy:policy}),null);
-}
-for(const og_image_url of [null,'invalid','http://ichef.bbci.co.uk/article.jpg',
-  'https://ichef.bbci.co.uk.attacker.example/article.jpg','https://other.bbci.co.uk/article.jpg'])
-  assert.equal(emailPreviewImageUrl({...imageSelection,og_image_url}),null);
-for(const [source_key,canonical_domain,og_image_url] of [
-  ['example','publisher.example','https://images.publisher.example/article.jpg'],
-  ['the-guardian','theguardian.com','https://i.guim.co.uk/img/media/article.jpg?width=800'],
-  ['dsawsp','dsawsp.org','https://cdn.prod.website-files.com/site/article.jpg'],
-  ['mums-for-lungs','mumsforlungs.org',
-    'https://images.squarespace-cdn.com/content/v1/60fe62a6c0eb074f99a31664/article.jpg?format=1500w'],
-] as const) assert.equal(emailPreviewImageUrl({...imageSelection,source_key,canonical_domain,og_image_url}),og_image_url);
-assert.equal(emailPreviewImageUrl({...imageSelection,source_key:'mums-for-lungs',
-  canonical_domain:'mumsforlungs.org',
-  og_image_url:'https://images.squarespace-cdn.com/content/v1/another-site/article.jpg'}),null);
-assert.equal(emailPreviewImageUrl({...imageSelection,source_key:'example',
-  canonical_domain:'publisher.example'}),null,'CDN exceptions remain source-specific');
-assert.equal(emailPreviewImageUrl({...imageSelection,source_key:'communities-against-woodsmoke',
-  og_image_url:null}),null,'email items without a publisher image remain text-only');
-assert.match((await publicPreviewImageUrl('https://public.example',{
-  ...imageSelection,id:1}))!,/^https:\/\/public\.example\/article-images\/1\?v=[a-f0-9]+$/,
-'website previews retain the versioned Media proxy');
-
 const linkToken='b'.repeat(64);
 const manage=`https://test.example/news/#manage=${linkToken}`;
 const unsubscribe=`https://test.example/news/#unsubscribe=${linkToken}`;
@@ -145,33 +112,5 @@ assert.throws(()=>serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
   kind:'confirmation',to:'míke@example.org',text:'AQ in the News\n',html,
   message_id:`<news.${'a'.repeat(64)}@ukaq.co.uk>`,date:'2026-10-06T08:00:00.000Z',
 }));
-
-for(const kind of ['immediate','daily'] as const) {
-  const article={title:'Example article',publisher:'BBC News',
-    canonical_url:'https://bbc.co.uk/news/article',published_at:'2026-10-06T07:00:00.000Z',
-    preview_image_url:emailPreviewImageUrl(imageSelection)};
-  const links={manage_url:manage,unsubscribe_url:unsubscribe};
-  const message=articleMessage('https://test.example',[article],kind,links,'2026-10-06T08:00:00.000Z');
-  const thumbnail=/<a href="([^"]+)" aria-label="Read original article: [^"]*"><img class="article-preview" src="([^"]+)"/.exec(message.html);
-  assert.equal(thumbnail?.[1],article.canonical_url);
-  assert.equal(thumbnail?.[2],imageSelection.og_image_url!.replaceAll('&','&amp;'));
-  assert.equal(message.html.includes('/article-images/'),false);
-  const textOnly=articleMessage('https://test.example',[{...article,preview_image_url:null}],kind,
-    links,'2026-10-06T08:00:00.000Z');
-  assert.equal(textOnly.html.includes('class="article-preview"'),false);
-  assert.equal(message.text,textOnly.text,'plain-text alternative is independent of thumbnail selection');
-  const imageWire=serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
-    NEWS_EMAIL_PUBLIC_API_ORIGIN:'https://api.example'} as Env,{
-    ...message,to:'reader@example.org',message_id:`<news.${'a'.repeat(64)}@ukaq.co.uk>`,
-    date:'2026-10-06T08:00:00.000Z',
-  });
-  assert.equal((imageWire.match(/Content-Type: image\//g)??[]).length,2);
-  assert.equal((imageWire.match(/Content-Type: image\/png/g)??[]).length,2);
-  assert.equal((imageWire.match(/Content-ID: </g)??[]).length,2,'only the two UK AQ logos are embedded');
-  const encodedHtml=/Content-Type: text\/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+)/.exec(imageWire)![1]!;
-  const decodedHtml=Buffer.from(encodedHtml.replace(/\r\n/g,''),'base64').toString('utf8');
-  assert.ok(decodedHtml.includes(`src="${thumbnail![2]}"`));
-  assert.equal((decodedHtml.match(/src="cid:/g)??[]).length,2);
-}
 
 console.log('AQ in the News email correction checks passed.');

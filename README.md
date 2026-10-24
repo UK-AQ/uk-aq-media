@@ -71,6 +71,36 @@ Migration `0049` promotes the existing manual `urbanhealth.org.uk` source into t
 configured publisher, preserving previously entered article IDs, URLs, approval decisions,
 title choices and image selections. Existing IoUH articles do not become auto-approved.
 
+## Healthy Air Coalition publisher source
+
+Healthy Air Coalition (`healthyair.org.uk`) is an enabled manual/Standard specialist
+UK clean-air publisher discovered through its verified first-party WordPress
+`https://www.healthyair.org.uk/feed/` RSS route, bounded to 20 newest items per
+scan. As a specialist clean-air publisher its News posts enter Pending without
+the general broad-topic AQ headline filter; the editorial reviewer decides
+whether individual posts are suitable. This does not change relevance policy
+for any other publisher. WordPress's technical `hacadmin` feed byline is not
+presented as a human author. No RSS excerpt or body is retained or sent to AI;
+search indexing is metadata-only, title AI is disabled, and images use the
+existing remote-preview policy. Migration `0053` registers the source and
+converges earlier manual/dynamic publisher identities without changing existing
+article editorial decisions or selected presentation fields.
+
+## Climate Thoughts with Brian publisher source
+
+Climate Thoughts with Brian (`climatewithbrian.com`) is an enabled manual/Standard
+publisher discovered from its first-party WordPress `/feed/` RSS route, bounded to
+20 newest entries per scan. Its wider environmental coverage uses the existing
+deterministic air-quality relevance filter, so unrelated subjects do not enter
+the News editorial queue. Relevant articles remain Pending for human approval.
+Discovery is metadata-only with no feed-body indexing or title AI, and images
+use the existing remote-preview policy.
+
+Migration `0052` installs the configured source and converges any existing
+manual/dynamically discovered article identities without altering editorial
+approval decisions or previously selected titles and images. The publisher's
+UK domain scope is separate from article Topics.
+
 ## See The Air publisher source
 
 See The Air is an enabled **manual/Standard** specialist publisher discovered through its
@@ -122,7 +152,7 @@ This README describes this implementation, not a replacement contract.
 | Area | Contents |
 | --- | --- |
 | `apps/media-public` | Approved public feed only; `MEDIA_DB` binding |
-| `apps/media-admin` | Bearer-authenticated editorial reads/transitions and explicit title generation; `MEDIA_DB`, `AI`, `MEDIA_ADMIN_TOKEN` |
+| `apps/media-admin` | Bearer-authenticated editorial reads/transitions and explicit title generation; `MEDIA_DB`, `AI`, `UK_AQ_MEDIA_ADMIN_TOKEN` |
 | `apps/media-discovery` | Authenticated scheduler receiver, fixed-schema GDELT ingestion boundary and single Queue consumer; `MEDIA_DB`, `MEDIA_DISCOVERY_QUEUE`, `AI`, two dedicated HTTP secrets, and dormant `scheduled()` fallback handler |
 | `packages/core` | Shared source/article/policy types, D1 source loading, canonical URL identity, HTTP helpers |
 | `packages/discovery` | Shared bounded RSS handling, AQN/Guardian adapters, source-run/article/evidence persistence, typed work messages |
@@ -254,7 +284,7 @@ Descriptions/bodies and internal fields are absent.
 Only approved articles are selected. Successful responses allow five minutes of
 caching; errors use `no-store`. Browser access remains same-origin through the cache proxy.
 
-Admin requests require `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` and use
+Admin requests require `Authorization: Bearer <UK_AQ_MEDIA_ADMIN_TOKEN>` and use
 `Cache-Control: no-store`:
 
 - `GET /admin/articles?status=pending&limit=20` — optional status, maximum 50;
@@ -356,8 +386,9 @@ or Wrangler vars. The Media deployment workflow constructs an in-memory JSON
 payload and uses the standard UK AQ `wrangler secret bulk` pattern to apply only
 this secret to `uk-aq-media-discovery` immediately before deploying that Worker.
 Changing the GitHub Actions secret and running a normal Media deployment therefore
-restores or updates the discovery Worker secret. Other Worker secrets, especially
-`MEDIA_ADMIN_TOKEN`, retain their existing management path.
+restores or updates the discovery Worker secret. The same deployment workflow installs `UK_AQ_MEDIA_ADMIN_TOKEN` on
+`uk-aq-media-admin` before deploying the Admin Worker. The identical credential
+is used by the TEST Ops dashboard proxy. These values must match.
 
 ## Discovery and policy boundaries
 

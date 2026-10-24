@@ -9,6 +9,7 @@ export interface Env {
   NEWS_EMAIL_CONFIRM_BACKOFF_DAYS: string; NEWS_EMAIL_IP_BURST_LIMIT: string;
   NEWS_EMAIL_IP_HOURLY_LIMIT: string; UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET: string;
   NEWS_EMAIL_OPERATOR_SECRET: string; NEWS_EMAIL_PUBLIC_API_ORIGIN: string;
+  UK_AQ_MEDIA_PUBLIC_URL: string;
   GOOGLE_SMTP_USERNAME: string; GOOGLE_OAUTH_CLIENT_ID: string;
   GOOGLE_OAUTH_CLIENT_SECRET: string; GOOGLE_OAUTH_REFRESH_TOKEN: string;
   // Optional Pro fallback only; never needed by the default direct transport.
