@@ -7,15 +7,15 @@
   "workers_dev": true,
   "preview_urls": false,
   "observability": {"enabled": false},
-  "d1_databases": [{"binding":"MEDIA_DB","database_name":"uk-aq-media","database_id":"75b39d56-a8e2-48dc-9208-7ac0d199219c","migrations_dir":"../../migrations"}],
+  "d1_databases": [{"binding":"MEDIA_DB","database_name":"uk-aq-media","database_id":"00000000-0000-0000-0000-000000000000","migrations_dir":"../../migrations"}],
   "queues": {
     "producers": [{"binding":"MEDIA_EMAIL_QUEUE","queue":"uk-aq-media-email"}],
     "consumers": [{"queue":"uk-aq-media-email","max_batch_size":1,"max_batch_timeout":5,"max_retries":5,"max_concurrency":1,"retry_delay":300}]
   },
   "vars": {
-    "NEWS_EMAIL_ENABLED": "true",
-    "NEWS_EMAIL_SITE_ORIGIN": "https://test-uk-aq.ukaq.co.uk",
-    "NEWS_EMAIL_TURNSTILE_HOSTNAMES": "test-uk-aq.ukaq.co.uk",
+    "NEWS_EMAIL_ENABLED": "REPLACE_NEWS_EMAIL_ENABLED",
+    "NEWS_EMAIL_SITE_ORIGIN": "REPLACE_NEWS_EMAIL_SITE_ORIGIN",
+    "NEWS_EMAIL_TURNSTILE_HOSTNAMES": "REPLACE_NEWS_EMAIL_TURNSTILE_HOSTNAMES",
     "NEWS_EMAIL_TURNSTILE_ACTION": "news_subscribe",
     "NEWS_EMAIL_CONSENT_VERSION": "2026-10-05",
     "NEWS_EMAIL_CONFIRM_COOLDOWN_HOURS": "24",
@@ -23,8 +23,9 @@
     "NEWS_EMAIL_CONFIRM_BACKOFF_DAYS": "7",
     "NEWS_EMAIL_IP_BURST_LIMIT": "5",
     "NEWS_EMAIL_IP_HOURLY_LIMIT": "20",
-    "SUPABASE_URL": "https://zztjgmdiftqtdcrlfpvc.supabase.co",
-    "NEWS_EMAIL_PUBLIC_API_ORIGIN": "https://uk-aq-media-email.uk-aq-media.workers.dev"
+    "SUPABASE_URL": "REPLACE_SUPABASE_URL",
+    "NEWS_EMAIL_PUBLIC_API_ORIGIN": "REPLACE_NEWS_EMAIL_PUBLIC_API_ORIGIN",
+    "UK_AQ_MEDIA_PUBLIC_URL": "REPLACE_UK_AQ_MEDIA_PUBLIC_URL"
   },
   "secrets": {"required":["SB_SECRET_KEY","NEWS_EMAIL_TURNSTILE_SECRET","NEWS_EMAIL_TOKEN_SECRET","NEWS_EMAIL_RATE_SECRET","UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET","NEWS_EMAIL_OPERATOR_SECRET","GOOGLE_SMTP_USERNAME","GOOGLE_OAUTH_CLIENT_ID","GOOGLE_OAUTH_CLIENT_SECRET","GOOGLE_OAUTH_REFRESH_TOKEN"]}
 }

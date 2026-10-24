@@ -1,4 +1,3 @@
-// Configuration only: replace the all-zero D1 ID after manual resource creation.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "uk-aq-media-public",
@@ -20,7 +19,7 @@
     {
       "binding": "MEDIA_DB",
       "database_name": "uk-aq-media",
-      "database_id": "75b39d56-a8e2-48dc-9208-7ac0d199219c",
+      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "../../migrations"
     }
   ],
