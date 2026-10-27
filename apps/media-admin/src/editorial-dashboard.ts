@@ -502,7 +502,13 @@ async function sourceForUrl(db: D1Database, rawUrl: string): Promise<{
         WHEN source_key LIKE 'discovered-publisher-%' THEN 1 ELSE 0 END,
       source_key`)
     .bind(domain, domain).all<SourceRow>();
-  const source = results.find(candidate => publisherHttpsUrl(rawUrl, candidate)) ?? null;
+  const source = results.find(candidate => {
+    if (!publisherHttpsUrl(rawUrl, candidate)) return false;
+    // gov.uk is a shared namespace, not publisher ownership of every council
+    // or public body on its own subdomain. Keep those sources independent.
+    const candidateDomain = candidate.canonical_domain.toLowerCase().replace(/^www\./, '');
+    return candidateDomain !== 'gov.uk' || domain === 'gov.uk';
+  }) ?? null;
   let canonicalUrl: string;
   try { canonicalUrl = canonicalizeUrl(rawUrl, source ?? domain); }
   catch { throw new HttpError(400, 'invalid_article_url'); }
