@@ -28,32 +28,13 @@ jobs:
       UK_AQ_MEDIA_PUBLIC_URL: ${{ vars.UK_AQ_MEDIA_PUBLIC_URL }}
       ALLOW_ENABLED_EMAIL_DELIVERY: ${{ inputs.allow_enabled_email_delivery || false }}
     steps:
-      - name: Verify TEST email isolation and activation intent
-        run: |
-          node --input-type=module <<'JS'
-          const env = process.env;
-          if (env.NEWS_EMAIL_ENABLED === 'true' && env.ALLOW_ENABLED_EMAIL_DELIVERY !== 'true') {
-            throw new Error('Enabled News email deployment requires explicit manual opt-in');
-          }
-          if (env.GITHUB_REPOSITORY === 'TEST-uk-aq/uk-aq-media') {
-            const expected = {
-              CLOUDFLARE_ACCOUNT_ID: 'db4d01d350f4acdbaa8c6a692f721620',
-              UK_AQ_MEDIA_CFLARE_D1DB_ID: '71318b8b-e4f2-469c-908a-48e65b482126',
-              SUPABASE_URL: 'https://zztjgmdiftqtdcrlfpvc.supabase.co',
-              NEWS_EMAIL_SITE_ORIGIN: 'https://test-uk-aq.ukaq.co.uk',
-              NEWS_EMAIL_PUBLIC_API_ORIGIN: 'https://uk-aq-media-email.test-uk-aq-media.workers.dev',
-              UK_AQ_MEDIA_PUBLIC_URL: 'https://uk-aq-media-public.test-uk-aq-media.workers.dev',
-            };
-            for (const [key, value] of Object.entries(expected)) {
-              if (env[key] !== value) throw new Error(`TEST email isolation mismatch: ${key}`);
-            }
-          }
-          JS
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22
           cache: npm
+      - name: Validate email deployment settings and activation intent
+        run: node scripts/validate-news-email-deployment.mjs
       - run: npm ci
       - run: npm run typecheck && npm run build
       # Provision the shared Supabase subscription schema and Google SMTP OAuth

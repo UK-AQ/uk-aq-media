@@ -1,6 +1,7 @@
 import { HttpError, json } from '@uk-aq-media/core';
 import { addJob, boundedBody, encoder, hash, queueJob, rpc, token, type Env } from './common';
 import { normalizeSupportedMailbox } from './mailbox';
+import { turnstileHostnames } from './config.mjs';
 const neutral={ok:true,message:'If this address can be subscribed, please check the inbox for a confirmation email.'};
 async function rateLimit(request:Request,env:Env):Promise<void> {
   const ip=request.headers.get('CF-Connecting-IP');
@@ -48,7 +49,7 @@ export async function publicRoute(request:Request,env:Env,path:string):Promise<R
     });
     const check=await result.json() as {success?:boolean;action?:string;hostname?:string};
     if(!result.ok || !check.success || check.action!==env.NEWS_EMAIL_TURNSTILE_ACTION ||
-      !env.NEWS_EMAIL_TURNSTILE_HOSTNAMES.split(',').map(s=>s.trim()).includes(check.hostname??''))
+      !turnstileHostnames(env.NEWS_EMAIL_TURNSTILE_HOSTNAMES).includes(check.hostname??''))
       throw new HttpError(400,'turnstile_failed');
     const generation=crypto.randomUUID();
     const reserved=await rpc<{id?:string;subscription_id?:string}>(env,'subscribe',{

@@ -6,6 +6,7 @@ import { MessageSizeError, serialize, submission, type Message } from './message
 import { articleMessage, confirmationMessage, type EmailArticle } from './presentation';
 import { publicPreviewImageUrl, type PublicPreviewSelection } from '@uk-aq-media/core';
 import { submit } from './transport';
+import { httpsOrigin } from './config.mjs';
 type Article = Omit<EmailArticle,'preview_image_url'> & PublicPreviewSelection;
 const articleColumns=`a.id,a.source_key,coalesce(a.display_title,a.title) AS title,
   a.publisher,a.canonical_url,a.published_at,a.og_image_url,
@@ -43,22 +44,24 @@ async function send(env:Env,delivery:Delivery,sub:Subscription,message:Message):
   return outcome;
 }
 async function links(env:Env,sub:Subscription):Promise<{manage_url:string;unsubscribe_url:string}|null> {
+  const site=httpsOrigin(env.NEWS_EMAIL_SITE_ORIGIN,'NEWS_EMAIL_SITE_ORIGIN');
   const scope=`${sub.id}:${iso(sub.confirmed_at)}`;
   const manage=await token(env,`manage:${scope}`), unsubscribe=await token(env,`unsubscribe:${scope}`);
   const result=await rpc<{ok?:boolean}>(env,'issue_links',{subscription_id:sub.id,confirmed_at:sub.confirmed_at,
     manage_hash:await hash(manage),unsubscribe_hash:await hash(unsubscribe)});
   if(!result.ok) return null;
-  return {manage_url:`${env.NEWS_EMAIL_SITE_ORIGIN}/news/#manage=${manage}`,
-    unsubscribe_url:`${env.NEWS_EMAIL_SITE_ORIGIN}/news/#unsubscribe=${unsubscribe}`};
+  return {manage_url:`${site}/news-by-email/#manage=${manage}`,
+    unsubscribe_url:`${site}/news-by-email/#unsubscribe=${unsubscribe}`};
 }
 async function activeMessage(env:Env,sub:Subscription,articles:Article[],kind:'immediate'|'daily',
   date:string):Promise<Message|null> {
   const urls=await links(env,sub); if(!urls) return null;
   const presentation=await Promise.all(articles.map(async article=>({...article,
     preview_image_url:await publicPreviewImageUrl(env.UK_AQ_MEDIA_PUBLIC_URL,article)})));
-  return articleMessage(env.NEWS_EMAIL_SITE_ORIGIN,presentation,kind,urls,date);
+  return articleMessage(httpsOrigin(env.NEWS_EMAIL_SITE_ORIGIN,'NEWS_EMAIL_SITE_ORIGIN'),presentation,kind,urls,date);
 }
 export async function confirmation(env:Env,id:string,w:Work):Promise<void> {
+  const site=httpsOrigin(env.NEWS_EMAIL_SITE_ORIGIN,'NEWS_EMAIL_SITE_ORIGIN');
   const sub=await rpc<Subscription>(env,'get',{subscription_id:w.subscription_id});
   const valid=await rpc<{ok:boolean}>(env,'confirmation_valid',{id:w.generation,subscription_id:w.subscription_id});
   const delivery=await newDelivery(env,id,w.subscription_id!,'confirmation');
@@ -69,8 +72,8 @@ export async function confirmation(env:Env,id:string,w:Work):Promise<void> {
     await cancel(env,id);
     await recordConfirmationOutcome(env,id,w.generation!,delivery.state==='sending'?'unknown':'cancelled'); return;
   }
-  const link=`${env.NEWS_EMAIL_SITE_ORIGIN}/news/#confirm=${await token(env,`confirmation:${w.generation}`)}`;
-  const outcome=await send(env,delivery,sub,confirmationMessage(env.NEWS_EMAIL_SITE_ORIGIN,link));
+  const link=`${site}/news-by-email/#confirm=${await token(env,`confirmation:${w.generation}`)}`;
+  const outcome=await send(env,delivery,sub,confirmationMessage(site,link));
   await recordConfirmationOutcome(env,id,w.generation!,outcome);
 }
 export async function immediate(env:Env,id:string,w:Work):Promise<void> {

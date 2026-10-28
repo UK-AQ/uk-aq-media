@@ -1,6 +1,8 @@
 // Fill account-specific Wrangler bindings in the workflow working copy only.
 // Committed configs deliberately contain non-deployable values, not LIVE defaults.
 import { readFileSync, writeFileSync } from 'node:fs';
+import { httpsOrigin, websiteConfig } from '../apps/media-email/src/config.mjs';
+import { validateNewsEmailDeployment } from './validate-news-email-deployment.mjs';
 
 const mode = process.argv[2];
 if (mode !== 'core' && mode !== 'email') {
@@ -22,38 +24,26 @@ function required(name) {
   if (!value || value.startsWith('REPLACE_')) throw new Error('Missing '+ name);
   return value;
 }
-function httpsOrigin(name) {
-  const value = required(name);
-  let url;
-  try { url = new URL(value); }
-  catch { throw new Error('Invalid URL in ' + name); }
-  if (url.protocol !== 'https:' || url.username || url.password ||
-      url.pathname !== '/' || url.search || url.hash ||
-      url.origin !== value.replace(/\/$/, '')) {
-    throw new Error('Expected an HTTPS origin in ' + name);
-  }
-  return url.origin;
+function originVariable(name) {
+  return httpsOrigin(process.env[name], name);
 }
 
 let emailVars = null;
 if (mode === 'email') {
+  validateNewsEmailDeployment();
   const enabled = required('NEWS_EMAIL_ENABLED');
   if (enabled !== 'true' && enabled !== 'false') throw new Error('Invalid NEWS_EMAIL_ENABLED');
-  const site = httpsOrigin('NEWS_EMAIL_SITE_ORIGIN');
-  const hostnames = required('NEWS_EMAIL_TURNSTILE_HOSTNAMES');
-  if (!hostnames.split(',').map(s => s.trim().toLowerCase()).includes(new URL(site).hostname)) {
-    throw new Error('NEWS_EMAIL_TURNSTILE_HOSTNAMES must include the email site hostname');
-  }
-  const supabase = httpsOrigin('SUPABASE_URL');
+  const { site, hostnames } = websiteConfig(process.env);
+  const supabase = originVariable('SUPABASE_URL');
   if (!new URL(supabase).hostname.endsWith('.supabase.co')) {
     throw new Error('SUPABASE_URL must point to a Supabase project');
   }
   emailVars = {
     NEWS_EMAIL_ENABLED: enabled,
     NEWS_EMAIL_SITE_ORIGIN: site,
-    NEWS_EMAIL_TURNSTILE_HOSTNAMES: hostnames,
-    NEWS_EMAIL_PUBLIC_API_ORIGIN: httpsOrigin('NEWS_EMAIL_PUBLIC_API_ORIGIN'),
-    UK_AQ_MEDIA_PUBLIC_URL: httpsOrigin('UK_AQ_MEDIA_PUBLIC_URL'),
+    NEWS_EMAIL_TURNSTILE_HOSTNAMES: hostnames.join(','),
+    NEWS_EMAIL_PUBLIC_API_ORIGIN: originVariable('NEWS_EMAIL_PUBLIC_API_ORIGIN'),
+    UK_AQ_MEDIA_PUBLIC_URL: originVariable('UK_AQ_MEDIA_PUBLIC_URL'),
     SUPABASE_URL: supabase,
   };
 }

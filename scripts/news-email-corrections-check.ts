@@ -92,12 +92,13 @@ assert.equal(classifyDefiniteProRejection(400, 'unexpected'), null);
 assert.equal(classifyDefiniteProRejection(401, undefined), null);
 
 const linkToken='b'.repeat(64);
-const manage=`https://test.example/news/#manage=${linkToken}`;
-const unsubscribe=`https://test.example/news/#unsubscribe=${linkToken}`;
+const manage=`https://test.example/news-by-email/#manage=${linkToken}`;
+const unsubscribe=`https://test.example/news-by-email/#unsubscribe=${linkToken}`;
 const {text,html}=articleMessage('https://test.example',[{title:'Example article',
   publisher:'Example publisher',canonical_url:'https://publisher.example/article',
   published_at:'2026-10-06T07:00:00.000Z',preview_image_url:null}],
   'daily',{manage_url:manage,unsubscribe_url:unsubscribe},'2026-10-06T08:00:00.000Z');
+assert.match(html, /href="https:\/\/test\.example\/" aria-label="UK AQ homepage"/);
 const wire=serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
   NEWS_EMAIL_PUBLIC_API_ORIGIN:'https://api.example'} as Env,{
   kind:'daily',to:'reader@example.org',text,html,manage_url:manage,unsubscribe_url:unsubscribe,

@@ -6,6 +6,7 @@ import { dailyCutoffIsDue, dailyWorkIdentity } from './delivery-policy';
 import { publicRoute } from './public';
 import { cutoffAt } from './schedule';
 import { deliveryOperation } from './operations';
+import { websiteConfig } from './config.mjs';
 
 async function scheduler(env:Env):Promise<Response> {
   const at=now(), slot=String(Math.floor(Date.now()/300000));
@@ -85,7 +86,7 @@ async function processJob(env:Env,job:Job):Promise<void> {
   } else throw new Error('invalid_work_type');
   await complete(env,job);
 }
-async function fetchRoute(request:Request,env:Env):Promise<Response> {
+async function fetchRoute(request:Request,env:Env,allowedOrigin:string|null):Promise<Response> {
   const url=new URL(request.url);
   if(url.pathname==='/scheduler/run') {
     if(!await secretMatches(request.headers.get('x-uk-aq-worker-http-secret'),env.UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET))
@@ -122,8 +123,7 @@ async function fetchRoute(request:Request,env:Env):Promise<Response> {
     await rpc(env,'unsubscribe',{token_hash:await hash(oneClick[1]!)});
     return json({ok:true}); // Idempotent and neutral for revoked/expired credentials.
   }
-  const origin=request.headers.get('Origin');
-  if(origin!==env.NEWS_EMAIL_SITE_ORIGIN) throw new HttpError(403,'origin_not_allowed');
+  if(!allowedOrigin) throw new HttpError(403,'origin_not_allowed');
   if(request.method==='OPTIONS') return new Response(null,{status:204});
   if(env.NEWS_EMAIL_ENABLED!=='true' && url.pathname==='/subscribe') throw new HttpError(503,'temporarily_unavailable');
   return publicRoute(request,env,url.pathname);
@@ -131,12 +131,19 @@ async function fetchRoute(request:Request,env:Env):Promise<Response> {
 export default {
   async fetch(request:Request,env:Env):Promise<Response> {
     let response:Response;
-    try { response=await fetchRoute(request,env); } catch(error) { response=httpFailure(error); }
+    let allowedOrigin:string|null=null;
+    try {
+      const {origins}=websiteConfig(env);
+      const origin=request.headers.get('Origin');
+      if(origin && origins.includes(origin)) allowedOrigin=origin;
+      response=await fetchRoute(request,env,allowedOrigin);
+    } catch(error) { response=httpFailure(error); }
     const headers=new Headers(response.headers);
     headers.set('Referrer-Policy','no-referrer'); headers.set('Cache-Control','no-store');
-    if(request.headers.get('Origin')===env.NEWS_EMAIL_SITE_ORIGIN) {
-      headers.set('Access-Control-Allow-Origin',env.NEWS_EMAIL_SITE_ORIGIN);
-      headers.set('Vary','Origin');headers.set('Access-Control-Allow-Methods','POST, OPTIONS');
+    headers.append('Vary','Origin');
+    if(allowedOrigin) {
+      headers.set('Access-Control-Allow-Origin',allowedOrigin);
+      headers.set('Access-Control-Allow-Methods','POST, OPTIONS');
       headers.set('Access-Control-Allow-Headers','Content-Type');
     }
     return new Response(response.body,{status:response.status,headers});

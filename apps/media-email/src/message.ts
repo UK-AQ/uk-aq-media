@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import { encoder, type Delivery, type Env } from './common';
 import { normalizeSupportedMailbox } from './mailbox';
 import { inlineBranding } from './branding';
+import { httpsOrigin } from './config.mjs';
 
 export interface Message { kind:string; text:string; html:string; manage_url?:string; unsubscribe_url?:string }
 export interface Submission extends Message { to:string; message_id:string; date:string }
@@ -53,8 +54,9 @@ export function serialize(env:Env,message:Submission):string {
     'MIME-Version: 1.0', `Content-Type: multipart/alternative;\r\n boundary="${alternative}"`,
   ];
   if(message.kind!=='confirmation') {
+    const site=httpsOrigin(env.NEWS_EMAIL_SITE_ORIGIN,'NEWS_EMAIL_SITE_ORIGIN');
     for(const [purpose,link] of [['manage',message.manage_url],['unsubscribe',message.unsubscribe_url]]) {
-      const prefix=`${env.NEWS_EMAIL_SITE_ORIGIN}/news/#${purpose}=`;
+      const prefix=`${site}/news-by-email/#${purpose}=`;
       if(!link?.startsWith(prefix) || !/^[a-f0-9]{64}$/.test(link.slice(prefix.length)) ||
         !message.text.includes(link) || !message.html.includes(`href="${link}"`))
         throw new Error('invalid_news_message');

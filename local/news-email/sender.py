@@ -85,7 +85,7 @@ def compose(data):
     if kind != 'confirmation':
         for purpose, field in [('manage', 'manage_url'), ('unsubscribe', 'unsubscribe_url')]:
             link = data[field]
-            if not re.fullmatch(re.escape(site) + r'/news/#' + purpose + r'=[a-f0-9]{64}', link):
+            if not re.fullmatch(re.escape(site) + r'/news-by-email/#' + purpose + r'=[a-f0-9]{64}', link):
                 raise ValueError('invalid subscription link')
             if link not in text or f'href="{link}"' not in html:
                 raise ValueError('missing visible subscription link')
