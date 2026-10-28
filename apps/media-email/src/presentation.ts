@@ -41,9 +41,11 @@ function shell(site:string,preheader:string,content:string,footer:string):string
 ${content}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:31px;border-top:1px solid #eadfd2;"><tr><td style="padding-top:22px;font-size:13px;line-height:1.9;color:#526273;">${footer}</td></tr></table>
 </td></tr></table><!--[if mso]></td></tr></table><![endif]-->
-<div style="font-size:11px;line-height:1.7;color:#6d7884;padding:19px 12px 0;">UK AQ News &nbsp;·&nbsp; News selected for UK AQ readers</div>
+<div style="font-size:11px;line-height:1.7;color:#6d7884;padding:19px 12px 0;">AQ in the News &nbsp;·&nbsp; UK Air Quality &nbsp;·&nbsp; <a href="${escape(`${site}/`)}" style="color:#6d7884;text-decoration:underline;">ukaq.co.uk</a></div>
 </td></tr></table></body></html>`;
 }
+const brandFooterText = (site:string):string =>
+  `AQ in the News · UK Air Quality · ukaq.co.uk\nWebsite: ${site}/`;
 function articleMarkup(article:EmailArticle,daily:boolean):string {
   const url=publisherUrl(article.canonical_url), date=publicationDate(article.published_at);
   const heading=daily?'h3':'h2';
@@ -67,13 +69,13 @@ export function articleMessage(site:string,articles:EmailArticle[],kind:'immedia
   const label=`Daily update · ${publicationDate(date)} · ${articles.length} ${articles.length===1?'article':'articles'}`;
   const text=articles.map(a=>`${a.title}\n${a.publisher}${publicationDate(a.published_at)?` · ${publicationDate(a.published_at)}`:''}\nRead original article: ${publisherUrl(a.canonical_url)}`).join('\n\n');
   const footer=`<a href="${escape(news)}" style="color:#285b88;font-weight:700;text-decoration:underline;">View all AQ in the News</a><br>${anchor(links.manage_url,'Manage preferences')} &nbsp;&nbsp;·&nbsp;&nbsp; ${anchor(links.unsubscribe_url,'Unsubscribe')}`;
-  return {kind,...links,text:`AQ in the News\n${daily?`${label}\n`:''}\n${text}\n\nView all AQ in the News: ${news}\n\nManage preferences: ${links.manage_url}\nUnsubscribe: ${links.unsubscribe_url}\n`,
+  return {kind,...links,text:`AQ in the News\n${daily?`${label}\n`:''}\n${text}\n\nView all AQ in the News: ${news}\n\nManage preferences: ${links.manage_url}\nUnsubscribe: ${links.unsubscribe_url}\n\n${brandFooterText(site)}\n`,
     html:shell(site,daily?'Your daily selection of air quality news from AQ in the News.':'A newly approved air quality article from AQ in the News.',
       `${daily?`<p style="font-size:13px;line-height:1.5;color:#526273;text-transform:uppercase;letter-spacing:1px;margin:0 0 7px;font-weight:700;">Daily update &nbsp;·&nbsp; ${publicationDate(date)}</p><h2 style="font-size:22px;line-height:1.3;letter-spacing:-.3px;margin:0 0 25px;">${articles.length} new ${articles.length===1?'article':'articles'}</h2>`:'<p style="margin:0 0 18px;font-size:13px;color:#526273;font-weight:700;letter-spacing:1px;text-transform:uppercase;">New article</p>'}${articles.map(a=>articleMarkup(a,daily)).join('')}`,footer)};
 }
 export function confirmationMessage(site:string,link:string):Message {
   return {kind:'confirmation',
-    text:`AQ in the News\n\nPlease confirm your email address to activate your requested AQ in the News subscription.\n\n${link}\n\nThis link expires after 24 hours. If you did not request this subscription, ignore this email. No subscription will activate.\n`,
+    text:`AQ in the News\n\nPlease confirm your email address to activate your requested AQ in the News subscription.\n\n${link}\n\nThis link expires after 24 hours. If you did not request this subscription, ignore this email. No subscription will activate.\n\n${brandFooterText(site)}\n`,
     html:shell(site,'Confirm your AQ in the News subscription. This link expires after 24 hours.',
       `<h1 style="margin:0 0 20px;font-size:26px;line-height:34px;">Confirm your subscription</h1><p style="font-size:16px;line-height:25px;">Please confirm your email address to activate your requested AQ in the News subscription.</p><p style="font-size:16px;line-height:25px;">${anchor(link,'Confirm your AQ in the News subscription')}</p><p style="font-size:16px;line-height:25px;">This link expires after <strong>24 hours</strong>. If you did not request this subscription, ignore this email. No subscription will activate.</p>`,
       anchor(`${site}/news/`,'View all AQ in the News'))};
