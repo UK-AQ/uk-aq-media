@@ -170,7 +170,10 @@ export async function releaseBlueskyThumbnailPending(db: D1Database): Promise<nu
     SET status = 'queued', last_error_code = NULL, next_attempt_at = NULL, updated_at = ?
     WHERE publication_reason = 'auto_approved' AND status = 'blocked'
       AND last_error_code = 'thumbnail_pending'
-      AND article_id IN (SELECT article_id FROM media_bluesky_thumbnail_eligible_articles)`)
+      AND EXISTS (
+        SELECT 1 FROM media_bluesky_thumbnail_eligible_articles ready
+        WHERE ready.article_id = media_bluesky_publications.article_id
+      )`)
     .bind(new Date().toISOString()).run();
   return Number(result.meta.changes ?? 0);
 }
