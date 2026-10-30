@@ -1,8 +1,8 @@
 import { connect } from 'cloudflare:sockets';
 import { Buffer } from 'node:buffer';
-import { boundedBody, encoder, type Env } from './common';
+import { assertRecipientEligible, RecipientIneligible, boundedBody, encoder, type Env, type RecipientEligibility } from './common';
 
-export type Outcome = 'accepted'|'temporary_failure'|'permanent_failure'|'unknown';
+export type Outcome = 'accepted'|'temporary_failure'|'permanent_failure'|'unknown'|'cancelled';
 export interface Result { outcome:Outcome; error:string|null }
 export const result = (outcome:Outcome,error:string|null=null):Result => ({outcome,error});
 class Failure extends Error {
@@ -125,7 +125,7 @@ function expect(reply:Reply,codes:number[],error:string):Reply {
   throw new Error('smtp_reply_unexpected');
 }
 
-export async function smtpSubmit(env:Env,to:string,wire:string,beforeSubmit:()=>Promise<void>):Promise<Result> {
+export async function smtpSubmit(env:Env,to:string,wire:string,beforeSubmit:()=>Promise<void>,eligibility:RecipientEligibility|undefined):Promise<Result> {
   let access:string;
   try { access=await accessToken(env); }
   catch(error) { return error instanceof Failure?result(error.outcome,error.message):result('temporary_failure','oauth_refresh_unavailable'); }
@@ -146,6 +146,8 @@ export async function smtpSubmit(env:Env,to:string,wire:string,beforeSubmit:()=>
     // Google uses a 334 challenge for OAuth errors; terminate it without logging it.
     if(auth.code===334) auth=await session.command('');
     expect(auth,[235],'smtp_auth_rejected');
+    // Resolve Supabase after OAuth/connect/auth delay, before starting the envelope.
+    await assertRecipientEligible(env,eligibility);
     expect(await session.command('MAIL FROM:<news@ukaq.co.uk>'),[250],'smtp_envelope_rejected');
     expect(await session.command(`RCPT TO:<${to}>`),[250,251],'smtp_recipient_rejected');
     expect(await session.command('DATA'),[354],'smtp_data_rejected');
@@ -163,6 +165,7 @@ export async function smtpSubmit(env:Env,to:string,wire:string,beforeSubmit:()=>
     await session.quit();
     return outcome;
   } catch(error) {
+    if(error instanceof RecipientIneligible) return result('cancelled');
     if(error instanceof Failure) return result(error.outcome,error.message);
     return uncertain?result('unknown','smtp_acceptance_unknown'):result('temporary_failure','smtp_pre_submission_failure');
   } finally { session?.finish(); }

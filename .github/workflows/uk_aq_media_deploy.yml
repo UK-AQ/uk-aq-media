@@ -18,9 +18,11 @@ on:
 permissions:
   contents: read
 
+# Shared with email deployment: serialize D1 migrations and Queue creation.
 concurrency:
   group: uk-aq-media-deploy
   cancel-in-progress: false
+  queue: max
 
 jobs:
   deploy:
@@ -79,7 +81,7 @@ jobs:
             echo "Queue uk-aq-media-email already exists."
           else
             if ! npx wrangler queues create uk-aq-media-email; then
-              # The manual email workflow may have created it after our first check.
+              # Recheck Queue existence if creation reports a conflict.
               npx wrangler queues info uk-aq-media-email >/dev/null
             fi
           fi

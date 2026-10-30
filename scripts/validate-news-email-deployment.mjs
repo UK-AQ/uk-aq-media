@@ -1,5 +1,5 @@
 // Validate the selected settings; never infer or fall back to another environment.
-// Correct environment selection still requires manual review of existing values.
+// Environment selection relies on reviewed repository variables and secrets.
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { httpsOrigin, websiteConfig } from '../apps/media-email/src/config.mjs';
@@ -20,12 +20,9 @@ export function validateNewsEmailDeployment(env = process.env) {
     throw new Error('SUPABASE_URL must point to a Supabase project');
   }
   if (!['true', 'false'].includes(env.NEWS_EMAIL_ENABLED)) throw new Error('Invalid NEWS_EMAIL_ENABLED');
-  if (env.NEWS_EMAIL_ENABLED === 'true' && env.ALLOW_ENABLED_EMAIL_DELIVERY !== 'true') {
-    throw new Error('Enabled News email deployment requires explicit manual opt-in');
-  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   validateNewsEmailDeployment();
-  console.log('Validated News email deployment settings and activation intent.');
+  console.log('Validated News email deployment settings.');
 }

@@ -17,7 +17,7 @@ export interface Env {
   SUPABASE_URL: string; SB_SECRET_KEY: string;
 }
 export interface Subscription {
-  id: string; email: string; status: string; delivery_mode: string; daily_time_local: string;
+  id: string; email: string; status: 'pending'|'active'|'unsubscribed'|'blocked'; delivery_mode: string; daily_time_local: string;
   confirmed_at: string; digest_cursor_at: string; mode_since_at: string; updated_at:string;
 }
 export interface Work {
@@ -45,6 +45,33 @@ export interface Delivery {
   selected_transport:Transport; attempt_transport:Transport|null; attempt_count:number; retry_hold:number;
   reconciliation_target:string|null;
 }
+export interface RecipientEligibility {
+  subscription_id:string; delivery_mode:string; generation?:string; attempt_count?:number;
+  confirmed_at?:string; mode_since_at?:string;
+  expected_preference_updated_at?:string; digest_cursor_at?:string;
+}
+export class RecipientIneligible extends Error {
+  constructor() { super('recipient_ineligible'); }
+}
+export function recipientEligibility(delivery:Delivery,sub:Subscription,work:Work):RecipientEligibility {
+  return {subscription_id:sub.id,delivery_mode:delivery.delivery_mode,attempt_count:delivery.attempt_count+1,
+    ...(delivery.delivery_mode==='confirmation'?{generation:work.generation}:{
+      confirmed_at:sub.confirmed_at,mode_since_at:sub.mode_since_at,
+      ...(delivery.delivery_mode==='daily'?{
+        expected_preference_updated_at:sub.updated_at,digest_cursor_at:sub.digest_cursor_at,
+      }:{}),
+    }),
+  };
+}
+export async function assertRecipientEligible(env:Env,eligibility:RecipientEligibility|undefined):Promise<void> {
+  if(!eligibility) throw new RecipientIneligible();
+  const fenced=await env.MEDIA_DB.prepare(`SELECT subscription_id FROM media_news_retention_fences
+    WHERE subscription_id=? AND expires_at>?`).bind(eligibility.subscription_id,now()).first();
+  if(fenced) throw new Error('retention_fenced');
+  const result=await rpc<{ok?:boolean}>(env,'send_eligible',{...eligibility});
+  if(result.ok!==true) throw new RecipientIneligible();
+}
+
 export const now = ():string => new Date().toISOString();
 export const iso = (value:string):string => new Date(value).toISOString();
 export const encoder = new TextEncoder();
@@ -78,12 +105,12 @@ export function reconciliationOutcomeCommitted(receipt:ConfirmationOutcomeReceip
 }
 export async function recordConfirmationOutcome(env:Env,id:string,generation:string,
   outcome:string):Promise<ConfirmationOutcomeReceipt> {
-  const receipt=await env.MEDIA_DB.prepare(`SELECT claimed_at,sent_at
+  const receipt=await env.MEDIA_DB.prepare(`SELECT claimed_at,sent_at,subscription_id
     FROM media_news_email_deliveries WHERE id=?`).bind(id)
-    .first<{claimed_at:string|null;sent_at:string|null}>();
+    .first<{claimed_at:string|null;sent_at:string|null;subscription_id:string}>();
   const sentAt=receipt?.sent_at??receipt?.claimed_at??null;
   if(outcome==='accepted'&&!sentAt) throw new Error('confirmation_acceptance_time_required');
-  return rpc<ConfirmationOutcomeReceipt>(env,'confirmation_outcome',{id:generation,outcome,sent_at:sentAt,
+  return rpc<ConfirmationOutcomeReceipt>(env,'confirmation_outcome',{id:generation,outcome,sent_at:sentAt,subscription_id:receipt?.subscription_id,
     max_sends:Number(env.NEWS_EMAIL_CONFIRM_MAX_SENDS),
     backoff_days:Number(env.NEWS_EMAIL_CONFIRM_BACKOFF_DAYS)});
 }
@@ -102,14 +129,23 @@ export async function boundedBody(request:Request|Response, limit=8192):Promise<
   return new TextDecoder().decode(bytes);
 }
 export async function addJob(env:Env,id:string,type:string,work:Work,event:number|null=null):Promise<void> {
-  await env.MEDIA_DB.prepare(`INSERT INTO media_news_email_outbox
-    (id,approval_event_id,work_type,payload,created_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO NOTHING`)
-    .bind(id,event,type,JSON.stringify(work),now()).run();
+  const inserted=await env.MEDIA_DB.prepare(`INSERT INTO media_news_email_outbox
+    (id,approval_event_id,work_type,payload,created_at) SELECT ?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM media_news_retention_fences WHERE subscription_id=? AND expires_at>?)
+    AND (?<>'immediate_delivery' OR EXISTS(SELECT 1 FROM media_news_email_outbox o
+      JOIN media_news_approval_events e ON e.id=o.approval_event_id WHERE o.work_type='approval_dispatch'
+      AND o.approval_event_id=? AND o.state<>'completed' AND e.email_dispatch_closed=0))
+    ON CONFLICT(id) DO NOTHING`)
+    .bind(id,event,type,JSON.stringify(work),now(),work.subscription_id??null,now(),type,event).run();
+  // A parent may checkpoint only after its child exists durably. A transient fence
+  // must retry the same page, never silently skip a recipient during token cleanup.
+  if(!inserted.meta.changes&&!await env.MEDIA_DB.prepare('SELECT id FROM media_news_email_outbox WHERE id=?').bind(id).first())
+    throw new Error('retention_fenced');
 }
 export async function queueJob(env:Env,id:string):Promise<void> {
   const pending=await env.MEDIA_DB.prepare(`SELECT o.state,coalesce(d.retry_hold,0) AS retry_hold
-    FROM media_news_email_outbox o LEFT JOIN media_news_email_deliveries d ON d.id=o.id WHERE o.id=?`)
-    .bind(id).first<{state:string;retry_hold:number}>();
+    FROM media_news_email_outbox o LEFT JOIN media_news_email_deliveries d ON d.id=o.id WHERE o.id=? AND NOT EXISTS(SELECT 1 FROM media_news_retention_fences f
+    WHERE f.subscription_id=json_extract(o.payload,'$.subscription_id') AND f.expires_at>?)`)
+    .bind(id,now()).first<{state:string;retry_hold:number}>();
   if(!pending || pending.state==='completed' || pending.retry_hold) return;
   // Sending first leaves a recoverable row if either the Queue or acknowledgement fails.
   await env.MEDIA_EMAIL_QUEUE.send({id});
@@ -126,7 +162,10 @@ export async function newDelivery(env:Env,id:string,sub:string,mode:string,event
   const messageId=`<news.${await hash(id)}@ukaq.co.uk>`;
   await env.MEDIA_DB.prepare(`INSERT INTO media_news_email_deliveries
     (id,subscription_id,approval_event_id,digest_run_id,delivery_mode,message_id,created_at)
-    VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(id,sub,event,digest,mode,messageId,now()).run();
-  return (await env.MEDIA_DB.prepare('SELECT * FROM media_news_email_deliveries WHERE id=?')
-    .bind(id).first<Delivery>())!;
+    SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM media_news_email_outbox WHERE id=? AND state<>'completed')
+    AND NOT EXISTS(SELECT 1 FROM media_news_retention_fences WHERE subscription_id=? AND expires_at>?)
+    ON CONFLICT(id) DO NOTHING`).bind(id,sub,event,digest,mode,messageId,now(),id,sub,now()).run();
+  const delivery=await env.MEDIA_DB.prepare('SELECT * FROM media_news_email_deliveries WHERE id=?').bind(id).first<Delivery>();
+  if(!delivery) throw new Error('retention_fenced');
+  return delivery;
 }

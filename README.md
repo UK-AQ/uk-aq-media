@@ -284,7 +284,7 @@ Descriptions/bodies and internal fields are absent.
 Only approved articles are selected. Successful responses allow five minutes of
 caching; errors use `no-store`. Browser access remains same-origin through the cache proxy.
 
-Admin requests require `Authorization: Bearer <UK_AQ_MEDIA_ADMIN_TOKEN>` and use
+Editorial admin requests require `Authorization: Bearer <UK_AQ_MEDIA_ADMIN_TOKEN>` and use
 `Cache-Control: no-store`:
 
 - `GET /admin/articles?status=pending&limit=20` — optional status, maximum 50;
@@ -349,6 +349,81 @@ A state change and append-only event commit atomically through SQL triggers.
 `MEDIA_SYNC_TOKEN` is reserved for later read-only `/sync` endpoints and is never
 accepted by `/admin`; no sync endpoint or MySQL mirror is implemented in this phase.
 Source policy editing, UK AQ text/tag editing and dashboard UI are also deferred.
+
+### Read-only News email delivery capability
+
+`GET /admin/news-email/delivery` on the existing `UK_AQ_MEDIA_ADMIN_URL` requires
+`Authorization: Bearer <UK_AQ_MEDIA_ADMIN_TOKEN>`. The existing server-side admin
+credential authenticates this exact GET route. The route remains bounded and read-only
+and is never installed on the email Worker or accepted by its privileged
+operator endpoints. Missing/blank configuration fails closed with 503.
+Wrong/missing bearer credentials return 401; other authenticated
+methods return 405 with `Allow: GET`. Every response uses `Cache-Control: no-store`.
+Admin Worker observability redacts URL query strings; endpoint failures log only
+a fixed event classification, without exception text or request identifiers.
+
+Query parameters are optional: `subscription_id` (canonical UUID), `limit` (1–100,
+default 25), `offset` (0–10000, default 0), and `days` (1–30, default 7). Unknown,
+duplicate, empty and out-of-range parameters return 400. Rows are selected and
+paginated in D1, newest first by `created_at, id`; both lists use the same limit and
+offset. The UTC creation-time window also bounds summary counts. `has_more` is true
+when either list has another row. This is a window of records created recently,
+so an older held/unknown record is outside the response once it leaves that window.
+
+Successful responses have this safe projection:
+
+```text
+{
+  available: true,
+  summary: [{ delivery_mode, state, count }],
+  deliveries: [{ id, subscription_id, delivery_mode, state, created_at, sent_at,
+    failed_at, attempt_count, selected_transport, attempt_transport, retry_hold,
+    error_class }],
+  outbox: [{ id, work_type, state, created_at, queued_at, attempt_count, error_class }],
+  pagination: { limit, offset, has_more },
+  window_days
+}
+```
+
+`retry_hold` is boolean. Delivery states retain the authoritative D1 values:
+`pending`, `sending`, `accepted`, `temporary_failure`, `permanent_failure`, `unknown`
+and `cancelled`. The summary groups rows with `retry_hold = 1` as `held`; detail rows
+retain both their actual state and hold flag. **Accepted means final SMTP acceptance,
+not inbox placement, receipt or reading.** Outbox `pending`, `queued` and `completed`
+describe work processing; `completed` does not prove email acceptance.
+
+The global response includes confirmation, Immediate and Daily delivery records and
+recent outbox work. With `subscription_id`, both lists and summary are restricted
+to that opaque UUID. Outbox correlation uses only the existing JSON
+`payload.subscription_id`; global scan/dispatch jobs without that field are omitted
+from per-subscription history. No payload, generation field, token, email address,
+Message-ID, reconciliation reference or raw `last_error` is returned. `error_class`
+is null, a fixed allowlisted internal classification, or `unavailable`; no stored
+provider/SMTP text is passed through. Storage failures return sanitized 503
+`{ available: false, error: "delivery_read_unavailable" }`, never empty success.
+
+Configuration and later TEST operation:
+
+1. Reuse the existing `UK_AQ_MEDIA_ADMIN_TOKEN` GitHub repository secret.
+   The existing core deployment workflow validates and installs the admin Worker
+   secret. Local examples use `apps/media-admin/.dev.vars.example`; never commit
+   the populated `.dev.vars` file.
+2. When TEST migration/deployment is separately authorised, the normal workflow
+   applies `0054_news_email_dashboard_reads.sql` before deploying the admin Worker. Its four indexes
+   support date-window reads and UUID history without historical full-table scans;
+   it creates no new delivery ledger or behavior.
+3. Configure the protected dashboard backend with the existing Media admin URL and
+   admin credential. Browser requests go through authenticated
+   `/api/accounts/email-delivery`; credentials and direct D1 access stay server-side.
+   Missing configuration must display delivery unavailable.
+4. During authorised real TEST operation, verify the exact GET route succeeds with
+   the existing admin token, while missing/wrong tokens and write methods are denied.
+   Check paging/window/UUID isolation, safe
+   fields, no-store headers, real states and explicit SMTP acceptance wording.
+
+This repository change does not deploy Workers, apply D1 migrations, schedule work,
+send email or modify retry/subscriber behavior. Runtime acceptance remains a later,
+separately authorised TEST operation before website integration.
 
 The discovery Worker exposes one authenticated backend scheduling route:
 

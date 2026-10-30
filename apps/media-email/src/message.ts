@@ -1,11 +1,11 @@
 import { Buffer } from 'node:buffer';
-import { encoder, type Delivery, type Env } from './common';
+import { encoder, type Delivery, type Env, type RecipientEligibility } from './common';
 import { normalizeSupportedMailbox } from './mailbox';
 import { inlineBranding } from './branding';
 import { httpsOrigin } from './config.mjs';
 
 export interface Message { kind:string; text:string; html:string; manage_url?:string; unsubscribe_url?:string }
-export interface Submission extends Message { to:string; message_id:string; date:string }
+export interface Submission extends Message { to:string; message_id:string; date:string; eligibility?:RecipientEligibility }
 const subjects:Record<string,string> = {
   confirmation:'Confirm your AQ in the News subscription',
   immediate:'AQ in the News: New article', daily:'Your daily AQ in the News update',
@@ -16,8 +16,8 @@ export class MessageSizeError extends Error {
   constructor() { super('news_message_too_large'); }
 }
 
-export function submission(delivery:Delivery,recipient:string,message:Message):Submission {
-  return {...message,to:recipient,message_id:delivery.message_id,date:delivery.created_at};
+export function submission(delivery:Delivery,recipient:string,message:Message,eligibility?:RecipientEligibility):Submission {
+  return {...message,to:recipient,message_id:delivery.message_id,date:delivery.created_at,...(eligibility?{eligibility}:{})};
 }
 
 const crlf = (value:string):string => value.replace(/\r\n|\r|\n/g,'\r\n');

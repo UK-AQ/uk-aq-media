@@ -1,5 +1,5 @@
 import { digestCursorRequest, digestRunStateAfterCursor, hash, iso, newDelivery, now,
-  recordConfirmationOutcome, rpc, token, type CursorAdvanceReceipt, type Delivery,
+  assertRecipientEligible, recipientEligibility, recordConfirmationOutcome, rpc, token, type CursorAdvanceReceipt, type Delivery,
   type DigestCursorReason, type Env, type Subscription, type Work } from './common';
 import { dailyWorkStillMatches, digestRequiresOperator } from './delivery-policy';
 import { MessageSizeError, serialize, submission, type Message } from './message';
@@ -19,17 +19,21 @@ export async function cancel(env:Env,id:string):Promise<void> {
   await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='cancelled'
     WHERE id=? AND state IN ('pending','temporary_failure')`).bind(id).run();
 }
-async function send(env:Env,delivery:Delivery,sub:Subscription,message:Message):Promise<string> {
+async function send(env:Env,delivery:Delivery,sub:Subscription,message:Message,work:Work):Promise<string> {
   if(terminal.has(delivery.state)) return delivery.state;
   if(delivery.retry_hold || delivery.state==='sending') throw new Error('delivery_claim_unavailable');
   const claim=await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='sending',
     claimed_at=?,attempt_count=attempt_count+1,attempt_transport=selected_transport,submission_started=0
     WHERE id=? AND state IN ('pending','temporary_failure') AND retry_hold=0
-    AND selected_transport=? AND attempt_count=?`)
-    .bind(now(),delivery.id,delivery.selected_transport,delivery.attempt_count).run();
+    AND selected_transport=? AND attempt_count=?
+    AND EXISTS(SELECT 1 FROM media_news_email_outbox WHERE id=? AND state<>'completed')
+    AND NOT EXISTS(SELECT 1 FROM media_news_retention_fences WHERE subscription_id=? AND expires_at>?)`)
+    .bind(now(),delivery.id,delivery.selected_transport,delivery.attempt_count,delivery.id,sub.id,now()).run();
   if(!claim.meta.changes) throw new Error('delivery_claim_changed');
   const attempt=delivery.attempt_count+1;
-  const {outcome,error}=await submit(env,delivery.selected_transport,submission(delivery,sub.email,message),async()=>{
+  const eligibility=recipientEligibility(delivery,sub,work);
+  const {outcome,error}=await submit(env,delivery.selected_transport,submission(delivery,sub.email,message,eligibility),async()=>{
+    await assertRecipientEligible(env,eligibility);
     const marked=await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET submission_started=1
       WHERE id=? AND state='sending' AND attempt_count=? AND attempt_transport=? AND retry_hold=0`)
       .bind(delivery.id,attempt,delivery.selected_transport).run();
@@ -73,7 +77,7 @@ export async function confirmation(env:Env,id:string,w:Work):Promise<void> {
     await recordConfirmationOutcome(env,id,w.generation!,delivery.state==='sending'?'unknown':'cancelled'); return;
   }
   const link=`${site}/news-by-email/#confirm=${await token(env,`confirmation:${w.generation}`)}`;
-  const outcome=await send(env,delivery,sub,confirmationMessage(site,link));
+  const outcome=await send(env,delivery,sub,confirmationMessage(site,link),w);
   await recordConfirmationOutcome(env,id,w.generation!,outcome);
 }
 export async function immediate(env:Env,id:string,w:Work):Promise<void> {
@@ -94,7 +98,7 @@ export async function immediate(env:Env,id:string,w:Work):Promise<void> {
     .bind(w.event_id).first();
   if(!eligible||current.status!=='active'||current.delivery_mode!=='immediate'||
     current.mode_since_at!==sub.mode_since_at) { await cancel(env,id); return; }
-  await send(env,delivery,current,message);
+  await send(env,delivery,current,message,w);
 }
 export async function digest(env:Env,id:string,w:Work):Promise<void> {
   await env.MEDIA_DB.prepare(`INSERT INTO media_news_digest_runs
@@ -127,7 +131,7 @@ export async function digest(env:Env,id:string,w:Work):Promise<void> {
   try {
     // Includes UTF-8, both base64 alternatives, CID assets, headers/boundaries,
     // and the fallback JSON envelope. Never deliver a truncated article window.
-    serialize(env,submission(delivery,sub.email,message));
+    serialize(env,submission(delivery,sub.email,message,recipientEligibility(delivery,sub,w)));
   } catch(error) {
     if(!(error instanceof MessageSizeError)) throw error;
     await holdDigest(env,id,articles.length); return;
@@ -136,7 +140,7 @@ export async function digest(env:Env,id:string,w:Work):Promise<void> {
   if(!dailyWorkStillMatches(w,current)) { await cancel(env,id); return; }
   await env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET item_count=?,message_id=? WHERE id=?`)
     .bind(articles.length,delivery.message_id,id).run();
-  const outcome=await send(env,delivery,current,message);
+  const outcome=await send(env,delivery,current,message,w);
   await env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET state=?,sent_at=? WHERE id=?`)
     .bind(outcome,outcome==='accepted'?now():null,id).run();
   if(outcome==='accepted') await finishDigest(env,id,w,'accepted');

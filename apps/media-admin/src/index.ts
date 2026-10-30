@@ -18,6 +18,7 @@ import {
   requireCurrentGuardianImageRepairPlan,
 } from './guardian-image-bulk';
 import { handleEditorialDashboard } from './editorial-dashboard';
+import { readNewsEmailDelivery } from './news-email-delivery';
 import { readMediaHealth } from './health';
 import { handleResearchTopicsAdmin } from './research-topics';
 import { directPublishState, facebookEligibility, requireFacebookEligibility } from './direct-publish-eligibility';
@@ -1258,10 +1259,13 @@ export default {
   async fetch(request, env, ctx?: ExecutionContext): Promise<Response> {
     let authenticated = false;
     try {
+      const url = new URL(request.url);
+      // Keep the bounded delivery read separate from editorial dispatch.
+      // Returning before authenticated is set prevents the POST wake-up hook.
+      if (url.pathname === '/admin/news-email/delivery') return await readNewsEmailDelivery(request, url, env);
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.UK_AQ_MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       authenticated = true;
-      const url = new URL(request.url);
       if (url.pathname === '/admin/bluesky/settings') return await blueskySettings(request, env);
       if (url.pathname === '/admin/facebook/settings') return await facebookSettings(request, env);
       if (url.pathname === '/admin/facebook/connection-check') {

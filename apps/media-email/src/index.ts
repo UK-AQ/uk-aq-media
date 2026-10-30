@@ -6,6 +6,7 @@ import { dailyCutoffIsDue, dailyWorkIdentity } from './delivery-policy';
 import { publicRoute } from './public';
 import { cutoffAt } from './schedule';
 import { deliveryOperation } from './operations';
+import { queueRetention, runRetention, retentionStatus, senderRetentionRoute } from './retention';
 import { websiteConfig } from './config.mjs';
 
 async function scheduler(env:Env):Promise<Response> {
@@ -92,11 +93,15 @@ async function fetchRoute(request:Request,env:Env,allowedOrigin:string|null):Pro
     if(!await secretMatches(request.headers.get('x-uk-aq-worker-http-secret'),env.UK_AQ_MEDIA_EMAIL_WORKER_HTTP_SECRET))
       throw new HttpError(401,'unauthorized');
     if(request.method!=='POST') throw new HttpError(405,'method_not_allowed');
+    if(!['true','false'].includes(env.NEWS_EMAIL_ENABLED)) throw new HttpError(503,'retention_configuration_missing');
+    await queueRetention(env);
     if(env.NEWS_EMAIL_ENABLED!=='true') return json({ok:true,enabled:false});
     return scheduler(env);
   }
+  if(url.pathname.startsWith('/sender/')) return senderRetentionRoute(request,env,url.pathname);
   if(url.pathname.startsWith('/operations/')) {
     if(!await bearerMatches(request,env.NEWS_EMAIL_OPERATOR_SECRET)) throw new HttpError(401,'unauthorized');
+    if(url.pathname==='/operations/retention'&&request.method==='GET') return retentionStatus(env,url);
     if(request.method!=='POST') throw new HttpError(405,'method_not_allowed');
     let parsed:unknown;
     try { parsed=JSON.parse(await boundedBody(request)); } catch { throw new HttpError(400,'invalid_request'); }
@@ -109,10 +114,10 @@ async function fetchRoute(request:Request,env:Env,allowedOrigin:string|null):Pro
     }
     if(url.pathname==='/operations/reconcile'||url.pathname==='/operations/retry')
       return deliveryOperation(env,url.pathname,data);
-    if(url.pathname!=='/operations/suppress') throw new HttpError(404,'not_found');
+    if(url.pathname!=='/operations/block') throw new HttpError(404,'not_found');
     if(typeof data.subscription_id!=='string'||!/^[a-f0-9-]{36}$/.test(data.subscription_id)||typeof data.reason!=='string'||!data.reason.trim())
       throw new HttpError(400,'invalid_request');
-    await rpc(env,'suppress',data); return json({ok:true});
+    await rpc(env,'block',data); return json({ok:true});
   }
   // RFC 8058 endpoint: opaque token in path; no request URL/access logging is enabled.
   const oneClick=/^\/one-click\/([a-f0-9]{64})$/.exec(url.pathname);
@@ -150,9 +155,11 @@ export default {
   },
   async queue(batch:MessageBatch<{id:string}>,env:Env):Promise<void> {
     for(const message of batch.messages) {
-      if(env.NEWS_EMAIL_ENABLED!=='true') { message.retry({delaySeconds:300}); continue; }
       try {
         if(typeof message.body?.id!=='string'||message.body.id.length>200) { message.ack(); continue; }
+        if(!['true','false'].includes(env.NEWS_EMAIL_ENABLED)) throw new Error('retention_configuration_missing');
+        if(message.body.id==='news-retention') { await runRetention(env); message.ack(); continue; }
+        if(env.NEWS_EMAIL_ENABLED!=='true') { message.retry({delaySeconds:300}); continue; }
         const job=await env.MEDIA_DB.prepare('SELECT * FROM media_news_email_outbox WHERE id=?')
           .bind(message.body.id).first<Job>();
         if(job) await processJob(env,job);

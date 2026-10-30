@@ -14,11 +14,13 @@ import re
 import smtplib
 import sqlite3
 import ssl
-from datetime import datetime
+import time
+from datetime import datetime, timezone, timedelta
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 MAX_REQUEST = 200_000
 FROM = 'news@ukaq.co.uk'
@@ -50,7 +52,7 @@ def text_part(content_type, value):
 
 
 def compose(data):
-    if set(data) - {'kind', 'to', 'text', 'html', 'message_id', 'date', 'manage_url', 'unsubscribe_url'}:
+    if set(data) - {'kind', 'to', 'text', 'html', 'message_id', 'date', 'manage_url', 'unsubscribe_url', 'eligibility'}:
         raise ValueError('unexpected fields')
     kind = data['kind']
     recipient = data['to']
@@ -125,7 +127,50 @@ def compose(data):
     return recipient, wire
 
 
-def smtp_submit(recipient, wire):
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def recipient_eligible(eligibility, message_id):
+    """Fresh private source, no cached recipient eligibility or cross-environment fallback."""
+    if (not isinstance(eligibility, dict) or set(eligibility) - {
+            'subscription_id', 'delivery_mode', 'generation', 'confirmed_at', 'mode_since_at',
+            'expected_preference_updated_at', 'digest_cursor_at', 'attempt_count'}
+            or not isinstance(eligibility.get('subscription_id'), str)
+            or not re.fullmatch(r'[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}', eligibility['subscription_id'])
+            or eligibility.get('delivery_mode') not in SUBJECTS
+            or type(eligibility.get('attempt_count')) is not int or eligibility['attempt_count'] < 1
+            or any(not isinstance(v, str) or len(v) > 100 for k, v in eligibility.items() if k != 'attempt_count')):
+        return False
+    origin = required('SUPABASE_URL')
+    base = urlparse(origin)
+    if (base.scheme != 'https' or not base.hostname or base.username or base.password or base.port
+            or base.path not in ('', '/') or base.query or base.fragment):
+        raise ValueError('invalid subscription source')
+    body = json.dumps({'p_action': 'send_eligible', 'p_data': eligibility}).encode()
+    request = Request(origin.rstrip('/') + '/rest/v1/rpc/uk_aq_news_email_service', data=body,
+                      headers={'apikey': required('SB_SECRET_KEY'), 'Content-Type': 'application/json',
+                               'Content-Profile': 'uk_aq_public', 'Cache-Control': 'no-store'}, method='POST')
+    with build_opener(NoRedirect()).open(request, timeout=15) as response:
+        raw = response.read(4097)
+        if response.status != 200 or len(raw) > 4096:
+            raise ValueError('subscription source unavailable')
+        receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or type(receipt.get('ok')) is not bool:
+        raise ValueError('invalid subscription eligibility')
+    if not receipt['ok']:
+        return False
+    claim = worker_request('/sender/eligibility', {'message_id': message_id,
+                                                'attempt_count': eligibility['attempt_count']})
+    if claim.get('held') is True:
+        raise RuntimeError('retention_fenced')
+    if type(claim.get('ok')) is not bool:
+        raise ValueError('invalid claim receipt')
+    return claim['ok']
+
+
+def smtp_submit(recipient, wire, eligibility, message_id):
     client = None
     uncertain = False
     try:
@@ -134,6 +179,9 @@ def smtp_submit(recipient, wire):
         client.starttls(context=ssl.create_default_context())
         client.ehlo()
         client.login(required('GOOGLE_SMTP_USERNAME'), required('GOOGLE_SMTP_APP_PASSWORD'))
+        # Check after connection/auth delays, before a new SMTP envelope.
+        if not recipient_eligible(eligibility, message_id):
+            return 'cancelled'
         # Explicit envelope stages separate definite pre-DATA failures from ambiguity.
         code, _ = client.mail(FROM)
         if code != 250:
@@ -145,6 +193,9 @@ def smtp_submit(recipient, wire):
         code, _ = client.getreply()
         if code != 354:
             return 'temporary_failure' if 400 <= code < 500 else 'permanent_failure'
+        # The Worker and this optional sender do not share a transaction with Supabase.
+        if not recipient_eligible(eligibility, message_id):
+            return 'cancelled'
         # A disconnect from this point may hide Google's final acceptance response.
         uncertain = True
         wire = re.sub(br'(?m)^\.', b'..', wire)
@@ -157,12 +208,81 @@ def smtp_submit(recipient, wire):
         return 'temporary_failure' if 400 <= code < 500 else 'permanent_failure'
     except smtplib.SMTPResponseException as error:
         return 'temporary_failure' if 400 <= error.smtp_code < 500 else 'permanent_failure'
-    except (OSError, smtplib.SMTPException):
+    except (OSError, smtplib.SMTPException, ValueError, RuntimeError):
         return 'unknown' if uncertain else 'temporary_failure'
     finally:
         if client is not None:
             # Failure on QUIT must never overwrite an already received acceptance.
             client.close()
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def worker_request(path, data):
+    origin = required('NEWS_EMAIL_PUBLIC_API_ORIGIN')
+    base = urlparse(origin)
+    if (base.scheme != 'https' or not base.hostname or base.username or base.password or base.port
+            or base.path not in ('', '/') or base.query or base.fragment):
+        raise ValueError('invalid Worker origin')
+    request = Request(origin.rstrip('/') + path, data=json.dumps(data).encode(), method='POST',
+                      headers={'Authorization': 'Bearer ' + required('NEWS_EMAIL_SENDER_SECRET'),
+                               'Content-Type': 'application/json', 'Cache-Control': 'no-store'})
+    with build_opener(NoRedirect()).open(request, timeout=15) as response:
+        raw = response.read(4097)
+        if response.status != 200 or len(raw) > 4096:
+            raise ValueError('Worker unavailable')
+        result = json.loads(raw)
+    if not isinstance(result, dict):
+        raise ValueError('invalid Worker response')
+    return result
+
+
+class RetentionServer(HTTPServer):
+    next_retention = 0
+
+    def service_actions(self):
+        if time.monotonic() < self.next_retention:
+            return
+        self.next_retention = time.monotonic() + 300
+        db = self.receipts
+        checked = utc_now()
+        counts = {'eligible': 0, 'deleted': 0, 'held': 0}
+        try:
+            # Legacy receipt end times were not recorded. Start one conservative thirty-day window.
+            db.execute('UPDATE receipts SET recorded_at=? WHERE message_id IN '
+                       '(SELECT message_id FROM receipts WHERE recorded_at IS NULL LIMIT 5)', (checked,))
+            cursor = db.execute('SELECT after_at,after_id FROM retention_status WHERE singleton=1').fetchone()
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=720)).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+            rows = db.execute('SELECT message_id,recorded_at FROM receipts WHERE recorded_at<=? '
+                              'AND (recorded_at,message_id)>(?,?) ORDER BY recorded_at,message_id LIMIT 5',
+                              (cutoff, cursor[0] or '', cursor[1] or '')).fetchall()
+            counts['eligible'] = len(rows)
+            if rows:
+                result = worker_request('/sender/retention', {'message_ids': [row[0] for row in rows]})
+                items = result.get('items')
+                if (not isinstance(items, list) or len(items) != len(rows)
+                        or any(not isinstance(item, dict) or type(item.get('retire')) is not bool for item in items)
+                        or [item.get('message_id') for item in items] != [row[0] for row in rows]):
+                    raise ValueError('invalid retention receipt')
+                for row, item in zip(rows, items):
+                    if item['retire']:
+                        counts['deleted'] += db.execute('DELETE FROM receipts WHERE message_id=? AND recorded_at=?', row).rowcount
+                    else:
+                        counts['held'] += 1
+            after_at, after_id = (rows[-1][1], rows[-1][0]) if len(rows) == 5 else ('', '')
+            db.execute('UPDATE retention_status SET after_at=?,after_id=?,last_at=?,last_success_at=?,state=?, '
+                       'eligible=?,deleted=?,held=? WHERE singleton=1',
+                       (after_at, after_id, checked, checked, 'held' if counts['held'] else 'ok',
+                        counts['eligible'], counts['deleted'], counts['held']))
+            db.commit()
+            print(json.dumps({'event': 'news_pro_retention', **counts}), flush=True)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            db.rollback()
+            db.execute("UPDATE retention_status SET last_at=?,state='error' WHERE singleton=1", (checked,))
+            db.commit()
+            print(json.dumps({'event': 'news_pro_retention_failed', 'code': 'authority_unavailable'}), flush=True)
 
 
 class Sender(BaseHTTPRequestHandler):
@@ -182,7 +302,7 @@ class Sender(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if self.path not in ('/send', '/receipt'):
+        if self.path not in ('/send', '/receipt', '/retention/status'):
             self.respond(404, {'error': 'not_found'})
             return
         actual = self.headers.get('Authorization', '')
@@ -199,6 +319,10 @@ class Sender(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise ValueError('incomplete body')
             data = json.loads(raw)
+            if self.path == '/retention/status':
+                row = self.server.receipts.execute('SELECT last_at,last_success_at,state,eligible,deleted,held FROM retention_status WHERE singleton=1').fetchone()
+                self.respond(200, dict(zip(('last_at','last_success_at','state','eligible','deleted','held'), row)))
+                return
             if self.path == '/receipt':
                 mid = data.get('message_id', '')
                 if not re.fullmatch(r'<news\.[a-f0-9]{64}@ukaq\.co\.uk>', mid):
@@ -207,32 +331,54 @@ class Sender(BaseHTTPRequestHandler):
                 self.respond(200, {'outcome': receipt[0] if receipt else 'not_found'})
                 return
             recipient, wire = compose(data)
+            if not isinstance(data.get('eligibility'), dict):
+                raise ValueError('invalid eligibility')
+            attempt = data['eligibility'].get('attempt_count')
+            if type(attempt) is not int or attempt < 1:
+                raise ValueError('invalid attempt')
         except (ValueError, KeyError, TypeError, OSError):
             self.respond(400, {'error': 'invalid_news_message'})
             return
         mid = data['message_id']
         fingerprint = hashlib.sha256(raw).hexdigest()
         db = self.server.receipts
-        receipt = db.execute('SELECT fingerprint,outcome FROM receipts WHERE message_id=?', (mid,)).fetchone()
+        receipt = db.execute('SELECT fingerprint,outcome,attempt_count FROM receipts WHERE message_id=?', (mid,)).fetchone()
         if receipt:
-            if receipt[0] != fingerprint and receipt[1] != 'temporary_failure':
+            same_content = receipt[0] == fingerprint
+            if not same_content and receipt[2] is not None:
+                previous = {**data, 'eligibility': {**data['eligibility'], 'attempt_count': receipt[2]}}
+                previous_raw = json.dumps(previous, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+                same_content = hashlib.sha256(previous_raw).hexdigest() == receipt[0]
+            if not same_content and receipt[1] != 'temporary_failure':
                 self.respond(409, {'error': 'message_identity_conflict'})
                 return
-            if receipt[1] != 'temporary_failure':
+            retry_authorised = receipt[1] == 'permanent_failure' and receipt[2] is not None and attempt > receipt[2]
+            if receipt[1] != 'temporary_failure' and not retry_authorised:
                 self.respond(200, {'outcome': receipt[1]})
                 return
-        db.execute("INSERT INTO receipts VALUES (?,?,'unknown') ON CONFLICT(message_id) DO UPDATE SET outcome='unknown',fingerprint=excluded.fingerprint",
-                   (mid, fingerprint))
+        # Reject delayed/stale attempts before touching a newer receipt. A failed
+        # authority read cannot poison its journal with unknown/cancelled state.
+        try:
+            if not recipient_eligible(data['eligibility'], mid):
+                self.respond(200, {'outcome': 'cancelled'})
+                return
+        except (OSError, ValueError, RuntimeError):
+            self.respond(200, {'outcome': 'temporary_failure'})
+            return
+        db.execute("INSERT INTO receipts(message_id,fingerprint,outcome,recorded_at,attempt_count) VALUES (?,?,'unknown',?,?) "
+                   "ON CONFLICT(message_id) DO UPDATE SET outcome='unknown',fingerprint=excluded.fingerprint,"
+                   "recorded_at=excluded.recorded_at,attempt_count=excluded.attempt_count",
+                   (mid, fingerprint, utc_now(), attempt))
         db.commit()  # Durable before SMTP. Any crash requires reconciliation.
-        outcome = smtp_submit(recipient, wire)
-        db.execute('UPDATE receipts SET outcome=? WHERE message_id=?', (outcome, mid))
+        outcome = smtp_submit(recipient, wire, data.get('eligibility'), mid)
+        db.execute('UPDATE receipts SET outcome=?,recorded_at=? WHERE message_id=?', (outcome, utc_now(), mid))
         db.commit()
         self.respond(200, {'outcome': outcome})
 
 
 def main():
     for name in ('GOOGLE_SMTP_USERNAME', 'GOOGLE_SMTP_APP_PASSWORD', 'NEWS_EMAIL_SENDER_SECRET',
-                 'NEWS_EMAIL_SITE_ORIGIN', 'NEWS_EMAIL_PUBLIC_API_ORIGIN'):
+                 'NEWS_EMAIL_SITE_ORIGIN', 'NEWS_EMAIL_PUBLIC_API_ORIGIN', 'SUPABASE_URL', 'SB_SECRET_KEY'):
         required(name)
     if len(required('NEWS_EMAIL_SENDER_SECRET')) < 32:
         raise RuntimeError('NEWS_EMAIL_SENDER_SECRET must contain at least 32 characters')
@@ -244,7 +390,17 @@ def main():
     db.execute('PRAGMA synchronous=FULL')
     db.execute('CREATE TABLE IF NOT EXISTS receipts (message_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, outcome TEXT NOT NULL)')
     db.commit()
-    server = HTTPServer(('127.0.0.1', int(os.environ.get('NEWS_EMAIL_PORT', '8025'))), Sender)
+    if 'recorded_at' not in {row[1] for row in db.execute('PRAGMA table_info(receipts)')}:
+        db.execute('ALTER TABLE receipts ADD COLUMN recorded_at TEXT')
+    if 'attempt_count' not in {row[1] for row in db.execute('PRAGMA table_info(receipts)')}:
+        db.execute('ALTER TABLE receipts ADD COLUMN attempt_count INTEGER')
+    db.execute('CREATE INDEX IF NOT EXISTS receipt_retention ON receipts(recorded_at,message_id)')
+    db.execute("CREATE TABLE IF NOT EXISTS retention_status (singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+               "after_at TEXT,after_id TEXT,last_at TEXT,last_success_at TEXT,state TEXT NOT NULL DEFAULT 'not_run', "
+               "eligible INTEGER NOT NULL DEFAULT 0,deleted INTEGER NOT NULL DEFAULT 0,held INTEGER NOT NULL DEFAULT 0)")
+    db.execute('INSERT OR IGNORE INTO retention_status(singleton) VALUES(1)')
+    db.commit()
+    server = RetentionServer(('127.0.0.1', int(os.environ.get('NEWS_EMAIL_PORT', '8025'))), Sender)
     server.receipts = db
     server.serve_forever()
 

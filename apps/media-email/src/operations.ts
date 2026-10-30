@@ -10,6 +10,46 @@ function fields(data:Record<string,unknown>,allowed:string[]):void {
   if(Object.keys(data).some(key=>!allowed.includes(key))) throw new HttpError(400,'invalid_request');
 }
 
+async function confirmationGeneration(env:Env,d:Delivery):Promise<Work> {
+  const job=await env.MEDIA_DB.prepare(`SELECT work_type,payload FROM media_news_email_outbox WHERE id=?`)
+    .bind(d.id).first<{work_type:string;payload:string}>();
+  let work:Work={};
+  try { work=JSON.parse(job?.payload??'{}') as Work; } catch { /* rejected below */ }
+  const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+  if(job?.work_type!=='confirmation_email'||typeof work.generation!=='string'||!uuid.test(work.generation)||
+    typeof work.subscription_id!=='string'||!uuid.test(work.subscription_id)||work.subscription_id!==d.subscription_id)
+    throw new HttpError(409,'confirmation_generation_required');
+  return work;
+}
+
+async function reconcileCancelledPro(env:Env,d:Delivery):Promise<Response> {
+  // Only the authenticated Pro's durable terminal receipt can select this path.
+  // Do not broaden operator-entered SMTP evidence or the existing intent constraint.
+  if(d.reconciliation_target!==null) throw new HttpError(409,'confirmation_outcome_conflict');
+  if(d.delivery_mode==='confirmation') {
+    const work=await confirmationGeneration(env,d);
+    const committed=await recordConfirmationOutcome(env,d.id,work.generation!,'cancelled');
+    if(!reconciliationOutcomeCommitted(committed,'cancelled')) throw new HttpError(409,'confirmation_outcome_conflict');
+  }
+  const stamp=now();
+  const updated=await env.MEDIA_DB.batch([
+    env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries SET state='cancelled',retry_hold=0,
+      last_error='operator_reconciled',reconciled_at=?,reconciliation_evidence='pro_receipt',failed_at=?
+      WHERE id=? AND state='unknown' AND attempt_count=? AND attempt_transport='pro_app_password'
+      AND reconciliation_target IS NULL`).bind(stamp,stamp,d.id,d.attempt_count),
+    env.MEDIA_DB.prepare(`UPDATE media_news_email_outbox SET state='completed',last_error=NULL,
+      attempt_count=attempt_count+1 WHERE id=? AND EXISTS (SELECT 1 FROM media_news_email_deliveries
+      WHERE id=? AND state='cancelled' AND attempt_count=? AND reconciled_at=?)`)
+      .bind(d.id,d.id,d.attempt_count,stamp),
+    env.MEDIA_DB.prepare(`UPDATE media_news_digest_runs SET state='cancelled',completed_at=?,last_error=NULL
+      WHERE id=? AND EXISTS (SELECT 1 FROM media_news_email_deliveries WHERE id=? AND state='cancelled'
+      AND attempt_count=? AND reconciled_at=?)`).bind(stamp,d.id,d.id,d.attempt_count,stamp),
+  ]);
+  if(!updated[0]!.meta.changes) throw new HttpError(409,'delivery_identity_changed');
+  // Retire this work; no Queue send, SMTP retry or cursor advancement.
+  return json({ok:true,outcome:'cancelled',transport:'pro_app_password',retry_held:false});
+}
+
 // Caller has already authenticated with the independent operator bearer secret.
 // No recipients, arbitrary provider text or credentials are accepted/returned here.
 export async function deliveryOperation(env:Env,path:string,data:Record<string,unknown>):Promise<Response> {
@@ -38,20 +78,14 @@ export async function deliveryOperation(env:Env,path:string,data:Record<string,u
       fields(data,['delivery_id','message_id','attempt_count']);
       try { outcome=await proReceipt(env,d.message_id); }
       catch { throw new HttpError(409,'fallback_not_configured'); }
+      if(outcome==='cancelled') return reconcileCancelledPro(env,d);
       if(!resolutions.has(outcome)) return json({ok:false,outcome:'unknown'},409);
       source='pro_receipt';
     } else throw new HttpError(409,'attempt_transport_required');
     if(d.delivery_mode==='confirmation') {
       if(!reconciliationTargetAllows(d.reconciliation_target,outcome))
         throw new HttpError(409,'confirmation_outcome_conflict');
-      const job=await env.MEDIA_DB.prepare(`SELECT work_type,payload FROM media_news_email_outbox WHERE id=?`)
-        .bind(d.id).first<{work_type:string;payload:string}>();
-      let work:Work={};
-      try { work=JSON.parse(job?.payload??'{}') as Work; } catch { /* rejected below */ }
-      const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-      if(job?.work_type!=='confirmation_email'||typeof work.generation!=='string'||!uuid.test(work.generation)||
-        typeof work.subscription_id!=='string'||!uuid.test(work.subscription_id)||work.subscription_id!==d.subscription_id)
-        throw new HttpError(409,'confirmation_generation_required');
+      const work=await confirmationGeneration(env,d);
       // Claim the operator's target durably before touching Supabase. Identical
       // retries resume; a competing outcome cannot pass this compare-and-set.
       const intent=await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries
@@ -62,7 +96,7 @@ export async function deliveryOperation(env:Env,path:string,data:Record<string,u
         throw new HttpError(409,'confirmation_outcome_conflict');
       // Supabase remains first for the definite state. If final D1 mutation is
       // interrupted, the durable intent permits only this outcome to resume.
-      const committed=await recordConfirmationOutcome(env,d.id,work.generation,outcome);
+      const committed=await recordConfirmationOutcome(env,d.id,work.generation!,outcome);
       if(!reconciliationOutcomeCommitted(committed,outcome))
         throw new HttpError(409,'confirmation_outcome_conflict');
     }

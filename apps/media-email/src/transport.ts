@@ -1,9 +1,9 @@
-import { boundedBody, type Env, type Transport } from './common';
+import { RecipientIneligible, boundedBody, type Env, type Transport } from './common';
 import { fallbackRequest, serialize, type Submission } from './message';
 import { result, smtpSubmit, type Outcome, type Result } from './smtp';
 import { classifyDefiniteProRejection } from './transport-policy';
 
-const outcomes=new Set(['accepted','temporary_failure','permanent_failure','unknown']);
+const outcomes=new Set(['accepted','temporary_failure','permanent_failure','unknown','cancelled']);
 export function fallbackEndpoint(env:Env,path:'/send'|'/receipt'):URL {
   if(!env.NEWS_EMAIL_SENDER_URL || !env.NEWS_EMAIL_SENDER_SECRET || env.NEWS_EMAIL_SENDER_SECRET.length<32)
     throw new Error('fallback_not_configured');
@@ -29,7 +29,7 @@ export async function submit(env:Env,transport:Transport,message:Submission,befo
   let wire:string;
   try { wire=serialize(env,message); }
   catch { return result('permanent_failure','invalid_news_message'); }
-  if(transport==='cloudflare_xoauth2') return smtpSubmit(env,message.to,wire,beforeSubmit);
+  if(transport==='cloudflare_xoauth2') return smtpSubmit(env,message.to,wire,beforeSubmit,message.eligibility);
   if(transport!=='pro_app_password') return result('permanent_failure','invalid_transport');
   let url:URL;
   try { url=fallbackEndpoint(env,'/send'); }
@@ -37,7 +37,7 @@ export async function submit(env:Env,transport:Transport,message:Submission,befo
   // serialize already bounded the complete MIME and this exact JSON envelope.
   const body=fallbackRequest(message);
   try { await beforeSubmit(); }
-  catch { return result('temporary_failure','submission_claim_unavailable'); }
+  catch(error) { return error instanceof RecipientIneligible?result('cancelled'):result('temporary_failure','submission_claim_unavailable'); }
   // The HTTP request may reach Pro SMTP even when no HTTP receipt comes back.
   // Unclassified HTTP failures, malformed replies and transport errors remain unknown.
   try {

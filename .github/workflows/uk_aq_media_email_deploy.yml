@@ -1,17 +1,40 @@
-name: Deploy UK AQ News email (manual only)
+name: Deploy UK AQ News email
+
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - apps/media-email/**
+      # The renderer validates all four Worker configurations.
+      - apps/media-public/wrangler.jsonc
+      - apps/media-admin/wrangler.jsonc
+      - apps/media-discovery/wrangler.jsonc
+      - packages/core/**
+      - migrations/**
+      - config/**
+      - images/*-email*.png
+      - images/news-email-branding.json
+      - scripts/validate-news-email-deployment.mjs
+      - scripts/render-wrangler-config.mjs
+      - scripts/verify-media-d1.mjs
+      - scripts/worker-tools.mjs
+      - scripts/news-email-branding.mjs
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .github/workflows/uk_aq_media_email_deploy.yml
   workflow_dispatch:
-    inputs:
-      allow_enabled_email_delivery:
-        description: "Explicitly permit deployment with News email sending enabled"
-        type: boolean
-        required: false
-        default: false
+
 permissions:
   contents: read
+
+# Shared with core Media deployment: serialize D1 migrations and Queue creation.
 concurrency:
-  group: uk-aq-media-email-deploy
+  group: uk-aq-media-deploy
   cancel-in-progress: false
+  queue: max
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -26,19 +49,18 @@ jobs:
       NEWS_EMAIL_TURNSTILE_HOSTNAMES: ${{ vars.NEWS_EMAIL_TURNSTILE_HOSTNAMES }}
       NEWS_EMAIL_PUBLIC_API_ORIGIN: ${{ vars.NEWS_EMAIL_PUBLIC_API_ORIGIN }}
       UK_AQ_MEDIA_PUBLIC_URL: ${{ vars.UK_AQ_MEDIA_PUBLIC_URL }}
-      ALLOW_ENABLED_EMAIL_DELIVERY: ${{ inputs.allow_enabled_email_delivery || false }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22
           cache: npm
-      - name: Validate email deployment settings and activation intent
+      - name: Validate email deployment settings
         run: node scripts/validate-news-email-deployment.mjs
       - run: npm ci
       - run: npm run typecheck && npm run build
       # Provision the shared Supabase subscription schema and Google SMTP OAuth
-      # before running this manual deployment. Pro/Tunnel remains optional.
+      # before the first deployment. Pro/Tunnel remains optional.
       - name: Render account-specific Wrangler and email settings
         run: node scripts/render-wrangler-config.mjs email
 
@@ -51,7 +73,7 @@ jobs:
             echo "Queue uk-aq-media-email already exists."
           else
             if ! npx wrangler queues create uk-aq-media-email; then
-              # The ordinary Media workflow may have created it after our first check.
+              # Recheck Queue existence if creation reports a conflict.
               npx wrangler queues info uk-aq-media-email >/dev/null
             fi
           fi
