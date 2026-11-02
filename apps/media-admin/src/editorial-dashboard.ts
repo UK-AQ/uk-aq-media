@@ -1,3 +1,4 @@
+import { threadsArticleState } from './threads';
 import {
   ArticleStatus, AuthorRuleSchema, fetchRemotePreviewImage, HttpError, ImagePolicy,
   PublicationPolicy, domainBlockedSql, domainBoundarySql, normalisedHostnameSql,
@@ -525,7 +526,7 @@ function conservativeManualSource(domain: string, name: string, sourceKey: strin
     created_at: now, updated_at: now };
 }
 
-async function articleDetail(db: D1Database, id: number): Promise<Response> {
+async function articleDetail(db: D1Database, id: number, env?: MediaAdminEnv): Promise<Response> {
   const article = await db.prepare(`SELECT a.*, s.name AS source_name,
       s.canonical_domain, s.publication_policy AS source_publication_policy,
       s.content_fetch_policy AS source_content_fetch_policy,
@@ -658,6 +659,8 @@ async function articleDetail(db: D1Database, id: number): Promise<Response> {
         author: possibleDuplicate.candidate_author,
       },
     } : null,
+    ...(env ? { threads: await threadsArticleState(env, id, article.status as Status, {
+      title: String(article.title), publisher: String(article.publisher), canonical_url: String(article.canonical_url) }) } : {}),
     events: events.results,
     discovery_evidence: evidence.results,
     bluesky: { post_count: blueskyCount?.post_count ?? 0,
@@ -889,6 +892,10 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
         AS facebook_publication_count,
       (SELECT status FROM media_facebook_publications fp WHERE fp.article_id = a.id
         ORDER BY fp.id DESC LIMIT 1) AS facebook_latest_status,
+      (SELECT count(*) FROM media_threads_publications tp WHERE tp.article_id = a.id AND tp.status = 'posted') AS threads_post_count,
+      (SELECT count(*) FROM media_threads_publications tp WHERE tp.article_id = a.id) AS threads_publication_count,
+      (SELECT status FROM media_threads_publications tp WHERE tp.article_id = a.id ORDER BY tp.id DESC LIMIT 1) AS threads_latest_status,
+      (SELECT last_error_code FROM media_threads_publications tp WHERE tp.article_id = a.id ORDER BY tp.id DESC LIMIT 1) AS threads_latest_error_code,
       ${spec.expression} AS cursor_value
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     LEFT JOIN media_article_possible_duplicates possible_duplicate
@@ -1768,7 +1775,7 @@ export async function handleEditorialDashboard(request: Request, env: MediaAdmin
   const articleMatch = /^\/admin\/articles\/([1-9]\d*)$/.exec(url.pathname);
   if (articleMatch) {
     if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
-    return articleDetail(env.MEDIA_DB, Number(articleMatch[1]));
+    return articleDetail(env.MEDIA_DB, Number(articleMatch[1]), env);
   }
   const articleAuthorMatch = /^\/admin\/articles\/([1-9]\d*)\/author$/.exec(url.pathname);
   if (articleAuthorMatch) {

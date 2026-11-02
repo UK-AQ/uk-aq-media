@@ -40,11 +40,11 @@ export type DirectPublicationHistory = {
   postCount: number;
 };
 
-export function directPublishState(platform: 'bluesky' | 'facebook', status: Status,
+export function directPublishState(platform: 'bluesky' | 'facebook' | 'threads', status: Status,
   history: DirectPublicationHistory, platformError: string | null): DirectPublishState {
   let unavailable: string | null = null;
   if (status !== 'approved') unavailable = 'article_not_approved';
-  else if (platform === 'facebook' && history.hasUnknownRemoteState) {
+  else if (platform !== 'bluesky' && history.hasUnknownRemoteState) {
     unavailable = 'unknown_remote_state';
   } else if (history.hasInProgress) {
     unavailable = 'publication_in_progress';

@@ -3,7 +3,7 @@ import { wakeNewsEmailOutbox, ArticleStatus, bearerMatches, boundedLimit, HttpEr
   BLUESKY_TEMPLATE_LITERAL_GRAPHEMES, validateBlueskyTemplate,
   BLUESKY_IN_PROGRESS_SQL, reconcileBlueskyPublications,
   FACEBOOK_PLACEHOLDERS, FACEBOOK_TEMPLATE_MAX_LENGTH,
-  validateFacebookTemplate,
+  validateFacebookTemplate, requireThreadsEligibility, threadsEligibility,
   loadSource, type Status } from '@uk-aq-media/core';
 import {
   discoverGuardianPreviewForArticle, GUARDIAN_ROUTES,
@@ -19,6 +19,7 @@ import {
 } from './guardian-image-bulk';
 import { handleEditorialDashboard } from './editorial-dashboard';
 import { readNewsEmailDelivery } from './news-email-delivery';
+import { handleThreadsAdmin, wakeThreads } from './threads';
 import { readMediaHealth } from './health';
 import { handleResearchTopicsAdmin } from './research-topics';
 import { directPublishState, facebookEligibility, requireFacebookEligibility } from './direct-publish-eligibility';
@@ -36,6 +37,7 @@ type AdminStatusRequestRow = {
   action: Action;
   post_to_bluesky: number;
   post_to_facebook: number;
+  post_to_threads: number;
 };
 
 type AdminStatusEventRow = {
@@ -82,16 +84,18 @@ const FacebookSettingsBody = z.object({
 const StatusMutationBody = z.object({
   post_to_bluesky: z.boolean().optional(),
   post_to_facebook: z.boolean().optional(),
+  post_to_threads: z.boolean().optional(),
 }).strict();
 const BulkApproveBody = z.object({
   article_ids: z.array(z.number().int().positive()).min(1).max(50),
   post_to_bluesky: z.boolean().optional(),
   post_to_facebook: z.boolean().optional(),
+  post_to_threads: z.boolean().optional(),
 }).strict();
 const DirectPublishBody = StatusMutationBody.refine(value =>
-  value.post_to_bluesky === true || value.post_to_facebook === true);
+  value.post_to_bluesky === true || value.post_to_facebook === true || value.post_to_threads === true);
 const BulkDirectPublishBody = BulkApproveBody.refine(value =>
-  value.post_to_bluesky === true || value.post_to_facebook === true);
+  value.post_to_bluesky === true || value.post_to_facebook === true || value.post_to_threads === true);
 const MAX_ADMIN_BODY_BYTES = 4096;
 
 async function afterImageMutation(response: Response, env: MediaAdminEnv): Promise<Response> {
@@ -732,20 +736,33 @@ function manualPublicationReason(action: Action,
   return null;
 }
 
+function manualThreadsGuard(env: MediaAdminEnv, ids: number[]): { sql: string; bindings: unknown[] } {
+  if (!ids.length) return { sql: '', bindings: [] };
+  return { sql: `AND EXISTS (SELECT 1 FROM media_threads_settings WHERE id = 1
+    AND manual_publishing_enabled = 1 AND automatic_publishing_enabled = 0
+    AND last_identity_verified_at IS NOT NULL AND last_identity_error_code IS NULL
+    AND last_identity_user_id = ? AND last_identity_username = ?)
+    AND NOT EXISTS (SELECT 1 FROM media_threads_publications WHERE article_id IN (${ids.map(() => '?').join(',')})
+      AND status IN ('queued', 'posting', 'unknown_remote_state'))`,
+    bindings: [env.UK_AQ_MEDIA_THREADS_USER_ID, env.UK_AQ_MEDIA_THREADS_USERNAME, ...ids] };
+}
+
 async function statusMutationReceipt(db: D1Database, key: string, id: number,
-  action: Action, requestedBluesky: boolean, requestedFacebook: boolean): Promise<{
+  action: Action, requestedBluesky: boolean, requestedFacebook: boolean, requestedThreads: boolean): Promise<{
     event: AdminStatusEventRow;
     blueskyPublication: Pick<AdminBlueskyPublicationRow, 'id' | 'status'> | null;
     facebookPublication: Pick<AdminFacebookPublicationRow, 'id' | 'status'> | null;
+    threadsPublication: Pick<AdminFacebookPublicationRow, 'id' | 'status'> | null;
   } | null> {
   const requestIdentity = await db.prepare(`SELECT article_id, action, post_to_bluesky,
-    post_to_facebook
+    post_to_facebook, post_to_threads
     FROM media_admin_status_requests WHERE request_key = ?`).bind(key)
     .first<AdminStatusRequestRow>();
   if (requestIdentity && (requestIdentity.article_id !== id ||
       requestIdentity.action !== action ||
       Boolean(requestIdentity.post_to_bluesky) !== requestedBluesky ||
-      Boolean(requestIdentity.post_to_facebook) !== requestedFacebook)) {
+      Boolean(requestIdentity.post_to_facebook) !== requestedFacebook ||
+      Boolean(requestIdentity.post_to_threads) !== requestedThreads)) {
     throw new HttpError(409, 'idempotency_key_conflict');
   }
 
@@ -764,7 +781,10 @@ async function statusMutationReceipt(db: D1Database, key: string, id: number,
   const facebookPublication = await db.prepare(`SELECT id, article_id, publication_reason, status
     FROM media_facebook_publications WHERE publication_key = ?`).bind(`admin-request:${key}`)
     .first<AdminFacebookPublicationRow>();
-  if (!requestIdentity && (requestedBluesky !== Boolean(blueskyPublication) || requestedFacebook)) {
+  const threadsPublication = await db.prepare(`SELECT id, article_id, publication_reason, status
+    FROM media_threads_publications WHERE publication_key = ?`).bind(`admin-request:${key}`)
+    .first<AdminFacebookPublicationRow>();
+  if (!requestIdentity && (requestedBluesky !== Boolean(blueskyPublication) || requestedFacebook || requestedThreads)) {
     // Events created before the durable request-identity table remain replayable.
     throw new HttpError(409, 'idempotency_key_conflict');
   }
@@ -772,14 +792,17 @@ async function statusMutationReceipt(db: D1Database, key: string, id: number,
   if (requestedBluesky !== Boolean(blueskyPublication) || (blueskyPublication &&
       (blueskyPublication.article_id !== id || blueskyPublication.publication_reason !== expectedReason)) ||
       requestedFacebook !== Boolean(facebookPublication) || (facebookPublication &&
-      (facebookPublication.article_id !== id || facebookPublication.publication_reason !== expectedReason))) {
+      (facebookPublication.article_id !== id || facebookPublication.publication_reason !== expectedReason)) ||
+      requestedThreads !== Boolean(threadsPublication) || (threadsPublication &&
+      (threadsPublication.article_id !== id || threadsPublication.publication_reason !== expectedReason))) {
     throw new HttpError(409, 'publication_state_conflict');
   }
   return { event,
     blueskyPublication: blueskyPublication
       ? { id: blueskyPublication.id, status: blueskyPublication.status } : null,
     facebookPublication: facebookPublication
-      ? { id: facebookPublication.id, status: facebookPublication.status } : null };
+      ? { id: facebookPublication.id, status: facebookPublication.status } : null,
+    threadsPublication: threadsPublication ? { id: threadsPublication.id, status: threadsPublication.status } : null };
 }
 
 async function statusMutationResponse(env: MediaAdminEnv, id: number, receipt: NonNullable<
@@ -793,12 +816,13 @@ async function statusMutationResponse(env: MediaAdminEnv, id: number, receipt: N
     try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
     catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed', article_id: id })); }
   }
+  if (receipt.threadsPublication) await wakeThreads(env);
   return json({ article: { id, status: receipt.event.to_status, revision: receipt.event.revision },
     bluesky_publication: receipt.blueskyPublication,
-    facebook_publication: receipt.facebookPublication, replayed });
+    facebook_publication: receipt.facebookPublication, threads_publication: receipt.threadsPublication, replayed });
 }
 
-type BulkRequestRow = { article_ids_json: string; post_to_bluesky: number; post_to_facebook: number };
+type BulkRequestRow = { article_ids_json: string; post_to_bluesky: number; post_to_facebook: number; post_to_threads: number };
 type BulkTargetRow = { id: number; status: Status; og_image_url: string | null;
   image_policy: string; source_image_policy: string; title: string; publisher: string;
   canonical_url: string; bluesky_has_in_progress: number };
@@ -815,7 +839,7 @@ function blueskyImageEligible(row: Pick<BulkTargetRow, 'og_image_url' | 'image_p
       row.source_image_policy === 'local_copy_permitted'));
 }
 type DirectRequestRow = { request_kind: 'single' | 'bulk'; article_ids_json: string;
-  post_to_bluesky: number; post_to_facebook: number };
+  post_to_bluesky: number; post_to_facebook: number; post_to_threads: number };
 type DirectPublicationRow = { id: number; article_id: number; status: string;
   publication_reason: 'manual_post' | 'manual_repost' };
 async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Response> {
@@ -827,13 +851,15 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
   if (new Set(ids).size !== ids.length) throw new HttpError(400, 'duplicate_article_id');
   const requestedBluesky = parsed.data.post_to_bluesky === true;
   const requestedFacebook = parsed.data.post_to_facebook === true;
+  const requestedThreads = parsed.data.post_to_threads === true;
   const idsJson = JSON.stringify(ids);
   const existing = await env.MEDIA_DB.prepare(`SELECT article_ids_json, post_to_bluesky,
-    post_to_facebook
+    post_to_facebook, post_to_threads
     FROM media_admin_bulk_status_requests WHERE request_key = ?`).bind(key).first<BulkRequestRow>();
   if (existing && (existing.article_ids_json !== idsJson ||
       Boolean(existing.post_to_bluesky) !== requestedBluesky ||
-      Boolean(existing.post_to_facebook) !== requestedFacebook)) {
+      Boolean(existing.post_to_facebook) !== requestedFacebook ||
+      Boolean(existing.post_to_threads) !== requestedThreads)) {
     throw new HttpError(409, 'idempotency_key_conflict');
   }
 
@@ -860,9 +886,20 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
       }
       return [];
     });
-    if (failures.length) return json({ error: 'bulk_approval_ineligible', failures }, 409);
-    if (requestedFacebook) await requireFacebookEligibility(env.MEDIA_DB, results);
-
+    const racedResponse = async (): Promise<Response | null> => {
+      const committed = await env.MEDIA_DB.prepare('SELECT request_key FROM media_admin_bulk_status_requests WHERE request_key = ?').bind(key).first();
+      return committed ? bulkApproveResponse(env, key, ids, idsJson, requestedBluesky, requestedFacebook, requestedThreads, true) : null;
+    };
+    if (failures.length) return await racedResponse() ?? json({ error: 'bulk_approval_ineligible', failures }, 409);
+    try {
+      if (requestedFacebook) await requireFacebookEligibility(env.MEDIA_DB, results);
+      if (requestedThreads) await requireThreadsEligibility(env.MEDIA_DB, env, results);
+    } catch (error) {
+      const raced = await racedResponse();
+      if (raced) return raced;
+      throw error;
+    }
+    const threadsGuard = manualThreadsGuard(env, requestedThreads ? ids : []);
     const now = new Date().toISOString();
     const eligibleImages = requestedBluesky
       ? `AND a.og_image_url IS NOT NULL AND (
@@ -871,14 +908,14 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
             AND s.image_policy = 'local_copy_permitted'))` : '';
     const statements: D1PreparedStatement[] = [env.MEDIA_DB.prepare(`
       INSERT INTO media_admin_bulk_status_requests
-        (request_key, article_ids_json, post_to_bluesky, post_to_facebook, created_at)
-      SELECT ?, ?, ?, ?, ?
+        (request_key, article_ids_json, post_to_bluesky, post_to_facebook, post_to_threads, created_at)
+      SELECT ?, ?, ?, ?, ?, ?
       WHERE (SELECT count(*) FROM media_articles a
         JOIN media_sources s ON s.source_key = a.source_key
         WHERE a.id IN (${placeholders}) AND a.status IN ('pending', 'rejected', 'hidden')
-        ${eligibleImages}) = ?
+        ${eligibleImages}) = ? ${threadsGuard.sql}
       ON CONFLICT(request_key) DO NOTHING`)
-      .bind(key, idsJson, Number(requestedBluesky), Number(requestedFacebook), now, ...ids, ids.length),
+      .bind(key, idsJson, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads), now, ...ids, ids.length, ...threadsGuard.bindings),
     env.MEDIA_DB.prepare(`UPDATE media_articles SET status = 'approved',
       mutation_key = 'admin-bulk:' || ? || ':' || id, revision = revision + 1,
       updated_at = ?, approval_method = 'manual', approval_author_rule_key = NULL,
@@ -886,9 +923,9 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
       WHERE id IN (${placeholders}) AND status IN ('pending', 'rejected', 'hidden')
         AND EXISTS (SELECT 1 FROM media_admin_bulk_status_requests
           WHERE request_key = ? AND article_ids_json = ? AND post_to_bluesky = ?
-            AND post_to_facebook = ?)`)
+            AND post_to_facebook = ? AND post_to_threads = ?)`)
       .bind(key, now, now, ...ids, key, idsJson, Number(requestedBluesky),
-        Number(requestedFacebook))];
+        Number(requestedFacebook), Number(requestedThreads))];
     if (requestedBluesky) {
       statements.push(env.MEDIA_DB.prepare(`INSERT INTO media_bluesky_publications
         (article_id, approval_event_id, publication_key, publication_reason, status,
@@ -899,8 +936,10 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
           'queued', ?, ? FROM media_article_events e
         WHERE e.event_key = 'admin-bulk:' || ? || ':' || e.article_id
           AND e.article_id IN (${placeholders}) AND e.to_status = 'approved'
+          AND EXISTS (SELECT 1 FROM media_admin_bulk_status_requests r WHERE r.request_key = ?
+            AND r.article_ids_json = ? AND r.post_to_bluesky = ? AND r.post_to_facebook = ? AND r.post_to_threads = ?)
         ON CONFLICT(publication_key) DO NOTHING`)
-        .bind(key, now, now, key, ...ids));
+        .bind(key, now, now, key, ...ids, key, idsJson, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads)));
     }
     if (requestedFacebook) {
       statements.push(env.MEDIA_DB.prepare(`INSERT INTO media_facebook_publications
@@ -912,18 +951,40 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
           'queued', ?, ? FROM media_article_events e
         WHERE e.event_key = 'admin-bulk:' || ? || ':' || e.article_id
           AND e.article_id IN (${placeholders}) AND e.to_status = 'approved'
-        ON CONFLICT(publication_key) DO NOTHING`).bind(key, now, now, key, ...ids));
+          AND EXISTS (SELECT 1 FROM media_admin_bulk_status_requests r WHERE r.request_key = ?
+            AND r.article_ids_json = ? AND r.post_to_bluesky = ? AND r.post_to_facebook = ? AND r.post_to_threads = ?)
+        ON CONFLICT(publication_key) DO NOTHING`).bind(key, now, now, key, ...ids, key, idsJson, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads)));
+    }
+    if (requestedThreads) {
+      statements.push(env.MEDIA_DB.prepare(`INSERT INTO media_threads_publications
+        (article_id, approval_event_id, publication_key, publication_reason, status,
+         created_at, updated_at, threads_user_id)
+        SELECT e.article_id, e.id, 'admin-bulk-request:' || ? || ':' || e.article_id,
+          CASE e.from_status WHEN 'pending' THEN 'pending_approved'
+            WHEN 'rejected' THEN 'rejected_repost' ELSE 'unhidden_repost' END,
+          'queued', ?, ?, ? FROM media_article_events e
+        WHERE e.event_key = 'admin-bulk:' || ? || ':' || e.article_id
+          AND e.article_id IN (${placeholders}) AND e.to_status = 'approved'
+          AND EXISTS (SELECT 1 FROM media_admin_bulk_status_requests r WHERE r.request_key = ?
+            AND r.article_ids_json = ? AND r.post_to_bluesky = ? AND r.post_to_facebook = ? AND r.post_to_threads = ?)
+        ON CONFLICT(publication_key) DO NOTHING`).bind(key, now, now, env.UK_AQ_MEDIA_THREADS_USER_ID, key, ...ids, key, idsJson, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads)));
     }
     await env.MEDIA_DB.batch(statements);
   }
 
+  return bulkApproveResponse(env, key, ids, idsJson, requestedBluesky, requestedFacebook, requestedThreads, Boolean(existing));
+}
+
+async function bulkApproveResponse(env: MediaAdminEnv, key: string, ids: number[], idsJson: string,
+  requestedBluesky: boolean, requestedFacebook: boolean, requestedThreads: boolean, replayed: boolean): Promise<Response> {
   const receipt = await env.MEDIA_DB.prepare(`SELECT article_ids_json, post_to_bluesky,
-    post_to_facebook
+    post_to_facebook, post_to_threads
     FROM media_admin_bulk_status_requests WHERE request_key = ?`).bind(key).first<BulkRequestRow>();
   if (!receipt) throw new HttpError(409, 'bulk_approval_state_conflict');
   if (receipt.article_ids_json !== idsJson ||
       Boolean(receipt.post_to_bluesky) !== requestedBluesky ||
-      Boolean(receipt.post_to_facebook) !== requestedFacebook) {
+      Boolean(receipt.post_to_facebook) !== requestedFacebook ||
+      Boolean(receipt.post_to_threads) !== requestedThreads) {
     throw new HttpError(409, 'idempotency_key_conflict');
   }
   const eventPrefix = `admin-bulk:${key}:`;
@@ -947,6 +1008,14 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
   if (requestedFacebook && facebookPublications.length !== ids.length) {
     throw new HttpError(409, 'bulk_approval_state_conflict');
   }
+  const { results: threadsPublications } = requestedThreads
+    ? await env.MEDIA_DB.prepare(`SELECT id, article_id, status FROM media_threads_publications
+        WHERE publication_key GLOB ? ORDER BY article_id`)
+      .bind(`admin-bulk-request:${key}:*`).all()
+    : { results: [] };
+  if (requestedThreads && threadsPublications.length !== ids.length) {
+    throw new HttpError(409, 'bulk_approval_state_conflict');
+  }
   await reconcileHomepageLatestSix(env.MEDIA_DB);
   if (publications.length) {
     try { await reconcileBlueskyPublications(env.MEDIA_DB, env.MEDIA_BLUESKY_QUEUE); }
@@ -956,28 +1025,30 @@ async function bulkApprove(request: Request, env: MediaAdminEnv): Promise<Respon
     try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
     catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed', request_key: key })); }
   }
+  if (threadsPublications.length) await wakeThreads(env);
   return json({ articles, bluesky_publications: publications,
-    facebook_publications: facebookPublications, replayed: Boolean(existing) });
+    facebook_publications: facebookPublications, threads_publications: threadsPublications, replayed });
 }
 
-function directPublicationKey(key: string, platform: 'bluesky' | 'facebook', id: number): string {
+function directPublicationKey(key: string, platform: 'bluesky' | 'facebook' | 'threads', id: number): string {
   return `admin-direct:${key}:${platform}:${id}`;
 }
 
 async function directPublishReceipt(db: D1Database, key: string, kind: 'single' | 'bulk',
-  ids: number[], bluesky: boolean, facebook: boolean): Promise<{
-    bluesky: DirectPublicationRow[]; facebook: DirectPublicationRow[]
+  ids: number[], bluesky: boolean, facebook: boolean, threads: boolean): Promise<{
+    bluesky: DirectPublicationRow[]; facebook: DirectPublicationRow[]; threads: DirectPublicationRow[]
   } | null> {
   const identity = await db.prepare(`SELECT request_kind, article_ids_json,
-    post_to_bluesky, post_to_facebook FROM media_admin_publish_requests WHERE request_key = ?`)
+    post_to_bluesky, post_to_facebook, post_to_threads FROM media_admin_publish_requests WHERE request_key = ?`)
     .bind(key).first<DirectRequestRow>();
   if (!identity) return null;
   if (identity.request_kind !== kind || identity.article_ids_json !== JSON.stringify(ids) ||
-      Boolean(identity.post_to_bluesky) !== bluesky || Boolean(identity.post_to_facebook) !== facebook) {
+      Boolean(identity.post_to_bluesky) !== bluesky || Boolean(identity.post_to_facebook) !== facebook ||
+      Boolean(identity.post_to_threads) !== threads) {
     throw new HttpError(409, 'idempotency_key_conflict');
   }
   const placeholders = ids.map(() => '?').join(', ');
-  const read = async (platform: 'bluesky' | 'facebook'): Promise<DirectPublicationRow[]> => {
+  const read = async (platform: 'bluesky' | 'facebook' | 'threads'): Promise<DirectPublicationRow[]> => {
     const keys = ids.map(id => directPublicationKey(key, platform, id));
     const { results } = await db.prepare(`SELECT id, article_id, status, publication_reason
       FROM media_${platform}_publications WHERE publication_key IN (${placeholders})
@@ -989,7 +1060,7 @@ async function directPublishReceipt(db: D1Database, key: string, kind: 'single' 
     return results;
   };
   return { bluesky: bluesky ? await read('bluesky') : [],
-    facebook: facebook ? await read('facebook') : [] };
+    facebook: facebook ? await read('facebook') : [], threads: threads ? await read('threads') : [] };
 }
 
 async function directPublishResponse(env: MediaAdminEnv, key: string,
@@ -1003,21 +1074,22 @@ async function directPublishResponse(env: MediaAdminEnv, key: string,
     try { await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }); }
     catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed', request_key: key })); }
   }
+  if (receipt.threads.length) await wakeThreads(env);
   if (kind === 'single') return json({ article: { id: ids[0], status: 'approved' },
     bluesky_publication: receipt.bluesky[0] ?? null,
-    facebook_publication: receipt.facebook[0] ?? null, replayed });
+    facebook_publication: receipt.facebook[0] ?? null, threads_publication: receipt.threads[0] ?? null, replayed });
   return json({ articles: ids.map(id => ({ id, status: 'approved' })),
-    bluesky_publications: receipt.bluesky, facebook_publications: receipt.facebook, replayed });
+    bluesky_publications: receipt.bluesky, facebook_publications: receipt.facebook, threads_publications: receipt.threads, replayed });
 }
 
 async function directPublish(request: Request, env: MediaAdminEnv,
-  kind: 'single' | 'bulk', ids: number[], bluesky: boolean, facebook: boolean): Promise<Response> {
+  kind: 'single' | 'bulk', ids: number[], bluesky: boolean, facebook: boolean, threads: boolean): Promise<Response> {
   const key = request.headers.get('Idempotency-Key');
   if (!key || !/^[A-Za-z0-9_-]{16,100}$/.test(key)) {
     throw new HttpError(400, 'idempotency_key_required');
   }
   const db = env.MEDIA_DB;
-  const replay = await directPublishReceipt(db, key, kind, ids, bluesky, facebook);
+  const replay = await directPublishReceipt(db, key, kind, ids, bluesky, facebook, threads);
   if (replay) return directPublishResponse(env, key, kind, ids, replay, true);
   const placeholders = ids.map(() => '?').join(', ');
   const { results } = await db.prepare(`SELECT a.id, a.status, a.og_image_url,
@@ -1039,7 +1111,7 @@ async function directPublish(request: Request, env: MediaAdminEnv,
     : { template: null, failures: [] };
   const facebookErrors = new Map(facebookCheck.failures.map(failure =>
     [failure.article_id, failure.error]));
-  const failures: Array<{ article_id: number; platform: 'bluesky' | 'facebook' | null;
+  const failures: Array<{ article_id: number; platform: 'bluesky' | 'facebook' | 'threads' | null;
     error: string }> = [];
   for (const id of ids) {
     const row = byId.get(id);
@@ -1063,8 +1135,13 @@ async function directPublish(request: Request, env: MediaAdminEnv,
         error: state.direct_publish_unavailable_reason! });
     }
   }
+  if (threads) {
+    const check = await threadsEligibility(db, env, results);
+    failures.push(...check.failures.map(f => ({ article_id: f.article_id!, platform: 'threads' as const, error: f.error })));
+    for (const row of results) if (row.status !== 'approved') failures.push({ article_id: row.id, platform: 'threads', error: 'article_not_approved' });
+  }
   if (failures.length) {
-    const racedReplay = await directPublishReceipt(db, key, kind, ids, bluesky, facebook);
+    const racedReplay = await directPublishReceipt(db, key, kind, ids, bluesky, facebook, threads);
     if (racedReplay) return directPublishResponse(env, key, kind, ids, racedReplay, true);
     const first = failures[0]!;
     if (kind === 'single') throw new HttpError(first.error === 'article_not_found' ? 404 : 409,
@@ -1096,33 +1173,35 @@ async function directPublish(request: Request, env: MediaAdminEnv,
         AND p.status IN ('queued', 'posting', 'unknown_remote_state'))`);
     guardBindings.push(...ids);
   }
+  const threadsGuard = manualThreadsGuard(env, threads ? ids : []);
   const idsJson = JSON.stringify(ids);
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [db.prepare(`INSERT INTO media_admin_publish_requests
-    (request_key, request_kind, article_ids_json, post_to_bluesky, post_to_facebook, created_at)
-    SELECT ?, ?, ?, ?, ?, ? WHERE ${guard.join(' AND ')}
+    (request_key, request_kind, article_ids_json, post_to_bluesky, post_to_facebook, post_to_threads, created_at)
+    SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${guard.join(' AND ')} ${threadsGuard.sql}
     ON CONFLICT(request_key) DO NOTHING`).bind(key, kind, idsJson, Number(bluesky),
-      Number(facebook), now, ...guardBindings)];
-  const appendPublication = (platform: 'bluesky' | 'facebook'): void => {
+      Number(facebook), Number(threads), now, ...guardBindings, ...threadsGuard.bindings)];
+  const appendPublication = (platform: 'bluesky' | 'facebook' | 'threads'): void => {
     statements.push(db.prepare(`INSERT INTO media_${platform}_publications
       (article_id, approval_event_id, publication_key, publication_reason, status,
-       created_at, updated_at)
+       created_at, updated_at${platform === 'threads' ? ', threads_user_id' : ''})
       SELECT a.id, NULL, 'admin-direct:' || ? || ':${platform}:' || a.id,
         CASE WHEN EXISTS (SELECT 1 FROM media_${platform}_publications prior
           WHERE prior.article_id = a.id AND prior.status = 'posted')
           THEN 'manual_repost' ELSE 'manual_post' END,
-        'queued', ?, ? FROM media_articles a
+        'queued', ?, ?${platform === 'threads' ? ', ?' : ''} FROM media_articles a
       JOIN media_admin_publish_requests r ON r.request_key = ?
         AND r.request_kind = ? AND r.article_ids_json = ?
-        AND r.post_to_bluesky = ? AND r.post_to_facebook = ?
+        AND r.post_to_bluesky = ? AND r.post_to_facebook = ? AND r.post_to_threads = ?
       WHERE a.id IN (${placeholders}) AND a.status = 'approved'
       ORDER BY a.id ON CONFLICT(publication_key) DO NOTHING`)
-      .bind(key, now, now, key, kind, idsJson, Number(bluesky), Number(facebook), ...ids));
+      .bind(key, now, now, ...(platform === 'threads' ? [env.UK_AQ_MEDIA_THREADS_USER_ID] : []), key, kind, idsJson, Number(bluesky), Number(facebook), Number(threads), ...ids));
   };
   if (bluesky) appendPublication('bluesky');
   if (facebook) appendPublication('facebook');
+  if (threads) appendPublication('threads');
   const batchResults = await db.batch(statements);
-  const receipt = await directPublishReceipt(db, key, kind, ids, bluesky, facebook);
+  const receipt = await directPublishReceipt(db, key, kind, ids, bluesky, facebook, threads);
   if (!receipt) throw new HttpError(409, 'direct_publish_state_conflict');
   return directPublishResponse(env, key, kind, ids, receipt,
     Number(batchResults[0]?.meta.changes ?? 0) === 0);
@@ -1132,7 +1211,7 @@ async function publishSingle(request: Request, env: MediaAdminEnv, id: number): 
   const parsed = DirectPublishBody.safeParse(await boundedOptionalJson(request));
   if (!parsed.success) throw new HttpError(400, 'invalid_publish_body');
   return directPublish(request, env, 'single', [id], parsed.data.post_to_bluesky === true,
-    parsed.data.post_to_facebook === true);
+    parsed.data.post_to_facebook === true, parsed.data.post_to_threads === true);
 }
 
 async function publishBulk(request: Request, env: MediaAdminEnv): Promise<Response> {
@@ -1141,7 +1220,7 @@ async function publishBulk(request: Request, env: MediaAdminEnv): Promise<Respon
   const ids = [...parsed.data.article_ids].sort((left, right) => left - right);
   if (new Set(ids).size !== ids.length) throw new HttpError(400, 'duplicate_article_id');
   return directPublish(request, env, 'bulk', ids, parsed.data.post_to_bluesky === true,
-    parsed.data.post_to_facebook === true);
+    parsed.data.post_to_facebook === true, parsed.data.post_to_threads === true);
 }
 
 async function mutate(request: Request, env: MediaAdminEnv, id: number, action: Action): Promise<Response> {
@@ -1154,8 +1233,9 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
   if (!parsedBody.success) throw new HttpError(400, 'invalid_status_mutation_body');
   const requestedBluesky = parsedBody.data.post_to_bluesky === true;
   const requestedFacebook = parsedBody.data.post_to_facebook === true;
+  const requestedThreads = parsedBody.data.post_to_threads === true;
   const replay = await statusMutationReceipt(db, key, id, action,
-    requestedBluesky, requestedFacebook);
+    requestedBluesky, requestedFacebook, requestedThreads);
   if (replay) return statusMutationResponse(env, id, replay, true);
   const before = await db.prepare(`SELECT status, og_image_url, image_policy,
     title, publisher, canonical_url,
@@ -1167,43 +1247,52 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
       title: string; publisher: string; canonical_url: string; bluesky_has_in_progress: number }>();
   if (!before) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
-      requestedBluesky, requestedFacebook);
+      requestedBluesky, requestedFacebook, requestedThreads);
     if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
     throw new HttpError(404, 'article_not_found');
   }
   const manualReason = manualPublicationReason(action, before.status);
-  if ((requestedBluesky || requestedFacebook) && !manualReason) {
+  if ((requestedBluesky || requestedFacebook || requestedThreads) && !manualReason) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
-      requestedBluesky, requestedFacebook);
+      requestedBluesky, requestedFacebook, requestedThreads);
     if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
     throw new HttpError(400, requestedBluesky
-      ? 'post_to_bluesky_not_available' : 'post_to_facebook_not_available');
+      ? 'post_to_bluesky_not_available' : requestedFacebook ? 'post_to_facebook_not_available' : 'post_to_threads_not_available');
   }
   if (requestedBluesky && before.bluesky_has_in_progress) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
-      requestedBluesky, requestedFacebook);
+      requestedBluesky, requestedFacebook, requestedThreads);
     if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
     throw new HttpError(409, 'publication_in_progress');
   }
   if (requestedBluesky && !blueskyImageEligible(before)) {
     const racedReplay = await statusMutationReceipt(db, key, id, action,
-      requestedBluesky, requestedFacebook);
+      requestedBluesky, requestedFacebook, requestedThreads);
     if (racedReplay) return statusMutationResponse(env, id, racedReplay, true);
     throw new HttpError(409, 'thumbnail_missing');
   }
   if (requestedFacebook) await requireFacebookEligibility(db, [before]);
+  if (requestedThreads) {
+    try { await requireThreadsEligibility(db, env, [{ ...before, id }]); }
+    catch (error) {
+      const raced = await statusMutationReceipt(db, key, id, action, requestedBluesky, requestedFacebook, requestedThreads);
+      if (raced) return statusMutationResponse(env, id, raced, true);
+      throw error;
+    }
+  }
+  const threadsGuard = manualThreadsGuard(env, requestedThreads ? [id] : []);
   const now = new Date().toISOString();
   const placeholders = transition.from.map(() => '?').join(', ');
   // D1 batch is transactional. The durable full request identity owns the key;
   // every later statement is conditional on that exact identity.
   const statements = [db.prepare(`INSERT INTO media_admin_status_requests
-      (request_key, article_id, action, post_to_bluesky, post_to_facebook, created_at)
-    SELECT ?, ?, ?, ?, ?, ? FROM media_articles
+      (request_key, article_id, action, post_to_bluesky, post_to_facebook, post_to_threads, created_at)
+    SELECT ?, ?, ?, ?, ?, ?, ? FROM media_articles
     WHERE id = ? AND status IN (${placeholders})
-      AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)
+      AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?) ${threadsGuard.sql}
     ON CONFLICT(request_key) DO NOTHING`)
-    .bind(key, id, action, Number(requestedBluesky), Number(requestedFacebook), now,
-      id, ...transition.from, eventKey),
+    .bind(key, id, action, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads), now,
+      id, ...transition.from, eventKey, ...threadsGuard.bindings),
   db.prepare(`UPDATE media_articles SET status = ?, mutation_key = ?,
     revision = revision + 1, updated_at = ?,
     approval_method = CASE WHEN ? IN ('approve', 'unhide') THEN 'manual' ELSE approval_method END,
@@ -1214,12 +1303,12 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
     WHERE id = ? AND status IN (${placeholders})
       AND EXISTS (SELECT 1 FROM media_admin_status_requests
         WHERE request_key = ? AND article_id = ? AND action = ? AND post_to_bluesky = ?
-          AND post_to_facebook = ?)
+          AND post_to_facebook = ? AND post_to_threads = ?)
       AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)
     `).bind(transition.to, eventKey, now,
       action, action, action, now, action, now, action, now, action, id,
       ...transition.from, key, id, action, Number(requestedBluesky),
-      Number(requestedFacebook), eventKey)];
+      Number(requestedFacebook), Number(requestedThreads), eventKey)];
   if (requestedBluesky && manualReason) {
     statements.push(db.prepare(`INSERT INTO media_bluesky_publications
         (article_id, approval_event_id, publication_key, publication_reason, status, created_at, updated_at)
@@ -1229,9 +1318,10 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
           AND r.action = ? AND r.post_to_bluesky = 1
         WHERE e.event_key = ? AND e.article_id = ? AND e.event_type = ?
           AND e.from_status = ? AND e.to_status = 'approved'
+          AND r.post_to_bluesky = ? AND r.post_to_facebook = ? AND r.post_to_threads = ?
         ON CONFLICT(publication_key) DO NOTHING`)
       .bind(`admin-request:${key}`, manualReason, now, now, key, action,
-        eventKey, id, transition.event, before.status));
+        eventKey, id, transition.event, before.status, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads)));
   }
   if (requestedFacebook && manualReason) {
     statements.push(db.prepare(`INSERT INTO media_facebook_publications
@@ -1242,14 +1332,29 @@ async function mutate(request: Request, env: MediaAdminEnv, id: number, action: 
           AND r.action = ? AND r.post_to_facebook = 1
         WHERE e.event_key = ? AND e.article_id = ? AND e.event_type = ?
           AND e.from_status = ? AND e.to_status = 'approved'
+          AND r.post_to_bluesky = ? AND r.post_to_facebook = ? AND r.post_to_threads = ?
         ON CONFLICT(publication_key) DO NOTHING`)
       .bind(`admin-request:${key}`, manualReason, now, now, key, action,
-        eventKey, id, transition.event, before.status));
+        eventKey, id, transition.event, before.status, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads)));
+  }
+  if (requestedThreads && manualReason) {
+    statements.push(db.prepare(`INSERT INTO media_threads_publications
+        (article_id, approval_event_id, publication_key, publication_reason, status, created_at, updated_at, threads_user_id)
+        SELECT e.article_id, e.id, ?, ?, 'queued', ?, ?, ?
+        FROM media_article_events e JOIN media_admin_status_requests r
+          ON r.request_key = ? AND r.article_id = e.article_id
+          AND r.action = ? AND r.post_to_threads = 1
+        WHERE e.event_key = ? AND e.article_id = ? AND e.event_type = ?
+          AND e.from_status = ? AND e.to_status = 'approved'
+          AND r.post_to_bluesky = ? AND r.post_to_facebook = ? AND r.post_to_threads = ?
+        ON CONFLICT(publication_key) DO NOTHING`)
+      .bind(`admin-request:${key}`, manualReason, now, now, env.UK_AQ_MEDIA_THREADS_USER_ID, key, action,
+        eventKey, id, transition.event, before.status, Number(requestedBluesky), Number(requestedFacebook), Number(requestedThreads)));
   }
   const results = await db.batch(statements);
   const changed = Number(results[1]?.meta.changes ?? 0) > 0;
   const receipt = await statusMutationReceipt(db, key, id, action,
-    requestedBluesky, requestedFacebook);
+    requestedBluesky, requestedFacebook, requestedThreads);
   if (receipt) return statusMutationResponse(env, id, receipt, !changed);
   const exists = await db.prepare('SELECT id FROM media_articles WHERE id = ?').bind(id).first();
   throw new HttpError(exists ? 409 : 404, exists ? 'invalid_state_transition' : 'article_not_found');
@@ -1271,6 +1376,8 @@ export default {
       if (url.pathname === '/admin/facebook/connection-check') {
         return await facebookConnectionCheck(request, env);
       }
+      const threadsResponse = await handleThreadsAdmin(request, env, url, boundedOptionalJson);
+      if (threadsResponse) return threadsResponse;
       const researchResponse = await handleResearchTopicsAdmin(request, url, env.MEDIA_DB);
       if (researchResponse) return researchResponse;
       const editorialResponse = await handleEditorialDashboard(request, env, url);

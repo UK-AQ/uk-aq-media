@@ -63,6 +63,13 @@ for (const path of paths) {
     throw new Error('Unexpected Wrangler D1 configuration in ' + path);
   }
   config.d1_databases[0].database_id = dbId;
+  if (mode === 'core' && ['apps/media-admin/wrangler.jsonc', 'apps/media-discovery/wrangler.jsonc'].includes(path)) {
+    // Only presence is inspected. The token is never written into Wrangler vars.
+    config.vars.UK_AQ_MEDIA_THREADS_CONFIGURED = process.env.UK_AQ_MEDIA_THREADS_TOKEN ? 'true' : 'false';
+    for (const key of ['UK_AQ_MEDIA_THREADS_USER_ID', 'UK_AQ_MEDIA_THREADS_USERNAME', 'UK_AQ_MEDIA_THREADS_TOKEN_EXPIRES_AT']) {
+      config.vars[key] = process.env[key]?.trim() ?? '';
+    }
+  }
   if (mode === 'email' && path === 'apps/media-email/wrangler.jsonc') {
     for (const [key, value] of Object.entries(emailVars)) {
       if (!(key in config.vars)) throw new Error('Missing email Wrangler key: ' + key);

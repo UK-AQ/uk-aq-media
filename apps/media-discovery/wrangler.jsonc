@@ -7,7 +7,9 @@
     "nodejs_compat"
   ],
   "workers_dev": true,
-  "images": { "binding": "IMAGES" },
+  "images": {
+    "binding": "IMAGES"
+  },
   "preview_urls": false,
   "observability": {
     "enabled": true,
@@ -29,7 +31,10 @@
   ],
   "queues": {
     "producers": [
-      { "binding": "MEDIA_EMAIL_QUEUE", "queue": "uk-aq-media-email" },
+      {
+        "binding": "MEDIA_EMAIL_QUEUE",
+        "queue": "uk-aq-media-email"
+      },
       {
         "binding": "MEDIA_DISCOVERY_QUEUE",
         "queue": "uk-aq-media-discovery"
@@ -41,6 +46,10 @@
       {
         "binding": "MEDIA_FACEBOOK_QUEUE",
         "queue": "uk-aq-media-facebook"
+      },
+      {
+        "binding": "MEDIA_THREADS_QUEUE",
+        "queue": "uk-aq-media-threads"
       }
     ],
     "consumers": [
@@ -67,6 +76,14 @@
         "max_retries": 5,
         "max_concurrency": 1,
         "retry_delay": 30
+      },
+      {
+        "queue": "uk-aq-media-threads",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "max_concurrency": 1,
+        "retry_delay": 60
       }
     ]
   },
@@ -86,6 +103,10 @@
     "MEDIA_AI_DAILY_NEURON_BUDGET": 8000,
     "MEDIA_AI_ACCOUNT_FREE_NEURONS_PER_DAY": 10000,
     "MEDIA_AI_MAX_TITLES_PER_REQUEST": 5,
-    "MEDIA_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    "MEDIA_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "UK_AQ_MEDIA_THREADS_CONFIGURED": "false",
+    "UK_AQ_MEDIA_THREADS_USER_ID": "",
+    "UK_AQ_MEDIA_THREADS_USERNAME": "",
+    "UK_AQ_MEDIA_THREADS_TOKEN_EXPIRES_AT": ""
   }
 }

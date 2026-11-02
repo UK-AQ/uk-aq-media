@@ -1043,6 +1043,7 @@ async function checkThumbnailWaitingCorrection(): Promise<void> {
   // The standalone fixture intentionally applies older migrations first.
   // Install the new independent wake-up table before exercising live consumers.
   sqlite.exec(readFileSync('migrations/0050_bluesky_wakeup_singleton.sql', 'utf8'));
+  sqlite.exec(readFileSync('migrations/0056_threads_manual_publications.sql', 'utf8'));
 
   insertStatusFixture(sqlite, 603, 'approved', false, 'trusted_source_auto');
   insertStatusFixture(sqlite, 604, 'approved', true, 'trusted_source_auto');

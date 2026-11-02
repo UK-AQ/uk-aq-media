@@ -15,12 +15,15 @@ import {
 import { GDELT_MAX_INGEST_BODY_BYTES } from '@uk-aq-media/gdelt';
 import { consumeBluesky, reconcileBlueskyQueue } from './bluesky';
 import { consumeFacebook, reconcileFacebookQueue } from './facebook';
+import { consumeThreads, reconcileThreadsQueue } from './threads';
 
 async function reconcileSocialQueues(env: MediaDiscoveryEnv): Promise<void> {
   try { await reconcileBlueskyQueue(env); }
   catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
   try { await reconcileFacebookQueue(env); }
   catch { console.error(JSON.stringify({ event: 'facebook_wakeup_failed' })); }
+  try { await reconcileThreadsQueue(env); }
+  catch { console.error(JSON.stringify({ event: 'threads_wakeup_failed' })); }
 }
 
 const NEURON_MICRO_UNITS = 1_000_000;
@@ -245,6 +248,10 @@ export default {
     finally { await reconcileSocialQueues(env); }
   },
   async queue(batch, env, ctx?: ExecutionContext): Promise<void> {
+    if (batch.queue === 'uk-aq-media-threads') {
+      for (const message of batch.messages) await consumeThreads(message, env);
+      return;
+    }
     if (batch.queue === 'uk-aq-media-bluesky') {
       for (const message of batch.messages) await consumeBluesky(message, env);
       return;
