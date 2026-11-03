@@ -9,7 +9,12 @@ export type ThreadsConfig = {
   UK_AQ_MEDIA_THREADS_TOKEN_EXPIRES_AT: string;
 };
 export type ThreadsSettings = {
-  manual_publishing_enabled: number; automatic_publishing_enabled: 0; cooldown_seconds: number;
+  manual_publishing_enabled: number; automatic_publishing_enabled: number; cooldown_seconds: number;
+  activation_event_id: number | null; automatic_events_through_id: number | null;
+  capture_only_enabled: number; capture_activation_event_id: number | null;
+  capture_events_through_id: number | null;
+  remote_request_key: string | null; remote_request_lease_until: string | null;
+  automatic_intent_error_code: string | null; automatic_intent_error_event_id: number | null;
   last_identity_checked_at: string | null; last_identity_verified_at: string | null;
   last_identity_user_id: string | null; last_identity_username: string | null;
   last_identity_error_code: string | null; last_successful_post_at: string | null;
@@ -29,15 +34,31 @@ export function threadsConfigurationError(config: ThreadsConfig, now = Date.now(
   return expiry && Date.parse(expiry) <= now ? 'threads_token_expired' : null;
 }
 
-export function threadsAvailability(config: ThreadsConfig, settings: ThreadsSettings | null): string | null {
-  const error = threadsConfigurationError(config);
+export function threadsAutomaticConfigurationError(config: ThreadsConfig): string | null {
+  return threadsConfigurationError(config) ||
+    (!config.UK_AQ_MEDIA_THREADS_TOKEN_EXPIRES_AT ? 'threads_token_expiry_required' : null);
+}
+
+export function threadsEnablementError(config: ThreadsConfig, settings: ThreadsSettings | null,
+  automatic = false): string | null {
+  const error = automatic ? threadsAutomaticConfigurationError(config) : threadsConfigurationError(config);
   if (error) return error;
   if (!settings) return 'threads_settings_missing';
-  if (!settings.manual_publishing_enabled) return 'threads_manual_publishing_disabled';
   if (!settings.last_identity_verified_at || settings.last_identity_error_code ||
       settings.last_identity_user_id !== config.UK_AQ_MEDIA_THREADS_USER_ID ||
       settings.last_identity_username !== config.UK_AQ_MEDIA_THREADS_USERNAME) {
     return settings.last_identity_error_code ?? 'threads_identity_not_verified';
+  }
+  return null;
+}
+
+export function threadsAvailability(config: ThreadsConfig, settings: ThreadsSettings | null,
+  automatic = false): string | null {
+  if (settings?.capture_only_enabled) return 'threads_capture_only';
+  const error = threadsEnablementError(config, settings, automatic);
+  if (error) return error;
+  if (!(automatic ? settings!.automatic_publishing_enabled : settings!.manual_publishing_enabled)) {
+    return automatic ? 'threads_automatic_publishing_disabled' : 'threads_manual_publishing_disabled';
   }
   return null;
 }

@@ -1,15 +1,30 @@
-import { renderThreadsPost, THREADS_API_VERSION, threadsConfigurationError,
+import { renderThreadsPost, THREADS_API_VERSION, threadsConfigurationError, threadsAutomaticConfigurationError,
   type ThreadsConfig, type ThreadsSettings } from '@uk-aq-media/core';
+import { reconcileThreadsAutomaticEvents } from './threads-automatic';
 
 const BASE = `https://graph.threads.net/${THREADS_API_VERSION}`;
 const STALE_MS = 10 * 60 * 1000;
 const MAX_DELAY = 43_200;
+// Use the stored reason at scheduling, claim and BOTH remote mutation boundaries.
+// Disabled automatic work must never sit in front of enabled manual work.
+const REASON_ENABLED_SQL = `(s.capture_only_enabled = 0 AND media_threads_publications.capture_only = 0 AND
+  ((media_threads_publications.publication_reason = 'auto_approved'
+    AND s.automatic_publishing_enabled = 1
+    AND media_threads_publications.approval_event_id > s.activation_event_id)
+  OR (media_threads_publications.publication_reason IN
+    ('pending_approved', 'rejected_repost', 'unhidden_repost', 'manual_post', 'manual_repost')
+    AND s.manual_publishing_enabled = 1)))`;
+function reasonEnabledSql(env: MediaDiscoveryEnv): string {
+  return threadsAutomaticConfigurationError(env)
+    ? REASON_ENABLED_SQL.replace('s.automatic_publishing_enabled = 1', '0 = 1') : REASON_ENABLED_SQL;
+}
 type FailureKind = 'safe_retry' | 'blocked' | 'unknown_remote_state' | 'local_conflict' | 'paused';
 export class ThreadsProviderError extends Error {
   constructor(readonly code: string, readonly kind: FailureKind) { super(code); }
 }
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 type Publication = { id: number; article_id: number; attempt_count: number;
+  publication_reason: string; capture_only: number;
   container_poll_count: number; claim_key: string; threads_user_id: string | null;
   threads_container_id: string | null; threads_post_id: string | null;
   remote_request_started_at: string | null; container_created_at: string | null; status: string };
@@ -90,12 +105,13 @@ export async function validateThreadsIdentity(token: string, config: ThreadsConf
 async function identityCheck(env: MediaDiscoveryEnv): Promise<void> {
   const now = new Date().toISOString();
   try {
-    const identity = await validateThreadsIdentity(tokenFor(env), env);
+    const identity = await remoteRequest(env, () => validateThreadsIdentity(tokenFor(env), env));
     await env.MEDIA_DB.prepare(`UPDATE media_threads_settings SET last_identity_checked_at = ?,
       last_identity_verified_at = ?, last_identity_user_id = ?, last_identity_username = ?,
       last_identity_error_code = NULL, updated_at = ? WHERE id = 1`)
       .bind(now, now, identity.id, identity.username, now).run();
   } catch (error) {
+    if (error instanceof ThreadsProviderError && error.kind === 'paused') throw error;
     await env.MEDIA_DB.prepare(`UPDATE media_threads_settings SET last_identity_checked_at = ?,
       last_identity_error_code = ?, updated_at = ? WHERE id = 1`)
       .bind(now, error instanceof ThreadsProviderError ? error.code : 'threads_identity_check_failed', now).run();
@@ -159,16 +175,45 @@ export async function readThreadsPost(token: string, postId: string, username: s
 async function settings(db: D1Database): Promise<ThreadsSettings | null> {
   return db.prepare('SELECT * FROM media_threads_settings WHERE id = 1').first<ThreadsSettings>();
 }
+
+// All runtime provider reads AND writes enter this lease. Capture activation is
+// atomically refused while it is active, including identity/read-back requests
+// that do not own a publication claim. A crashed request expires conservatively
+// after 90s, beyond the provider's existing 15s timeout; no write is retried here.
+async function remoteRequest<T>(env: MediaDiscoveryEnv, operation: () => Promise<T>): Promise<T> {
+  const now = new Date().toISOString();
+  const key = crypto.randomUUID();
+  const acquired = await env.MEDIA_DB.prepare(`UPDATE media_threads_settings SET
+    remote_request_key = ?, remote_request_lease_until = ? WHERE id = 1
+      AND capture_only_enabled = 0
+      AND (remote_request_key IS NULL OR julianday(remote_request_lease_until) <= julianday(?))`)
+    .bind(key, new Date(Date.now() + 90000).toISOString(), now).run();
+  if (!acquired.meta.changes) {
+    const s = await settings(env.MEDIA_DB);
+    throw new ThreadsProviderError(s?.capture_only_enabled ? 'threads_capture_only' : 'threads_remote_request_in_progress', 'paused');
+  }
+  try { return await operation(); }
+  finally {
+    // Never mask a confirmed provider result or change unknown-write semantics.
+    try {
+      await env.MEDIA_DB.prepare(`UPDATE media_threads_settings SET remote_request_key = NULL,
+        remote_request_lease_until = NULL WHERE id = 1 AND remote_request_key = ?`).bind(key).run();
+    } catch { console.error(JSON.stringify({ event: 'threads_remote_lease_release_failed' })); }
+  }
+}
 async function schedule(env: MediaDiscoveryEnv): Promise<void> {
   const s = await settings(env.MEDIA_DB);
-  if (!s?.manual_publishing_enabled || threadsConfigurationError(env) || !env.UK_AQ_MEDIA_THREADS_TOKEN) return;
+  if (!s || s.capture_only_enabled || !(s.manual_publishing_enabled || s.automatic_publishing_enabled) ||
+      threadsConfigurationError(env) || !env.UK_AQ_MEDIA_THREADS_TOKEN) return;
   // Unknown writes hold this platform until an operator reconciles them.
   if (await env.MEDIA_DB.prepare(`SELECT id FROM media_threads_publications
     WHERE status = 'unknown_remote_state' LIMIT 1`).first()) return;
   const posting = await env.MEDIA_DB.prepare(`SELECT min(last_attempted_at) AS at
     FROM media_threads_publications WHERE status = 'posting'`).first<{ at: string | null }>();
   const queued = await env.MEDIA_DB.prepare(`SELECT min(coalesce(next_attempt_at, created_at)) AS at
-    FROM media_threads_publications WHERE status = 'queued'`).first<{ at: string | null }>();
+    FROM media_threads_publications WHERE status = 'queued' AND EXISTS (
+      SELECT 1 FROM media_threads_settings s WHERE s.id = 1 AND ${reasonEnabledSql(env)})`)
+    .first<{ at: string | null }>();
   if (!posting?.at && !queued?.at) return;
   const due = posting?.at ? Date.parse(posting.at) + STALE_MS
     : Math.max(Date.parse(queued!.at!), s.last_successful_post_at
@@ -176,7 +221,16 @@ async function schedule(env: MediaDiscoveryEnv): Promise<void> {
   await env.MEDIA_THREADS_QUEUE.send({ type: 'threads_wakeup' },
     { delaySeconds: Math.max(1, Math.min(MAX_DELAY, Math.ceil((due - Date.now()) / 1000))) });
 }
-export const reconcileThreadsQueue = schedule;
+async function recoverAutomaticIntents(env: MediaDiscoveryEnv): Promise<void> {
+  if (await reconcileThreadsAutomaticEvents(env.MEDIA_DB)) {
+    // Continue a bounded live-event drain even while remote dispatch is disabled.
+    await env.MEDIA_THREADS_QUEUE.send({ type: 'threads_wakeup' }, { delaySeconds: 1 });
+  }
+}
+export async function reconcileThreadsQueue(env: MediaDiscoveryEnv): Promise<void> {
+  await recoverAutomaticIntents(env);
+  await schedule(env);
+}
 
 async function finishClaim(env: MediaDiscoveryEnv, p: Publication, status: string,
   code: string | null, next: string | null = null, increment = 0): Promise<void> {
@@ -191,6 +245,10 @@ async function finishClaim(env: MediaDiscoveryEnv, p: Publication, status: strin
 async function assertDispatch(env: MediaDiscoveryEnv, p: Publication, publishing: boolean): Promise<void> {
   // Recheck the kill switch, account and editorial state at each mutation boundary.
   tokenFor(env);
+  if (p.publication_reason === 'auto_approved') {
+    const error = threadsAutomaticConfigurationError(env);
+    if (error) throw new ThreadsProviderError(error, 'paused');
+  }
   const now = new Date().toISOString();
   const result = await env.MEDIA_DB.prepare(`UPDATE media_threads_publications
     SET threads_user_id = ?, remote_request_started_at = CASE WHEN ? = 1 THEN ? ELSE remote_request_started_at END,
@@ -198,8 +256,9 @@ async function assertDispatch(env: MediaDiscoveryEnv, p: Publication, publishing
       AND remote_request_started_at IS NULL AND (threads_user_id IS NULL OR threads_user_id = ?)
       AND last_attempted_at > ?
       AND EXISTS (SELECT 1 FROM media_articles WHERE id = article_id AND status = 'approved')
-      AND EXISTS (SELECT 1 FROM media_threads_settings WHERE id = 1 AND manual_publishing_enabled = 1
-        AND automatic_publishing_enabled = 0 AND last_identity_error_code IS NULL
+      AND NOT EXISTS (SELECT 1 FROM media_threads_publications WHERE status = 'unknown_remote_state')
+      AND EXISTS (SELECT 1 FROM media_threads_settings s WHERE s.id = 1 AND ${reasonEnabledSql(env)}
+        AND last_identity_verified_at IS NOT NULL AND last_identity_error_code IS NULL
         AND last_identity_user_id = ? AND last_identity_username = ?
         AND (last_successful_post_at IS NULL OR julianday(?) >= julianday(last_successful_post_at) + cooldown_seconds / 86400.0))`)
     .bind(env.UK_AQ_MEDIA_THREADS_USER_ID, Number(publishing), now, now, p.id, p.claim_key,
@@ -207,8 +266,12 @@ async function assertDispatch(env: MediaDiscoveryEnv, p: Publication, publishing
       env.UK_AQ_MEDIA_THREADS_USER_ID, env.UK_AQ_MEDIA_THREADS_USERNAME, now).run();
   if (!result.meta.changes) {
     const latest = await settings(env.MEDIA_DB);
-    if (!latest?.manual_publishing_enabled) throw new ThreadsProviderError('threads_manual_publishing_disabled', 'paused');
-    if (latest.last_successful_post_at && Date.parse(latest.last_successful_post_at) + latest.cooldown_seconds * 1000 > Date.now()) {
+    if (latest?.capture_only_enabled) throw new ThreadsProviderError('threads_capture_only', 'paused');
+    const automatic = p.publication_reason === 'auto_approved';
+    if (!(automatic ? latest?.automatic_publishing_enabled : latest?.manual_publishing_enabled)) {
+      throw new ThreadsProviderError(automatic ? 'threads_automatic_publishing_disabled' : 'threads_manual_publishing_disabled', 'paused');
+    }
+    if (latest?.last_successful_post_at && Date.parse(latest.last_successful_post_at) + latest.cooldown_seconds * 1000 > Date.now()) {
       throw new ThreadsProviderError('threads_cooldown_active', 'paused');
     }
     throw new ThreadsProviderError('threads_dispatch_guard_failed', 'local_conflict');
@@ -217,6 +280,7 @@ async function assertDispatch(env: MediaDiscoveryEnv, p: Publication, publishing
 
 async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
   const db = env.MEDIA_DB;
+  if ((await settings(db))?.capture_only_enabled) return;
   const now = new Date().toISOString();
   // Never requeue a possibly dispatched publish. Persisted confirmed IDs survive this hold.
   await db.prepare(`UPDATE media_threads_publications SET
@@ -226,7 +290,7 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
     claim_key = NULL, updated_at = ? WHERE status = 'posting' AND last_attempted_at <= ?`)
     .bind(now, now, new Date(Date.now() - STALE_MS).toISOString()).run();
   const s = await settings(db);
-  if (!s?.manual_publishing_enabled) return;
+  if (!s || !(s.manual_publishing_enabled || s.automatic_publishing_enabled)) return;
   try { tokenFor(env); } catch { try { await identityCheck(env); } catch { /* bounded D1 result */ } return; }
   if (s.last_successful_post_at && Date.parse(s.last_successful_post_at) + s.cooldown_seconds * 1000 > Date.now()) {
     await schedule(env); return;
@@ -235,10 +299,12 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
   const p = await db.prepare(`UPDATE media_threads_publications SET status = 'posting', claim_key = ?,
     last_attempted_at = ?, updated_at = ?, next_attempt_at = NULL
     WHERE id = (SELECT id FROM media_threads_publications WHERE status = 'queued'
-      AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY id LIMIT 1)
+      AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+      AND EXISTS (SELECT 1 FROM media_threads_settings s WHERE s.id = 1 AND ${reasonEnabledSql(env)})
+      ORDER BY id LIMIT 1)
       AND status = 'queued'
       AND NOT EXISTS (SELECT 1 FROM media_threads_publications WHERE status IN ('posting', 'unknown_remote_state'))
-      AND EXISTS (SELECT 1 FROM media_threads_settings WHERE id = 1 AND manual_publishing_enabled = 1
+      AND EXISTS (SELECT 1 FROM media_threads_settings s WHERE s.id = 1 AND ${reasonEnabledSql(env)}
         AND (last_successful_post_at IS NULL OR julianday(?) >= julianday(last_successful_post_at) + cooldown_seconds / 86400.0))
     RETURNING *`).bind(claim, now, now, now, now).first<Publication>();
   if (!p) { await schedule(env); return; }
@@ -251,10 +317,12 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
     }
     await identityCheck(env);
     const token = tokenFor(env);
-    await requirePublishingQuota(token, env.UK_AQ_MEDIA_THREADS_USER_ID);
+    await remoteRequest(env, () => requirePublishingQuota(token, env.UK_AQ_MEDIA_THREADS_USER_ID));
     if (!p.threads_container_id) {
-      await assertDispatch(env, p, false);
-      const containerId = await createThreadsContainer(token, env.UK_AQ_MEDIA_THREADS_USER_ID, article);
+      const containerId = await remoteRequest(env, async () => {
+        await assertDispatch(env, p, false);
+        return createThreadsContainer(token, env.UK_AQ_MEDIA_THREADS_USER_ID, article);
+      });
       const createdAt = new Date().toISOString();
       const persisted = await db.prepare(`UPDATE media_threads_publications SET threads_container_id = ?,
         container_created_at = ?, updated_at = ? WHERE id = ? AND status = 'posting' AND claim_key = ?`)
@@ -266,7 +334,7 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
     if (!p.container_created_at || Date.now() - Date.parse(p.container_created_at) >= 24 * 60 * 60 * 1000) {
       throw new ThreadsProviderError('threads_container_expired', 'blocked');
     }
-    const container = await request(token, `/${remoteId(p.threads_container_id)}?fields=id%2Cstatus`);
+    const container = await remoteRequest(env, () => request(token, `/${remoteId(p.threads_container_id)}?fields=id%2Cstatus`));
     if (remoteId(container.id) !== p.threads_container_id) throw new ThreadsProviderError('threads_container_id_mismatch', 'blocked');
     if (container.status === 'IN_PROGRESS') {
       if (p.container_poll_count >= 4) throw new ThreadsProviderError('threads_container_processing_exhausted', 'blocked');
@@ -277,8 +345,10 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
     }
     if (container.status === 'PUBLISHED') throw new ThreadsProviderError('threads_container_already_published', 'unknown_remote_state');
     if (container.status !== 'FINISHED') throw new ThreadsProviderError('threads_container_not_publishable', 'blocked');
-    await assertDispatch(env, p, true);
-    const postId = await publishThreadsContainer(token, env.UK_AQ_MEDIA_THREADS_USER_ID, p.threads_container_id);
+    const postId = await remoteRequest(env, async () => {
+      await assertDispatch(env, p, true);
+      return publishThreadsContainer(token, env.UK_AQ_MEDIA_THREADS_USER_ID, p.threads_container_id!);
+    });
     // Persist confirmation before optional read-back; no failure below can retry a publish.
     const postedAt = new Date().toISOString();
     const confirmed = await db.prepare(`UPDATE media_threads_publications SET threads_post_id = ?, updated_at = ?
@@ -296,7 +366,7 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
     ]);
     if (!posted?.meta.changes) throw new ThreadsProviderError('threads_confirmed_post_persist_conflict', 'local_conflict');
     try {
-      const read = await readThreadsPost(token, postId, env.UK_AQ_MEDIA_THREADS_USERNAME);
+      const read = await remoteRequest(env, () => readThreadsPost(token, postId, env.UK_AQ_MEDIA_THREADS_USERNAME));
       await db.prepare(`UPDATE media_threads_publications SET threads_permalink_url = ?, updated_at = ?
         WHERE id = ? AND threads_post_id = ? AND status = 'posted'`).bind(read.permalink, postedAt, p.id, postId).run();
     } catch { /* Confirmed posted ID remains successful; permalink is optional. */ }
@@ -323,17 +393,18 @@ async function publishOne(env: MediaDiscoveryEnv): Promise<void> {
 
 async function reconcileExact(env: MediaDiscoveryEnv, id: number, key: string): Promise<void> {
   const db = env.MEDIA_DB;
+  if ((await settings(db))?.capture_only_enabled) return;
   const intent = await db.prepare(`SELECT request_json FROM media_threads_operator_requests
     WHERE request_key = ? AND publication_id = ? AND operation = 'reconcile'`).bind(key, id).first<{ request_json: string }>();
   if (!intent) return;
   const p = await db.prepare('SELECT * FROM media_threads_publications WHERE id = ?').bind(id).first<Publication>();
-  if (!p || !['unknown_remote_state', 'posted'].includes(p.status)) return;
+  if (!p || p.capture_only || !['unknown_remote_state', 'posted'].includes(p.status)) return;
   try {
     await identityCheck(env);
     if (p.threads_user_id !== env.UK_AQ_MEDIA_THREADS_USER_ID) throw new ThreadsProviderError('threads_reconcile_account_mismatch', 'blocked');
     const proposed = JSON.parse(intent.request_json) as { threads_post_id: string };
     if (p.threads_post_id && p.threads_post_id !== proposed.threads_post_id) throw new ThreadsProviderError('threads_reconcile_id_conflict', 'blocked');
-    const read = await readThreadsPost(tokenFor(env), proposed.threads_post_id, env.UK_AQ_MEDIA_THREADS_USERNAME);
+    const read = await remoteRequest(env, () => readThreadsPost(tokenFor(env), proposed.threads_post_id, env.UK_AQ_MEDIA_THREADS_USERNAME));
     const now = new Date().toISOString();
     await db.batch([
       db.prepare(`UPDATE media_threads_publications SET status = 'posted', threads_post_id = ?,
@@ -355,9 +426,15 @@ async function reconcileExact(env: MediaDiscoveryEnv, id: number, key: string): 
 export async function consumeThreads(message: Message<unknown>, env: MediaDiscoveryEnv): Promise<void> {
   const body = record(message.body);
   const keys = Object.keys(body);
+  if ((await settings(env.MEDIA_DB))?.capture_only_enabled) {
+    if (body.type === 'threads_wakeup' && keys.length === 1) await recoverAutomaticIntents(env);
+    // Old identity, reconciliation and publish wake-ups cannot poll Meta in capture.
+    message.ack(); return;
+  }
   if (body.type === 'threads_identity_check' && keys.length === 1) {
     try { await identityCheck(env); } catch { /* durable bounded connection status */ }
   } else if (body.type === 'threads_wakeup' && keys.length === 1) {
+    await recoverAutomaticIntents(env);
     await publishOne(env);
   } else if (body.type === 'threads_reconcile' && keys.length === 3 &&
       keys.every(key => ['type', 'publication_id', 'request_key'].includes(key)) &&

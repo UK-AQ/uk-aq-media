@@ -739,7 +739,7 @@ function manualPublicationReason(action: Action,
 function manualThreadsGuard(env: MediaAdminEnv, ids: number[]): { sql: string; bindings: unknown[] } {
   if (!ids.length) return { sql: '', bindings: [] };
   return { sql: `AND EXISTS (SELECT 1 FROM media_threads_settings WHERE id = 1
-    AND manual_publishing_enabled = 1 AND automatic_publishing_enabled = 0
+    AND manual_publishing_enabled = 1 AND capture_only_enabled = 0
     AND last_identity_verified_at IS NOT NULL AND last_identity_error_code IS NULL
     AND last_identity_user_id = ? AND last_identity_username = ?)
     AND NOT EXISTS (SELECT 1 FROM media_threads_publications WHERE article_id IN (${ids.map(() => '?').join(',')})

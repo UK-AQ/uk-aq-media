@@ -220,6 +220,8 @@ export default {
         // Promotions may fill image metadata as well as creating approvals.
         try { await reconcileBlueskyQueue(env); }
         catch { console.error(JSON.stringify({ event: 'bluesky_wakeup_failed' })); }
+        try { await reconcileThreadsQueue(env); }
+        catch { console.error(JSON.stringify({ event: 'threads_wakeup_failed' })); }
       }
       return response;
     }
