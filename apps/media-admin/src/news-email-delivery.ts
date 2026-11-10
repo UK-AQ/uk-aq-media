@@ -8,6 +8,7 @@ interface DeliveryRow {
   subscription_id: string;
   delivery_mode: string;
   state: string;
+  display_state: string;
   created_at: string;
   sent_at: string | null;
   failed_at: string | null;
@@ -26,7 +27,7 @@ interface OutboxRow {
   attempt_count: number;
   error_class: string | null;
 }
-interface SummaryRow { delivery_mode: string; state: string; count: number }
+interface SummaryRow { delivery_mode: string; state: string; display_state: string; count: number }
 
 function integerParameter(url: URL, name: string, fallback: number, min: number, max: number): number {
   const raw = url.searchParams.get(name);
@@ -39,9 +40,9 @@ function integerParameter(url: URL, name: string, fallback: number, min: number,
 
 // SQL produces only these fixed codes; no raw SMTP/provider text enters a response.
 const deliveryError = `CASE
-  WHEN last_error IS NULL THEN NULL
-  WHEN last_error IN ('digest_size_requires_operator','stale_smtp_claim',
-    'stale_pre_submission_claim','temporary_failure','permanent_failure','unknown') THEN last_error
+  WHEN d.last_error IS NULL THEN NULL
+  WHEN d.last_error IN ('digest_size_requires_operator','stale_smtp_claim',
+    'stale_pre_submission_claim','temporary_failure','permanent_failure','unknown') THEN d.last_error
   ELSE 'unavailable' END AS error_class`;
 const outboxError = `CASE
   WHEN last_error IS NULL THEN NULL
@@ -77,20 +78,31 @@ export async function readNewsEmailDelivery(request: Request, url: URL, env: Pic
     const start = new Date(end.getTime() - days * 86400000).toISOString();
     const bounds = [start, end.toISOString()];
     const values = subscription === null ? bounds : [...bounds, subscription.toLowerCase()];
-    const deliveryWhere = `created_at >= ? AND created_at <= ?${subscription === null ? '' : ' AND subscription_id = ?'}`;
+    const deliveryWhere = `d.created_at >= ? AND d.created_at <= ?${subscription === null ? '' : ' AND d.subscription_id = ?'}`;
     // The existing Work JSON has an opaque subscription_id. Never return payload or
     // infer recipient identity from job IDs, tokens, generation IDs or message IDs.
     const outboxWhere = `created_at >= ? AND created_at <= ?${subscription === null ? '' : " AND json_extract(payload,'$.subscription_id') = ?"}`;
+    // The stored delivery state remains 'cancelled'. Only a completed, zero-article
+    // Daily window with no digest error receives the 'no_articles' display label.
+    const emptyDaily = `d.delivery_mode='daily' AND d.state='cancelled' AND d.retry_hold=0
+      AND r.state='completed' AND r.item_count=0 AND r.last_error IS NULL`;
+    const sourceState = `CASE WHEN d.retry_hold=1 THEN 'held' ELSE d.state END`;
+    const displayState = `CASE WHEN ${emptyDaily} THEN 'no_articles' ELSE d.state END`;
+    const summaryDisplayState = `CASE WHEN d.retry_hold=1 THEN 'held' ELSE ${displayState} END`;
     const [summary, deliveries, outbox] = await Promise.all([
-      env.MEDIA_DB.prepare(`SELECT delivery_mode,
-        CASE WHEN retry_hold = 1 THEN 'held' ELSE state END AS state, count(*) AS count
-        FROM media_news_email_deliveries WHERE ${deliveryWhere}
-        GROUP BY delivery_mode, CASE WHEN retry_hold = 1 THEN 'held' ELSE state END
-        ORDER BY delivery_mode, state LIMIT 24`).bind(...values).all<SummaryRow>(),
-      env.MEDIA_DB.prepare(`SELECT id, subscription_id, delivery_mode, state, created_at,
-        sent_at, failed_at, attempt_count, selected_transport, attempt_transport, retry_hold,
-        ${deliveryError} FROM media_news_email_deliveries WHERE ${deliveryWhere}
-        ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      env.MEDIA_DB.prepare(`SELECT d.delivery_mode, ${sourceState} AS state,
+        ${summaryDisplayState} AS display_state, count(*) AS count
+        FROM media_news_email_deliveries d
+        LEFT JOIN media_news_digest_runs r ON r.id=d.digest_run_id
+        WHERE ${deliveryWhere}
+        GROUP BY d.delivery_mode, ${sourceState}, ${summaryDisplayState}
+        ORDER BY d.delivery_mode, display_state LIMIT 24`).bind(...values).all<SummaryRow>(),
+      env.MEDIA_DB.prepare(`SELECT d.id, d.subscription_id, d.delivery_mode, d.state,
+        ${displayState} AS display_state, d.created_at, d.sent_at, d.failed_at,
+        d.attempt_count, d.selected_transport, d.attempt_transport, d.retry_hold,
+        ${deliveryError} FROM media_news_email_deliveries d
+        LEFT JOIN media_news_digest_runs r ON r.id=d.digest_run_id WHERE ${deliveryWhere}
+        ORDER BY d.created_at DESC, d.id DESC LIMIT ? OFFSET ?`)
         .bind(...values, limit + 1, offset).all<DeliveryRow>(),
       env.MEDIA_DB.prepare(`SELECT id, work_type, state, created_at, queued_at, attempt_count,
         ${outboxError} FROM media_news_email_outbox WHERE ${outboxWhere}

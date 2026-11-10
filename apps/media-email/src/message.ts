@@ -6,9 +6,10 @@ import { httpsOrigin } from './config.mjs';
 
 export interface Message { kind:string; text:string; html:string; manage_url?:string; unsubscribe_url?:string }
 export interface Submission extends Message { to:string; message_id:string; date:string; eligibility?:RecipientEligibility }
+const IMMEDIATE_DEFAULT_SUBJECT='AQ in the News: New article';
 const subjects:Record<string,string> = {
   confirmation:'Confirm your AQ in the News subscription',
-  immediate:'AQ in the News: New article', daily:'Your daily AQ in the News update',
+  immediate:IMMEDIATE_DEFAULT_SUBJECT, daily:'Your daily AQ in the News update',
 };
 export const MAX_MIME_BYTES=250000;
 export const MAX_FALLBACK_REQUEST_BYTES=200000;
@@ -25,17 +26,58 @@ function base64Part(type:string,value:string):string {
   const body=Buffer.from(crlf(value),'utf8').toString('base64').match(/.{1,76}/g)?.join('\r\n')??'';
   return `Content-Type: ${type}; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${body}\r\n`;
 }
+
+function subjectPart(value:string):string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,' ')
+    .replace(/\s+/gu,' ').trim();
+}
+// Reuse the existing single-article plain-text format, without changing the
+// optional Pro sender's authenticated JSON request schema. Malformed article
+// metadata retains the legacy subject rather than interrupting a delivery.
+function immediateSubject(text:string):string {
+  const prefix='AQ in the News\n\n', footer='\n\nView all AQ in the News: ';
+  if(!text.startsWith(prefix)) return IMMEDIATE_DEFAULT_SUBJECT;
+  const end=text.lastIndexOf(footer);
+  if(end<=prefix.length) return IMMEDIATE_DEFAULT_SUBJECT;
+  const article=text.slice(prefix.length,end);
+  const readAt=article.lastIndexOf('\nRead original article: ');
+  if(readAt<0) return IMMEDIATE_DEFAULT_SUBJECT;
+  const heading=article.slice(0,readAt), splitAt=heading.lastIndexOf('\n');
+  if(splitAt<1) return IMMEDIATE_DEFAULT_SUBJECT;
+  const title=subjectPart(heading.slice(0,splitAt));
+  const publisher=subjectPart(heading.slice(splitAt+1).replace(/ · \d{2}\/\d{2}\/\d{4}$/,''));
+  return title && publisher?title+' | '+publisher+' | AQ in the News':IMMEDIATE_DEFAULT_SUBJECT;
+}
+// Fold immediate Subject as RFC 2047 UTF-8 encoded-words, each at most 68
+// characters (77 including the initial "Subject: " header field name).
+function subjectHeader(kind:string,text:string):string|undefined {
+  const subject=kind==='immediate'?immediateSubject(text):subjects[kind];
+  if(!subject) return undefined;
+  if(kind!=='immediate') return subject;
+  const words:string[]=[]; let chunk='', byteCount=0;
+  for(const character of subject) {
+    const bytes=encoder.encode(character).length;
+    if(chunk && byteCount+bytes>42) {
+      words.push('=?UTF-8?B?'+Buffer.from(chunk,'utf8').toString('base64')+'?=');
+      chunk=''; byteCount=0;
+    }
+    chunk+=character; byteCount+=bytes;
+  }
+  if(chunk) words.push('=?UTF-8?B?'+Buffer.from(chunk,'utf8').toString('base64')+'?=');
+  return words.join('\r\n ');
+}
+
 export function fallbackRequest(message:Submission):string {
   const body=JSON.stringify(message);
   if(encoder.encode(body).length>MAX_FALLBACK_REQUEST_BYTES) throw new MessageSizeError();
   return body;
 }
 
-// Fixed ASCII headers; all editorial UTF-8 appears only in base64 MIME bodies.
+// Immediate subjects use RFC 2047 UTF-8; Daily and confirmation remain fixed ASCII.
 // Alternative plain text / related HTML keeps branding attached to the HTML part.
 export function serialize(env:Env,message:Submission):string {
   if(!normalizeSupportedMailbox(message.to)) throw new Error('invalid_news_message');
-  const subject=Object.hasOwn(subjects,message.kind)?subjects[message.kind]:undefined;
+  const subject=subjectHeader(message.kind,message.text);
   const date=new Date(message.date);
   if(!subject || !/^<news\.[a-f0-9]{64}@ukaq\.co\.uk>$/.test(message.message_id) ||
     !Number.isFinite(date.getTime()) || !message.text.startsWith('AQ in the News\n') ||

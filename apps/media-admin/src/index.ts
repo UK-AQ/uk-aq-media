@@ -20,6 +20,7 @@ import {
 import { handleEditorialDashboard } from './editorial-dashboard';
 import { readNewsEmailDelivery } from './news-email-delivery';
 import { handleThreadsAdmin, wakeThreads } from './threads';
+import { handleSyndicationAdmin } from './syndication';
 import { readMediaHealth } from './health';
 import { handleResearchTopicsAdmin } from './research-topics';
 import { directPublishState, facebookEligibility, requireFacebookEligibility } from './direct-publish-eligibility';
@@ -1371,6 +1372,8 @@ export default {
       // MEDIA_SYNC_TOKEN is reserved for future read-only sync routes; never accepted here.
       if (!await bearerMatches(request, env.UK_AQ_MEDIA_ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
       authenticated = true;
+      const syndicationResponse = await handleSyndicationAdmin(request, url, env.MEDIA_DB);
+      if (syndicationResponse) return syndicationResponse;
       if (url.pathname === '/admin/bluesky/settings') return await blueskySettings(request, env);
       if (url.pathname === '/admin/facebook/settings') return await facebookSettings(request, env);
       if (url.pathname === '/admin/facebook/connection-check') {
@@ -1493,6 +1496,7 @@ export default {
       return httpFailure(error);
     } finally {
       if (authenticated && request.method === 'POST' && ctx &&
+          !new URL(request.url).pathname.startsWith('/admin/syndication') &&
           !new URL(request.url).pathname.startsWith('/admin/source-domain-blocks')) {
         ctx.waitUntil(wakeNewsEmailOutbox(env));
       }

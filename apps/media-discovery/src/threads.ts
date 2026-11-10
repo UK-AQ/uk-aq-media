@@ -5,6 +5,7 @@ import { reconcileThreadsAutomaticEvents } from './threads-automatic';
 const BASE = `https://graph.threads.net/${THREADS_API_VERSION}`;
 const STALE_MS = 10 * 60 * 1000;
 const MAX_DELAY = 43_200;
+const WAKE_RECOVERY_MS = 10 * 60 * 1000;
 // Use the stored reason at scheduling, claim and BOTH remote mutation boundaries.
 // Disabled automatic work must never sit in front of enabled manual work.
 const REASON_ENABLED_SQL = `(s.capture_only_enabled = 0 AND media_threads_publications.capture_only = 0 AND
@@ -218,8 +219,42 @@ async function schedule(env: MediaDiscoveryEnv): Promise<void> {
   const due = posting?.at ? Date.parse(posting.at) + STALE_MS
     : Math.max(Date.parse(queued!.at!), s.last_successful_post_at
       ? Date.parse(s.last_successful_post_at) + s.cooldown_seconds * 1000 : 0);
-  await env.MEDIA_THREADS_QUEUE.send({ type: 'threads_wakeup' },
-    { delaySeconds: Math.max(1, Math.min(MAX_DELAY, Math.ceil((due - Date.now()) / 1000))) });
+  const now = Date.now();
+  const delaySeconds = Math.max(1, Math.min(MAX_DELAY, Math.ceil((due - now) / 1000)));
+  // Keep the requested due time stable across repeated reconciliations; the
+  // Queue's integer-second delay may deliver up to one second later.
+  const dueAt = new Date(Math.min(Math.max(due, now + 1000), now + MAX_DELAY * 1000)).toISOString();
+  const leaseUntil = new Date(now + delaySeconds * 1000 + WAKE_RECOVERY_MS).toISOString();
+  // Elect one producer. An earlier new due time may replace a delayed wake;
+  // a lost send is recovered after its lease by the existing scheduler.
+  const claimed = await env.MEDIA_DB.prepare(`UPDATE media_threads_wakeup_schedule
+    SET generation = generation + 1, due_at = ?, lease_expires_at = ?, updated_at = ?
+    WHERE id = 1 AND (due_at IS NULL OR lease_expires_at <= ? OR due_at > ?)
+    RETURNING generation`)
+    .bind(dueAt, leaseUntil, new Date(now).toISOString(), new Date(now).toISOString(), dueAt)
+    .first<{ generation: number }>();
+  if (!claimed) return;
+  try {
+    await env.MEDIA_THREADS_QUEUE.send({ type: 'threads_publication_wakeup',
+      generation: claimed.generation }, { delaySeconds });
+  } catch (error) {
+    await env.MEDIA_DB.prepare(`UPDATE media_threads_wakeup_schedule
+      SET due_at = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = 1 AND generation = ? AND due_at IS NOT NULL`)
+      .bind(new Date().toISOString(), claimed.generation).run();
+    throw error;
+  }
+}
+
+async function claimPublicationWake(db: D1Database, generation: number): Promise<boolean> {
+  // Release the slot before publishOne: its cooldown/retry paths schedule the
+  // next wake. A crash after this claim is recovered by scheduled reconciliation.
+  const now = new Date().toISOString();
+  const claimed = await db.prepare(`UPDATE media_threads_wakeup_schedule
+    SET due_at = NULL, lease_expires_at = NULL, updated_at = ?
+    WHERE id = 1 AND generation = ? AND due_at <= ? RETURNING generation`)
+    .bind(now, generation, now).first();
+  return !!claimed;
 }
 async function recoverAutomaticIntents(env: MediaDiscoveryEnv): Promise<void> {
   if (await reconcileThreadsAutomaticEvents(env.MEDIA_DB)) {
@@ -426,13 +461,21 @@ async function reconcileExact(env: MediaDiscoveryEnv, id: number, key: string): 
 export async function consumeThreads(message: Message<unknown>, env: MediaDiscoveryEnv): Promise<void> {
   const body = record(message.body);
   const keys = Object.keys(body);
+  const publicationWake = body.type === 'threads_publication_wakeup' && keys.length === 2 &&
+    keys.every(key => key === 'type' || key === 'generation') &&
+    Number.isSafeInteger(body.generation) && Number(body.generation) > 0;
   if ((await settings(env.MEDIA_DB))?.capture_only_enabled) {
+    if (publicationWake) {
+      await claimPublicationWake(env.MEDIA_DB, Number(body.generation));
+    }
     if (body.type === 'threads_wakeup' && keys.length === 1) await recoverAutomaticIntents(env);
     // Old identity, reconciliation and publish wake-ups cannot poll Meta in capture.
     message.ack(); return;
   }
   if (body.type === 'threads_identity_check' && keys.length === 1) {
     try { await identityCheck(env); } catch { /* durable bounded connection status */ }
+  } else if (publicationWake) {
+    if (await claimPublicationWake(env.MEDIA_DB, Number(body.generation))) await publishOne(env);
   } else if (body.type === 'threads_wakeup' && keys.length === 1) {
     await recoverAutomaticIntents(env);
     await publishOne(env);

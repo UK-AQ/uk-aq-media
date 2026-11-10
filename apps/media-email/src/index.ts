@@ -12,7 +12,13 @@ import { websiteConfig } from './config.mjs';
 async function scheduler(env:Env):Promise<Response> {
   const at=now(), slot=String(Math.floor(Date.now()/300000));
   await addJob(env,`daily-scan:${slot}`,'daily_scan',{after:'',at});
-  await addJob(env,`confirmation-scan:${slot}`,'confirmation_scan',{after:''});
+  let confirmationsDue=true;
+  try {
+    // The first page is read-only. A later reservation is found on the next tick.
+    const rows=await rpc<unknown>(env,'confirmations',{after:''});
+    confirmationsDue=!(Array.isArray(rows)&&rows.length===0);
+  } catch { /* An unavailable preflight must not suppress durable recovery. */ }
+  if(confirmationsDue) await addJob(env,`confirmation-scan:${slot}`,'confirmation_scan',{after:''});
   // Only claims that may have submitted a body are ambiguous. Refresh/pre-DATA
   // interruptions are safe retries; the durable marker precedes submission.
   await env.MEDIA_DB.prepare(`UPDATE media_news_email_deliveries

@@ -114,4 +114,36 @@ assert.throws(()=>serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
   message_id:`<news.${'a'.repeat(64)}@ukaq.co.uk>`,date:'2026-10-06T08:00:00.000Z',
 }));
 
+
+// Focused subject checks: original headline before publisher, valid RFC 2047
+// encoding for Unicode/long headers, and no change to Daily subjects.
+const headline="Children's health: pollution rises in São Paulo 🔥 " + 'long headline '.repeat(16);
+const immediateArticle={title:headline,publisher:'The Guardian',
+  canonical_url:'https://publisher.example/article',published_at:'2026-10-06T07:00:00.000Z',
+  preview_image_url:null};
+const immediateMessage=articleMessage('https://test.example',[immediateArticle],
+  'immediate',{manage_url:manage,unsubscribe_url:unsubscribe},'2026-10-06T08:00:00.000Z');
+const immediateWire=serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
+  NEWS_EMAIL_PUBLIC_API_ORIGIN:'https://api.example'} as Env,{
+  ...immediateMessage,to:'reader@example.org',
+  message_id:'<news.'+'c'.repeat(64)+'@ukaq.co.uk>',date:'2026-10-06T08:00:00.000Z',
+});
+const subjectLine=/\r\nSubject: ([^\r\n]+(?:\r\n [^\r\n]+)*)\r\n/.exec(immediateWire)?.[1];
+assert.ok(subjectLine);
+const words=[...subjectLine.matchAll(/=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=/g)];
+assert.ok(words.length>1);
+assert.equal(words.map(word=>Buffer.from(word[1]!,'base64').toString('utf8')).join(''),
+  headline.trimEnd()+' | The Guardian | AQ in the News');
+assert.ok(('Subject: '+subjectLine).split('\r\n').every(line=>line.length<=78));
+const multiline=articleMessage('https://test.example',[{...immediateArticle,
+  title:'First line\r\nBcc: hidden@example.org',publisher:'Example Publisher'}],
+  'immediate',{manage_url:manage,unsubscribe_url:unsubscribe},'2026-10-06T08:00:00.000Z');
+const multilineWire=serialize({NEWS_EMAIL_SITE_ORIGIN:'https://test.example',
+  NEWS_EMAIL_PUBLIC_API_ORIGIN:'https://api.example'} as Env,{
+  ...multiline,to:'reader@example.org',
+  message_id:'<news.'+'d'.repeat(64)+'@ukaq.co.uk>',date:'2026-10-06T08:00:00.000Z',
+});
+assert.equal(/\r\nBcc: hidden@example.org\r\n/.test(multilineWire),false);
+assert.match(wire,/\r\nSubject: Your daily AQ in the News update\r\n/);
+
 console.log('AQ in the News email correction checks passed.');

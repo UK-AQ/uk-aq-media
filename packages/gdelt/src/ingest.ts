@@ -1,7 +1,7 @@
 import {
   SourceSchema, canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl,
   blockedPublisherHosts, publisherAdmissionSql,
-  reconcileHomepageLatestSix, type DiscoveredArticle, type Source,
+  reconcileHomepageLatestSix, indexSyndicationHashes, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import {
   mediaDeterministicRelevanceFilter,
@@ -370,6 +370,7 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
     throw error;
   }
   if (promoted > 0 || prepared.some(candidate => existingArticleHashes.has(candidate.canonical_url_hash))) {
+    await indexSyndicationHashes(db, hashes);
     await reconcileHomepageLatestSix(db);
   }
   return { ok: true, replayed: false, candidate_count: prepared.length,

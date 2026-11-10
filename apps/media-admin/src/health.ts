@@ -84,29 +84,12 @@ export async function readMediaHealth(db: D1Database): Promise<unknown> {
   const generatedAt = new Date().toISOString();
   const now = Date.now();
   const start = new Date(now - LOG_WINDOW_MS).toISOString();
-  const runSql = [
-    'WITH ranked AS (',
-    'SELECT source_key, coalesce(discovery_route_key, \'\') AS route_key,',
-    'started_at, status, error_code,',
-    'row_number() OVER (PARTITION BY source_key, coalesce(discovery_route_key, \'\')',
-    'ORDER BY started_at DESC, id DESC) AS rn',
-    'FROM media_discovery_runs WHERE started_at >= ?',
-    ') SELECT source_key, route_key, max(started_at) AS last_attempt_at,',
-    "max(CASE WHEN status = 'succeeded' THEN started_at END) AS last_success_at,",
-    "max(CASE WHEN status = 'failed' THEN started_at END) AS last_failed_at,",
-    'max(CASE WHEN rn = 1 THEN status END) AS latest_status,',
-    'max(CASE WHEN rn = 1 THEN error_code END) AS latest_error_code,',
-    "sum(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failures_in_window",
-    'FROM ranked GROUP BY source_key, route_key',
-  ].join(' ');
-  const sourceKeys = new Set<string>(DIRECT_SOURCE_KEYS);
-  const [sourceData, runData, blueskyData, facebookData, guardianRules] = await Promise.all([
+  const [sourceData, blueskyData, facebookData, guardianRules] = await Promise.all([
     db.prepare('SELECT source_key, name, canonical_domain, source_type, enabled, ' +
       'publication_policy, review_level, priority, discovery_method, discovery_config_json, ' +
       'content_fetch_policy, ai_content_policy, image_policy, search_index_policy ' +
       'FROM media_sources WHERE enabled = 1 AND retired_at IS NULL')
       .all<SourceRow>(),
-    db.prepare(runSql).bind(start).all<RunStat>(),
     // Resolved or deliberately withdrawn automatic attempts remain in the
     // publication history, but must not count as current operational warnings.
     db.prepare("SELECT 'bluesky' AS channel, p.article_id, p.status, p.publication_reason, " +
@@ -126,35 +109,72 @@ export async function readMediaHealth(db: D1Database): Promise<unknown> {
       'ORDER BY updated_at DESC LIMIT 30').all<SocialRow>(),
     loadAuthorRules(db, 'the-guardian'),
   ]);
-  const stats = new Map(runData.results.map(r => [r.source_key + ':' + r.route_key, r]));
-  const sources = [];
-  for (const raw of sourceData.results) {
-    if (!sourceKeys.has(raw.source_key)) continue;
-    const { discovery_config_json, enabled, ...fields } = raw;
-    let source: Source | null = null;
-    try {
-      const candidate = SourceSchema.safeParse({ ...fields, enabled: enabled === 1,
-        discovery_config: JSON.parse(discovery_config_json) });
-      if (candidate.success) source = candidate.data;
-    } catch { /* Invalid source configuration is an operational health error. */ }
-    const isAuto = raw.publication_policy === 'auto_approve' ||
-      raw.source_key === 'the-guardian' &&
-        guardianRules.some(rule => rule.publication_policy === 'auto_approve');
-    const routeKeys = source ? configuredRoutes(source, source.source_key === 'the-guardian'
-      ? scheduledGuardianRouteKeys(source, guardianRules) : []) : [];
+  const configuredSources = sourceData.results.filter(raw => DIRECT_SOURCE_KEYS.has(raw.source_key))
+    .map(raw => {
+      const { discovery_config_json, enabled, ...fields } = raw;
+      let source: Source | null = null;
+      try {
+        const candidate = SourceSchema.safeParse({ ...fields, enabled: enabled === 1,
+          discovery_config: JSON.parse(discovery_config_json) });
+        if (candidate.success) source = candidate.data;
+      } catch { /* Invalid source configuration is an operational health error. */ }
+      const isAuto = raw.publication_policy === 'auto_approve' ||
+        raw.source_key === 'the-guardian' &&
+          guardianRules.some(rule => rule.publication_policy === 'auto_approve');
+      const routeKeys = source ? configuredRoutes(source, source.source_key === 'the-guardian'
+        ? scheduledGuardianRouteKeys(source, guardianRules) : []) : [];
+      return { raw, isAuto, routeKeys };
+    });
+  // Only these routes contribute to the response. Keep invalid configurations
+  // below even when there is no valid route to query. One JSON binding avoids
+  // multiplying D1 statements or bind parameters as configured routes expand.
+  const expectedRoutes = configuredSources.flatMap(({ raw, routeKeys }) =>
+    routeKeys.map(route => [raw.source_key, route === '' ? null : route]));
+  const runData = expectedRoutes.length ? await db.prepare(`
+    WITH expected AS (
+      SELECT DISTINCT json_extract(value, '$[0]') AS source_key,
+        json_extract(value, '$[1]') AS raw_route_key
+      FROM json_each(?)
+    ), stats AS (
+      SELECT e.source_key, e.raw_route_key,
+        max(r.started_at) AS last_attempt_at,
+        max(CASE WHEN r.status = 'succeeded' THEN r.started_at END) AS last_success_at,
+        max(CASE WHEN r.status = 'failed' THEN r.started_at END) AS last_failed_at,
+        sum(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) AS failures_in_window
+      FROM expected e
+      LEFT JOIN media_discovery_runs r ON r.source_key = e.source_key
+        AND r.discovery_route_key IS e.raw_route_key AND r.started_at >= ?
+      GROUP BY e.source_key, e.raw_route_key
+    )
+    SELECT s.source_key, coalesce(s.raw_route_key, '') AS route_key,
+      s.last_attempt_at, s.last_success_at, s.last_failed_at,
+      latest.status AS latest_status, latest.error_code AS latest_error_code,
+      s.failures_in_window
+    FROM stats s
+    LEFT JOIN media_discovery_runs latest ON latest.id = (
+      SELECT r.id FROM media_discovery_runs r
+      WHERE r.source_key = s.source_key AND r.discovery_route_key IS s.raw_route_key
+        AND r.started_at = s.last_attempt_at
+      ORDER BY r.id DESC LIMIT 1
+    )`).bind(JSON.stringify(expectedRoutes), start).all<RunStat>() : null;
+  // Raw NULL route keys are the schema's representation of the AQN default
+  // route; normalise only the output so the existing source/route/time index
+  // can serve both the aggregate and deterministic latest-id lookup.
+  const stats = new Map(runData?.results.map(r => [r.source_key + ':' + r.route_key, r]));
+  const sources = configuredSources.map(({ raw, isAuto, routeKeys }) => {
     const routes = routeKeys.map(route_key => {
       const result = healthForRoute(stats.get(raw.source_key + ':' + route_key), now);
       return { ...result, source_key: raw.source_key, route_key };
     });
     const invalidConfig = !routeKeys.length;
-    sources.push({
+    return {
       source_key: raw.source_key, name: raw.name, publication_policy: raw.publication_policy,
       auto_approval: isAuto, status: invalidConfig || routes.some(r => r.status === 'critical')
         ? 'critical' : routes.some(r => r.status === 'warning') ? 'warning' : 'healthy',
       reason: invalidConfig ? 'not_scheduled_configuration_mismatch' : null,
       routes,
-    });
-  }
+    };
+  });
   const social = [...blueskyData.results, ...facebookData.results]
     .map(row => ({
       ...row, severity: row.status === 'failed' || row.status === 'unknown_remote_state'

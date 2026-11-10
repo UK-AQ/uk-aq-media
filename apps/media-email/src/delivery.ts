@@ -8,7 +8,7 @@ import { publicPreviewImageUrl, type PublicPreviewSelection } from '@uk-aq-media
 import { submit } from './transport';
 import { httpsOrigin } from './config.mjs';
 type Article = Omit<EmailArticle,'preview_image_url'> & PublicPreviewSelection;
-const articleColumns=`a.id,a.source_key,coalesce(a.display_title,a.title) AS title,
+const articleColumns=`a.id,a.source_key,a.title AS title,
   a.publisher,a.canonical_url,a.published_at,a.og_image_url,
   a.image_policy AS article_image_policy,s.image_policy AS source_image_policy,
   li.source_image_url AS local_image_source_url,li.content_sha256 AS local_image_content_sha256`;

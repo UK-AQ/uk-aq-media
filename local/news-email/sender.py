@@ -16,6 +16,7 @@ import sqlite3
 import ssl
 import time
 from datetime import datetime, timezone, timedelta
+from email.header import Header
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -51,6 +52,34 @@ def text_part(content_type, value):
             f'{base64_lines(crlf(value).encode("utf-8"))}\r\n')
 
 
+
+def subject_part(value):
+    value = re.sub(r'[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]', ' ', value)
+    return ' '.join(value.split())
+
+
+def immediate_subject(text):
+    """Use the unchanged single-article text format; older senders stay compatible."""
+    prefix = 'AQ in the News\n\n'
+    footer = '\n\nView all AQ in the News: '
+    if not text.startswith(prefix):
+        return SUBJECTS['immediate']
+    end = text.rfind(footer)
+    if end <= len(prefix):
+        return SUBJECTS['immediate']
+    article = text[len(prefix):end]
+    read_at = article.rfind('\nRead original article: ')
+    if read_at < 0:
+        return SUBJECTS['immediate']
+    heading = article[:read_at]
+    split_at = heading.rfind('\n')
+    if split_at < 1:
+        return SUBJECTS['immediate']
+    title = subject_part(heading[:split_at])
+    publisher = subject_part(re.sub(r' · \d{2}/\d{2}/\d{4}$', '', heading[split_at + 1:]))
+    return f'{title} | {publisher} | AQ in the News' if title and publisher else SUBJECTS['immediate']
+
+
 def compose(data):
     if set(data) - {'kind', 'to', 'text', 'html', 'message_id', 'date', 'manage_url', 'unsubscribe_url', 'eligibility'}:
         raise ValueError('unexpected fields')
@@ -78,8 +107,10 @@ def compose(data):
         raise ValueError('invalid date')
     alternative = 'news-alt-' + data['message_id'][6:46]
     related = 'news-related-' + data['message_id'][6:46]
+    subject = (Header(immediate_subject(text), 'utf-8', header_name='Subject', maxlinelen=78).encode(linesep='\r\n')
+               if kind == 'immediate' else SUBJECTS[kind])
     headers = [f'From: UK AQ News <{FROM}>', f'Reply-To: {FROM}',
-               f'To: <{recipient}>', f'Subject: {SUBJECTS[kind]}',
+               f'To: <{recipient}>', f'Subject: {subject}',
                f'Date: {format_datetime(date)}', f'Message-ID: {data["message_id"]}',
                'MIME-Version: 1.0',
                f'Content-Type: multipart/alternative;\r\n boundary="{alternative}"']

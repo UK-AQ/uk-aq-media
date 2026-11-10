@@ -11,6 +11,7 @@ const MAX_PERMALINK_LENGTH = 2048;
 const MAX_ERROR_CODE_LENGTH = 100;
 export const FACEBOOK_STALE_CLAIM_MS = 10 * 60 * 1000;
 export const FACEBOOK_MAX_QUEUE_DELAY_SECONDS = 43_200;
+const FACEBOOK_WAKE_RECOVERY_MS = 10 * 60 * 1000;
 
 export type FacebookFailureKind = 'definite_pre_dispatch' | 'known_safe_retry' | 'blocked' |
   'unknown_remote_state' | 'local_state_conflict';
@@ -369,6 +370,7 @@ async function holdFacebookKnownIdReconciliation(db: D1Database, id: number,
 const FACEBOOK_MAX_ATTEMPTS = 5;
 
 type FacebookQueueMessage = { type: 'facebook_wakeup'; publication_id?: number } |
+  { type: 'facebook_publication_wakeup'; generation: number } |
   { type: 'facebook_identity_check' };
 
 function parseFacebookMessage(value: unknown): FacebookQueueMessage | null {
@@ -376,6 +378,11 @@ function parseFacebookMessage(value: unknown): FacebookQueueMessage | null {
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
   if (record.type === 'facebook_identity_check' && keys.length === 1) return { type: record.type };
+  if (record.type === 'facebook_publication_wakeup' && keys.length === 2 &&
+      keys.every(key => key === 'type' || key === 'generation') &&
+      Number.isSafeInteger(record.generation) && Number(record.generation) > 0) {
+    return { type: record.type, generation: Number(record.generation) };
+  }
   if (record.type !== 'facebook_wakeup' || keys.some(key => key !== 'type' && key !== 'publication_id')) return null;
   if (record.publication_id === undefined) return { type: record.type };
   return Number.isSafeInteger(record.publication_id) && Number(record.publication_id) > 0
@@ -427,7 +434,7 @@ function validSettings(settings: FacebookSettings | null): settings is FacebookS
     settings.cooldown_seconds <= 86_400;
 }
 
-async function nextFacebookWakeDelay(db: D1Database, settings: FacebookSettings,
+async function nextFacebookWakeDue(db: D1Database, settings: FacebookSettings,
   nowMs: number): Promise<number | null> {
   // Any active claim is a global barrier. Its stale boundary owns the next
   // wake even when an older queued row is already due.
@@ -436,9 +443,7 @@ async function nextFacebookWakeDelay(db: D1Database, settings: FacebookSettings,
     .first<{ claimed_at: string | null }>();
   if (posting?.claimed_at) {
     const claimedMs = Date.parse(posting.claimed_at);
-    const staleMs = Number.isFinite(claimedMs) ? claimedMs + FACEBOOK_STALE_CLAIM_MS : nowMs;
-    return Math.max(0, Math.min(FACEBOOK_MAX_QUEUE_DELAY_SECONDS,
-      Math.ceil((staleMs - nowMs) / 1000)));
+    return Number.isFinite(claimedMs) ? claimedMs + FACEBOOK_STALE_CLAIM_MS : nowMs;
   }
 
   const queued = await db.prepare(`SELECT MIN(COALESCE(next_attempt_at, created_at)) AS due_at
@@ -450,15 +455,50 @@ async function nextFacebookWakeDelay(db: D1Database, settings: FacebookSettings,
   if (settings.last_successful_post_at) {
     dueMs = Math.max(dueMs, Date.parse(settings.last_successful_post_at) + settings.cooldown_seconds * 1000);
   }
-  return Math.max(0, Math.min(FACEBOOK_MAX_QUEUE_DELAY_SECONDS, Math.ceil((dueMs - nowMs) / 1000)));
+  return dueMs;
 }
 
 async function scheduleNextFacebookWake(env: MediaDiscoveryEnv,
   settings: FacebookSettings): Promise<void> {
-  const delaySeconds = await nextFacebookWakeDelay(env.MEDIA_DB, settings, Date.now());
-  if (delaySeconds !== null) {
-    await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_wakeup' }, { delaySeconds });
+  const dueMs = await nextFacebookWakeDue(env.MEDIA_DB, settings, Date.now());
+  if (dueMs === null) return;
+  const nowMs = Date.now();
+  const boundedDueMs = Math.min(Math.max(dueMs, nowMs + 1000),
+    nowMs + FACEBOOK_MAX_QUEUE_DELAY_SECONDS * 1000);
+  const delay = Math.ceil((boundedDueMs - nowMs) / 1000);
+  const at = new Date(nowMs).toISOString();
+  const dueAt = new Date(boundedDueMs).toISOString();
+  const leaseUntil = new Date(nowMs + delay * 1000 + FACEBOOK_WAKE_RECOVERY_MS).toISOString();
+  // A single producer owns the earliest wake; an earlier due time or expired
+  // lease replaces it. The generation makes any displaced message harmless.
+  const claimed = await env.MEDIA_DB.prepare(`UPDATE media_facebook_wakeup_schedule
+    SET generation = generation + 1, due_at = ?, lease_expires_at = ?, updated_at = ?
+    WHERE id = 1 AND (due_at IS NULL OR lease_expires_at <= ? OR due_at > ?)
+    RETURNING generation`)
+    .bind(dueAt, leaseUntil, at, at, dueAt)
+    .first<{ generation: number }>();
+  if (!claimed) return;
+  try {
+    await env.MEDIA_FACEBOOK_QUEUE.send({ type: 'facebook_publication_wakeup',
+      generation: claimed.generation }, { delaySeconds: delay });
+  } catch (error) {
+    await env.MEDIA_DB.prepare(`UPDATE media_facebook_wakeup_schedule
+      SET due_at = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = 1 AND generation = ? AND due_at IS NOT NULL`)
+      .bind(new Date().toISOString(), claimed.generation).run();
+    throw error;
   }
+}
+
+async function claimFacebookWake(db: D1Database, generation: number): Promise<boolean> {
+  // Release before publishOne so its cooldown and retry paths can schedule
+  // another wake. Scheduled reconciliation recovers a crash after this claim.
+  const now = new Date().toISOString();
+  const claimed = await db.prepare(`UPDATE media_facebook_wakeup_schedule
+    SET due_at = NULL, lease_expires_at = NULL, updated_at = ?
+    WHERE id = 1 AND generation = ? AND due_at <= ? RETURNING generation`)
+    .bind(now, generation, now).first();
+  return !!claimed;
 }
 
 export async function reconcileFacebookQueue(env: MediaDiscoveryEnv): Promise<void> {
@@ -583,6 +623,11 @@ export async function consumeFacebook(message: Message<unknown>, env: MediaDisco
   if (parsed.type === 'facebook_identity_check') {
     try { await checkIdentity(env); }
     catch { /* Durable bounded connection state is the result; Queue retry is unnecessary. */ }
+    message.ack();
+    return;
+  }
+  if (parsed.type === 'facebook_publication_wakeup') {
+    if (await claimFacebookWake(env.MEDIA_DB, parsed.generation)) await publishOne(env);
     message.ack();
     return;
   }

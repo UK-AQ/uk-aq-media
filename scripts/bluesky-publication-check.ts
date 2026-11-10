@@ -1046,6 +1046,8 @@ async function checkThumbnailWaitingCorrection(): Promise<void> {
   sqlite.exec(readFileSync('migrations/0056_threads_manual_publications.sql', 'utf8'));
   sqlite.exec(readFileSync('migrations/0057_threads_automatic_publications.sql', 'utf8'));
   sqlite.exec(readFileSync('migrations/0058_threads_capture_only.sql', 'utf8'));
+  // Runtime homepage reconciliation also uses the additive syndication schema.
+  sqlite.exec(readFileSync('migrations/0059_cross_publisher_syndication_review.sql', 'utf8'));
 
   insertStatusFixture(sqlite, 603, 'approved', false, 'trusted_source_auto');
   insertStatusFixture(sqlite, 604, 'approved', true, 'trusted_source_auto');

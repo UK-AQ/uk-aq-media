@@ -40,6 +40,8 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
     route_key: z.string().min(1).max(100).optional(),
   }).strict(),
   z.object({ type: z.literal('article_enrich'), article_id: z.number().int().positive() }).strict(),
+  z.object({ type: z.literal('syndication_index'),
+    hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(10) }).strict(),
 ]);
 export type DiscoveryMessage = z.infer<typeof DiscoveryMessageSchema>;
 export { ScanError } from './rss';
@@ -378,7 +380,8 @@ function safeD1Failure(error: unknown): SafeD1Failure {
 }
 
 export async function runSourceScan(db: D1Database, sourceKey: string, routeKey: string | undefined,
-  messageId: string, attempt: number, displayTitleAi?: DisplayTitleAiRuntime): Promise<void> {
+  messageId: string, attempt: number, displayTitleAi?: DisplayTitleAiRuntime,
+  enqueueSyndication?: (hashes: string[]) => Promise<void>): Promise<void> {
   const runId = crypto.randomUUID();
   const started = new Date().toISOString();
   // Resolve the FK inside SQL, so malformed/unknown source messages can still have diagnostics.
@@ -580,6 +583,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       statements: statements.length,
     };
     await db.batch(statements);
+    if (enqueueSyndication && acceptedHashes.length) {
+      try { await enqueueSyndication(acceptedHashes); }
+      catch { console.warn(JSON.stringify({ event: 'syndication_metadata_enqueue_failed' })); }
+    }
     // Body indexing is separately permission-gated and best effort: discovery remains valid if
     // derived-index refresh fails. Feed HTML is never written to durable storage.
     if (source.search_index_policy === 'feed_body_text') {

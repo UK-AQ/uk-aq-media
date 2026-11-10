@@ -1,4 +1,4 @@
-import { allTopicsPredicate, selectedTopicSlugs, boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, meaningfulSearchTerms, MAX_SEARCH_QUERY_CHARACTERS, reconcileHomepageLatestSix, remotePreviewUrl, currentLocalImageVersion, permittedStoredImageUrl, publicPreviewImageUrl,
+import { allTopicsPredicate, selectedTopicSlugs, boundedLimit, fetchRemotePreviewImage, guardianRemotePreviewUrl, publicSyndicationVisibilitySql, homepageLatestSixSnapshot, homepageLatestSixState, HttpError, httpFailure, json, meaningfulSearchTerms, MAX_SEARCH_QUERY_CHARACTERS, reconcileHomepageLatestSix, remotePreviewUrl, currentLocalImageVersion, permittedStoredImageUrl, publicPreviewImageUrl,
   type PublicArticle } from '@uk-aq-media/core';
 import { imageCacheVersion, versionedArticleImageUrl } from './image-cache-version';
 import { handleResearchPublic } from './research';
@@ -123,7 +123,7 @@ async function articleSearch(url: URL, env: MediaPublicEnv): Promise<Response> {
     li.content_sha256 AS local_image_content_sha256
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     LEFT JOIN media_article_local_images li ON li.article_id = a.id
-    WHERE a.status = 'approved'
+    WHERE a.status = 'approved' AND ${publicSyndicationVisibilitySql('a')}
       AND NOT EXISTS (SELECT 1 FROM json_each(?) term WHERE NOT (${clauses}))
       ${selectedTopics.length ? `AND ${allTopicsPredicate('a', 'media_article_topics')}` : ''}
       ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
@@ -161,7 +161,7 @@ async function homepageRows(db: D1Database): Promise<HomepageRow[]> {
       li.content_sha256 AS local_image_content_sha256
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
     LEFT JOIN media_article_local_images li ON li.article_id = a.id
-    WHERE a.status = 'approved'
+    WHERE a.status = 'approved' AND ${publicSyndicationVisibilitySql('a')}
     ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT 6`).all<HomepageRow>();
   return results;
 }
@@ -421,7 +421,7 @@ export default {
         li.content_sha256 AS local_image_content_sha256
         FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
         LEFT JOIN media_article_local_images li ON li.article_id = a.id
-        WHERE a.status = 'approved'
+        WHERE a.status = 'approved' AND ${publicSyndicationVisibilitySql('a')}
         ${selectedTopics.length ? `AND ${allTopicsPredicate('a', 'media_article_topics')}` : ''}
         ${before ? 'AND (a.feed_sort_at, a.id) < (?, ?)' : ''}
         ORDER BY a.feed_sort_at DESC, a.id DESC LIMIT ?`);

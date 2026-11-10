@@ -7,7 +7,8 @@ import {
   publisherRssCooldowns, publisherRssDeliveryGate, ScanError,
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
-import { wakeNewsEmailOutbox, json, loadAuthorRules, loadSource, secretMatches } from '@uk-aq-media/core';
+import { wakeNewsEmailOutbox, json, loadAuthorRules, loadSource, secretMatches,
+  indexSyndicationHashes, SYNDICATION_INDEX_BATCH } from '@uk-aq-media/core';
 import {
   completeGdeltFile, failGdeltRun, finishGdeltRun, ingestGdeltChunk,
   startGdeltFile, startGdeltRun,
@@ -280,6 +281,13 @@ export default {
         message.retry({ delaySeconds: 300 });
         continue;
       }
+      if (parsed.data.type === 'syndication_index') {
+        // Derived metadata only, in its own bounded D1 invocation. Do not run
+        // discovery, AI, email wake-up or social reconciliation for this message.
+        if (await indexSyndicationHashes(env.MEDIA_DB, parsed.data.hashes)) message.ack();
+        else message.retry({ delaySeconds: 300 });
+        continue;
+      }
       try {
         const gate = await publisherRssDeliveryGate(env.MEDIA_DB, parsed.data.source_key,
           parsed.data.route_key, message.timestamp);
@@ -294,7 +302,14 @@ export default {
           continue;
         }
         await runSourceScan(env.MEDIA_DB, parsed.data.source_key, parsed.data.route_key,
-          message.id, message.attempts, configuredDisplayTitleAi(env));
+          message.id, message.attempts, configuredDisplayTitleAi(env), async hashes => {
+            const messages = [];
+            for (let i = 0; i < hashes.length; i += SYNDICATION_INDEX_BATCH) {
+              messages.push({ body: { type: 'syndication_index' as const,
+                hashes: hashes.slice(i, i + SYNDICATION_INDEX_BATCH) } });
+            }
+            await env.MEDIA_DISCOVERY_QUEUE.sendBatch(messages);
+          });
         if (ctx) ctx.waitUntil(wakeNewsEmailOutbox(env));
         await reconcileSocialQueues(env);
         message.ack();
