@@ -18,7 +18,7 @@ const HTML_METADATA_ENTITIES: Readonly<Record<string, string>> = {
   rdquo: '”', reg: '®', rsquo: '’', trade: '™', yen: '¥',
 };
 
-function decodeHtmlEntities(value: string): string {
+export function decodeHtmlEntities(value: string): string {
   return value.replace(/&(#(?:x[0-9a-f]+|\d+)|[a-z][a-z0-9]+);/gi, (entity, key: string) => {
     if (key[0] !== '#') return HTML_METADATA_ENTITIES[key.toLowerCase()] ?? entity;
     const hexadecimal = key[1]?.toLowerCase() === 'x';
@@ -33,7 +33,7 @@ function decodeHtmlEntities(value: string): string {
   });
 }
 
-function normaliseMetadataText(value: string): string {
+export function normaliseMetadataText(value: string): string {
   return decodeHtmlEntities(value).replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ').trim().slice(0, 1000);
 }

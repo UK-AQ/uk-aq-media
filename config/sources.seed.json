@@ -552,6 +552,31 @@
     "search_index_policy": "metadata_only"
   },
   {
+    "source_key": "global-action-plan",
+    "name": "Global Action Plan",
+    "canonical_domain": "globalactionplan.org.uk",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "sitemap",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "global-action-plan-news",
+          "url": "https://www.globalactionplan.org.uk/latest/news",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
     "source_key": "climate-with-brian",
     "name": "Climate Thoughts with Brian",
     "canonical_domain": "climatewithbrian.com",

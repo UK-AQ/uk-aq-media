@@ -1,7 +1,9 @@
 import {
-  DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
-  CAWS_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_INDEX_ROUTE_KEY, configuredCawsIndex,
-  configuredCleanAirFundIndex, configuredDsawspIndex,
+  processReviewEvidence, scheduleReviewEvidence, DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
+  CAWS_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY,
+  configuredCawsIndex, configuredCleanAirFundIndex, configuredCleanAirFundResources,
+  configuredDsawspIndex,
+  configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY, GLOBAL_ACTION_PLAN_SOURCE_KEY,
   configuredNcasRouteKeys, configuredPublisherRssRouteKeys, DSAWSP_INDEX_ROUTE_KEY,
   scheduledGuardianRouteKeys,
   publisherRssCooldowns, publisherRssDeliveryGate, ScanError,
@@ -17,6 +19,11 @@ import { GDELT_MAX_INGEST_BODY_BYTES } from '@uk-aq-media/gdelt';
 import { consumeBluesky, reconcileBlueskyQueue } from './bluesky';
 import { consumeFacebook, reconcileFacebookQueue } from './facebook';
 import { consumeThreads, reconcileThreadsQueue } from './threads';
+
+async function scheduleReviews(env: MediaDiscoveryEnv): Promise<void> {
+  try { await scheduleReviewEvidence(env.MEDIA_DB, env.MEDIA_DISCOVERY_QUEUE); }
+  catch { console.warn(JSON.stringify({ event: 'review_evidence_schedule_failed' })); }
+}
 
 async function reconcileSocialQueues(env: MediaDiscoveryEnv): Promise<void> {
   try { await reconcileBlueskyQueue(env); }
@@ -140,7 +147,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
     // Request data never participates in this internally selected, bounded work list.
     const [aqn, guardian, bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
       impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition, mumsForLungs,
-      cleanAirFund, dsawsp, caws, ncas] = await Promise.all([
+      cleanAirFund, dsawsp, caws, ncas, globalActionPlan] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
       loadSource(env.MEDIA_DB, 'bbc-news'),
@@ -159,6 +166,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       loadSource(env.MEDIA_DB, 'dsawsp'),
       loadSource(env.MEDIA_DB, 'communities-against-woodsmoke'),
       loadSource(env.MEDIA_DB, 'ncas'),
+      loadSource(env.MEDIA_DB, GLOBAL_ACTION_PLAN_SOURCE_KEY),
     ]);
     const messages: DiscoveryMessage[] = [];
     const cooldowns = await publisherRssCooldowns(env.MEDIA_DB);
@@ -188,6 +196,10 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       messages.push({ type: 'source_scan', source_key: 'clean-air-fund',
         route_key: CLEAN_AIR_FUND_INDEX_ROUTE_KEY });
     }
+    if (cleanAirFund?.enabled && configuredCleanAirFundResources(cleanAirFund)) {
+      messages.push({ type: 'source_scan', source_key: 'clean-air-fund',
+        route_key: CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY });
+    }
     if (dsawsp?.enabled && configuredDsawspIndex(dsawsp)) {
       messages.push({ type: 'source_scan', source_key: 'dsawsp',
         route_key: DSAWSP_INDEX_ROUTE_KEY });
@@ -200,6 +212,10 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       for (const routeKey of configuredNcasRouteKeys(ncas)) {
         messages.push({ type: 'source_scan', source_key: 'ncas', route_key: routeKey });
       }
+    }
+    if (globalActionPlan && configuredGlobalActionPlanIndex(globalActionPlan)) {
+      messages.push({ type: 'source_scan', source_key: GLOBAL_ACTION_PLAN_SOURCE_KEY,
+        route_key: GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY });
     }
     if (messages.length === 0) return 0;
     await env.MEDIA_DISCOVERY_QUEUE.sendBatch(messages.map(body => ({ body })));
@@ -242,13 +258,14 @@ export default {
     } catch {
       return json({ error: 'discovery_schedule_failed' }, 503);
     } finally {
+      await scheduleReviews(env);
       // Social recovery must not depend on publisher discovery enqueue succeeding.
       await reconcileSocialQueues(env);
     }
   },
   async scheduled(_controller, env): Promise<void> {
     try { await enqueueScheduledDiscovery(env); }
-    finally { await reconcileSocialQueues(env); }
+    finally { await Promise.all([scheduleReviews(env), reconcileSocialQueues(env)]); }
   },
   async queue(batch, env, ctx?: ExecutionContext): Promise<void> {
     if (batch.queue === 'uk-aq-media-threads') {
@@ -279,6 +296,16 @@ export default {
         await recordQueueFailure(env.MEDIA_DB, 'unsupported_discovery_message', message.id, message.attempts);
         console.error(JSON.stringify({ event: 'unsupported_discovery_message', message_id: message.id }));
         message.retry({ delaySeconds: 300 });
+        continue;
+      }
+      if (parsed.data.type === 'article_review_evidence') {
+        try {
+          await processReviewEvidence(env.MEDIA_DB, parsed.data.article_id, parsed.data.token);
+          message.ack();
+        } catch {
+          console.warn(JSON.stringify({ event: 'review_evidence_delivery_failed' }));
+          message.retry({ delaySeconds: 300 });
+        }
         continue;
       }
       if (parsed.data.type === 'syndication_index') {

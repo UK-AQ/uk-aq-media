@@ -351,6 +351,7 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
   const parsed = parseRssItems(xml, maxItems, {
     allow_untyped_image_media_content: true,
     title_context: 'guardian_first_paragraph',
+    review_description: true,
   });
   const articles: DiscoveredArticle[] = [];
   let invalid = parsed.items_invalid;
@@ -371,6 +372,7 @@ export async function parseGuardianFeed(xml: string, source: Source, maxItems: n
       published_at: item.published_at,
       categories: item.categories,
       title_context: item.title_context,
+      review_excerpt: item.review_excerpt,
       preview_url: preview,
       display_title: null,
       display_title_origin: null,

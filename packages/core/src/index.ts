@@ -19,3 +19,4 @@ export { wakeNewsEmailOutbox } from './news-email';
 export * from './source-domain-blocks';
 export * from './research';
 export * from './syndication';
+export * from './review-headline';

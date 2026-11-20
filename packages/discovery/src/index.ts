@@ -13,9 +13,15 @@ import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
 import { discoverAqn } from './aqn';
 import { CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, discoverCaws } from './caws';
 import {
-  CLEAN_AIR_FUND_INDEX_ROUTE_KEY, configuredCleanAirFundIndex, discoverCleanAirFund,
+  CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY,
+  configuredCleanAirFundIndex, configuredCleanAirFundResources,
+  discoverCleanAirFund, discoverCleanAirFundResources,
 } from './clean-air-fund';
 import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
+import {
+  configuredGlobalActionPlanIndex, discoverGlobalActionPlan, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY,
+  GLOBAL_ACTION_PLAN_SOURCE_KEY, hasGlobalActionPlanAirQualityTag,
+} from './global-action-plan';
 import { configuredNcasRouteKeys, discoverNcas, type NcasRouteKey } from './ncas';
 import {
   configuredPublisherRssRouteKeys, discoverPublisherRss, publisherRssArticleAllowed,
@@ -33,6 +39,9 @@ import {
   publicationAuthorRule,
 } from './persistence';
 
+import { recordReviewExcerpts } from './review-evidence';
+export { scheduleReviewEvidence, processReviewEvidence } from './review-evidence';
+
 export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('source_scan'),
@@ -40,6 +49,8 @@ export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
     route_key: z.string().min(1).max(100).optional(),
   }).strict(),
   z.object({ type: z.literal('article_enrich'), article_id: z.number().int().positive() }).strict(),
+  z.object({ type: z.literal('article_review_evidence'), article_id: z.number().int().positive(),
+    token: z.uuid() }).strict(),
   z.object({ type: z.literal('syndication_index'),
     hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(10) }).strict(),
 ]);
@@ -60,8 +71,14 @@ export {
   configuredNcasRouteKeys, discoverNcas, extractNcasIndexCandidates, NCAS_TAG_ROUTES,
 } from './ncas';
 export {
+  configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY, GLOBAL_ACTION_PLAN_SOURCE_KEY,
+} from './global-action-plan';
+export {
   CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_INDEX_URL,
-  configuredCleanAirFundIndex, discoverCleanAirFund, extractCleanAirFundIndexCandidates,
+  CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY, CLEAN_AIR_FUND_RESOURCES_URL,
+  configuredCleanAirFundIndex, configuredCleanAirFundResources,
+  discoverCleanAirFund, discoverCleanAirFundResources,
+  extractCleanAirFundIndexCandidates, extractCleanAirFundResourcesCandidates,
 } from './clean-air-fund';
 export type { NcasRouteKey } from './ncas';
 export {
@@ -456,6 +473,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         routeKey === CLEAN_AIR_FUND_INDEX_ROUTE_KEY &&
         configuredCleanAirFundIndex(source)) {
       result = await discoverCleanAirFund(source, guardedFetcher);
+    } else if (sourceKey === 'clean-air-fund' &&
+        routeKey === CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY &&
+        configuredCleanAirFundResources(source)) {
+      result = await discoverCleanAirFundResources(source, guardedFetcher);
     } else if (sourceKey === 'communities-against-woodsmoke' &&
         routeKey === CAWS_INDEX_ROUTE_KEY &&
         configuredCawsIndex(source)) {
@@ -465,6 +486,9 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     } else if (sourceKey === 'ncas' && routeKey &&
         configuredNcasRouteKeys(source).includes(routeKey as NcasRouteKey)) {
       result = await discoverNcas(source, routeKey as NcasRouteKey, guardedFetcher);
+    } else if (sourceKey === GLOBAL_ACTION_PLAN_SOURCE_KEY &&
+        routeKey === GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY && configuredGlobalActionPlanIndex(source)) {
+      result = await discoverGlobalActionPlan(source, guardedFetcher);
     } else if (routeKey && configuredPublisherRssRouteKeys(source).includes(routeKey)) {
       result = await discoverPublisherRss(source, routeKey, guardedFetcher);
     } else {
@@ -504,13 +528,15 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
-      const publisherRelevant = ![
+      const publisherRelevant = [
         'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp',
         'communities-against-woodsmoke', 'ncas', 'clean-air-fund',
         'healthy-air-coalition',
-      ].includes(sourceKey)
-        ? mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
-          canonical_url: article.canonical_url, categories: article.categories }).relevant : true;
+      ].includes(sourceKey) ||
+        mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
+          canonical_url: article.canonical_url, categories: article.categories }).relevant ||
+        (sourceKey === GLOBAL_ACTION_PLAN_SOURCE_KEY &&
+          hasGlobalActionPlanAirQualityTag(article.categories));
       if ((guardianEvaluation && !guardianEvaluation.accepted) || !publisherRelevant) {
         filtered++;
         continue;
@@ -519,9 +545,12 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       acceptedRules.set(article.canonical_url_hash, matchedRules);
     }
     stage = 'article_metadata';
-    const metadataBlocked = await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
-    filtered += metadataBlocked.size;
-    acceptedArticles = acceptedArticles.filter(article => !metadataBlocked.has(article.canonical_url_hash));
+    // Global Action Plan preview metadata comes from the index cards.
+    if (sourceKey !== GLOBAL_ACTION_PLAN_SOURCE_KEY) {
+      const metadataBlocked = await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
+      filtered += metadataBlocked.size;
+      acceptedArticles = acceptedArticles.filter(article => !metadataBlocked.has(article.canonical_url_hash));
+    }
     const currentBlocked = await blockedPublisherHosts(db,
       acceptedArticles.flatMap(article => [article.canonical_url, article.original_url,
         ...(article.publisher_resolved_urls ?? [])].map(publisherHostname)));
@@ -553,7 +582,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
         db, source, article, matchedRules, now, isNewIdentity,
       );
       if (possibleDuplicateHold) statements.push(possibleDuplicateHold);
-      const providerKey = ['dsawsp', 'communities-against-woodsmoke', 'ncas'].includes(sourceKey)
+      const providerKey = ['dsawsp', 'communities-against-woodsmoke', 'ncas',
+        GLOBAL_ACTION_PLAN_SOURCE_KEY].includes(sourceKey)
         ? 'publisher_web_index' : 'publisher_rss';
       statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
         article, matchedRules, approvalObservationKey, now));
@@ -583,6 +613,8 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       statements: statements.length,
     };
     await db.batch(statements);
+    try { await recordReviewExcerpts(db, sourceKey, acceptedArticles); }
+    catch { console.warn(JSON.stringify({ event: 'review_excerpt_unavailable' })); }
     if (enqueueSyndication && acceptedHashes.length) {
       try { await enqueueSyndication(acceptedHashes); }
       catch { console.warn(JSON.stringify({ event: 'syndication_metadata_enqueue_failed' })); }

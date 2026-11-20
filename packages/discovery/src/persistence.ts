@@ -2,6 +2,7 @@ import {
   initialEditorialState, normaliseArticleAuthorForStorage, publisherAdmissionSql,
   type AuthorRule, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
+import { GLOBAL_ACTION_PLAN_SOURCE_KEY } from './global-action-plan';
 
 export function publicationAuthorRule(rules: AuthorRule[]): AuthorRule | null {
   return rules.find(rule => rule.publication_policy === 'auto_approve') ??
@@ -27,10 +28,12 @@ function possibleDuplicateBindings(source: Source, article: DiscoveredArticle,
     article.published_at, article.published_at, storedAuthor, storedAuthor];
 }
 
-export const ARTICLE_CONFLICT_UPDATE_SQL = `
+const UPDATE_DISCOVERY_TIMESTAMPS_SQL = `
   ON CONFLICT(canonical_url_hash) DO UPDATE SET
     last_seen_at = max(media_articles.last_seen_at, excluded.last_seen_at),
-    updated_at = max(media_articles.updated_at, excluded.updated_at),
+    updated_at = max(media_articles.updated_at, excluded.updated_at)`;
+
+export const ARTICLE_CONFLICT_UPDATE_SQL = `${UPDATE_DISCOVERY_TIMESTAMPS_SQL},
     source_key = CASE WHEN EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
@@ -146,6 +149,9 @@ export function persistArticle(db: D1Database, source: Source, article: Discover
   const editorial = initialEditorialState(source, publicationAuthorRule(matchedRules));
   const storedAuthor = normaliseArticleAuthorForStorage(article.author, source.name);
   const possibleDuplicateCheck = isNewIdentity && editorial.status === 'approved';
+  // Global Action Plan index observations leave previously stored metadata intact.
+  const conflictUpdateSql = source.source_key === GLOBAL_ACTION_PLAN_SOURCE_KEY
+    ? UPDATE_DISCOVERY_TIMESTAMPS_SQL : ARTICLE_CONFLICT_UPDATE_SQL;
   // Conflict updates preserve editorial decisions. Only Pending can be promoted by a later,
   // positively identified trusted-author observation; Rejected/Hidden always win.
   return db.prepare(`WITH possible_duplicate AS (
@@ -168,7 +174,7 @@ export function persistArticle(db: D1Database, source: Source, article: Discover
       CASE WHEN EXISTS (SELECT 1 FROM possible_duplicate) THEN NULL ELSE ? END,
       ?, ?
     WHERE ${publisherAdmissionSql([article.canonical_url, article.original_url, ...(article.publisher_resolved_urls ?? [])])}
-    ${ARTICLE_CONFLICT_UPDATE_SQL}
+    ${conflictUpdateSql}
     RETURNING id, revision`).bind(Number(possibleDuplicateCheck),
       ...possibleDuplicateBindings(source, article, storedAuthor),
       source.source_key, article.canonical_url,

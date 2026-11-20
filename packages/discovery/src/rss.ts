@@ -1,3 +1,4 @@
+import { reviewDescription } from './review-text';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 export const MAX_FEED_BYTES = 1024 * 1024;
@@ -159,6 +160,7 @@ export interface ParsedRssItem {
   published_at: string | null;
   categories: string[];
   title_context: string | null;
+  review_excerpt: string | null;
   preview_candidates: RssPreviewCandidate[];
   content_encoded_preview_url: string | null;
   content_encoded_html: string | null;
@@ -307,6 +309,7 @@ export function parseRssItems(xml: string, maxItems: number,
   options: {
     allow_untyped_image_media_content?: boolean;
     title_context?: TitleContextMode;
+    review_description?: boolean;
     content_encoded_preview?: ContentEncodedPreviewOptions;
     retain_content_encoded?: boolean;
   } = {}): {
@@ -331,7 +334,7 @@ export function parseRssItems(xml: string, maxItems: number,
       'media:thumbnail', 'enclosure'].includes(name),
     updateTag: name => (name === 'content:encoded' && !contentEncodedPreview &&
       !options.retain_content_encoded) ||
-      (name === 'description' && !options.title_context) ? false : name,
+      (name === 'description' && !options.title_context && !options.review_description) ? false : name,
   });
   let parsed: unknown;
   try { parsed = parser.parse(xml); } catch { throw new ScanError('invalid_rss'); }
@@ -369,6 +372,7 @@ export function parseRssItems(xml: string, maxItems: number,
       published_at: Number.isFinite(dateMs) ? new Date(dateMs).toISOString() : null,
       categories: list(item.category).map(value => text(value, 100))
         .filter((category): category is string => category !== null).slice(0, 20),
+      review_excerpt: options.review_description ? reviewDescription(rawDescription(item.description)) : null,
       title_context: titleContext(item.description, options.title_context),
       preview_candidates: rawPreviewCandidates.map(([kind, candidate], rssOrder) =>
         previewCandidate(kind, candidate, rssOrder)),

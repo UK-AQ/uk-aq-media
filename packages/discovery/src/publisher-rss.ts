@@ -155,6 +155,7 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
   const contentEncodedPreviewScanBytes = 'content_encoded_preview_scan_bytes' in expected
     ? expected.content_encoded_preview_scan_bytes : null;
   const parsed = parseRssItems(xml, route.max_items, {
+    review_description: true,
     ...(contentEncodedPreviewScanBytes === null ? {} : { content_encoded_preview: {
       max_scan_bytes: contentEncodedPreviewScanBytes,
       validate_url: candidate => remotePreviewUrl(candidate, source),
@@ -174,6 +175,7 @@ export async function parsePublisherRssFeed(xml: string, source: Source, routeKe
       original_url: item.raw_url, title: item.title,
       author: PUBLISHER_RSS_AUTHOR_POLICIES.get(source.source_key) === 'none' ? null : item.author,
       published_at: item.published_at, categories: item.categories, title_context: null,
+      review_excerpt: item.review_excerpt,
       preview_url: preview, display_title: null, display_title_origin: null,
       preview_metadata_checked_at: null, feed_body_html: item.content_encoded_html });
   }

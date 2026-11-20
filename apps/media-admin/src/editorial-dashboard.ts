@@ -9,12 +9,13 @@ import {
   normaliseArticleAuthorForStorage, publisherHttpsUrl,
   readBoundedImageResponse, reconcileHomepageLatestSix, sourcePresentationPlaceholderPath,
   remotePreviewUrl, storeLocalImage, validateLocalImageBytes, z,
-  SourceSchema,
+  SourceSchema, reviewHeadlineClass,
   type Status,
 } from '@uk-aq-media/core';
 import { directPublishState, facebookEligibility } from './direct-publish-eligibility';
 import {
   configuredCawsIndex, configuredDsawspIndex, configuredNcasRouteKeys,
+  configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_SOURCE_KEY,
   configuredPublisherRssRouteKeys, discoverPublisherRss, fetchArticleHeadMetadata,
 } from '@uk-aq-media/discovery';
 
@@ -526,6 +527,37 @@ function conservativeManualSource(domain: string, name: string, sourceKey: strin
     created_at: now, updated_at: now };
 }
 
+// Secondary, page-sized lookup. A diagnostic outage must leave the editorial list usable.
+async function addReviewEvidence(db: D1Database, rows: Record<string, unknown>[]) {
+  const pending = rows.filter(row => row.status === 'pending');
+  if (!pending.length) return;
+  const evidence = new Map<number, Record<string, unknown>>();
+  let failed = false;
+  try {
+    const result = await db.prepare(`SELECT e.article_id, e.classification, e.status, e.version,
+        e.air, e.quality, e.pollution, e.health, e.method, e.word_count, e.checked_at, e.failure_code,
+        a.title, a.source_key FROM media_article_relevance_evidence e
+        JOIN media_articles a ON a.id = e.article_id
+        WHERE a.status = 'pending' AND e.article_id IN (${placeholders(pending)})`)
+      .bind(...pending.map(row => row.id)).all<Record<string, unknown>>();
+    for (const entry of result.results) evidence.set(Number(entry.article_id), entry);
+  } catch { failed = true; }
+  for (const row of pending) {
+    const classification = reviewHeadlineClass(String(row.title));
+    const entry = evidence.get(Number(row.id));
+    const current = entry && entry.title === row.title && entry.source_key === row.source_key &&
+      entry.classification === classification ? entry : undefined;
+    row.relevance_evidence = {
+      classification, version: current?.version ?? 1,
+      status: current?.status ?? (failed ? 'unavailable' : 'not_checked'),
+      air: current?.air ?? null, quality: current?.quality ?? null,
+      pollution: current?.pollution ?? null, health: current?.health ?? null,
+      method: current?.method ?? null, word_count: current?.word_count ?? null,
+      checked_at: current?.checked_at ?? null, failure_code: current?.failure_code ?? null,
+    };
+  }
+}
+
 async function articleDetail(db: D1Database, id: number, env?: MediaAdminEnv): Promise<Response> {
   const article = await db.prepare(`SELECT a.*, s.name AS source_name,
       s.canonical_domain, s.publication_policy AS source_publication_policy,
@@ -628,6 +660,7 @@ async function articleDetail(db: D1Database, id: number, env?: MediaAdminEnv): P
       ? article.local_image_content_sha256 : null,
   });
   const articleResponse = { ...article };
+  if (env) await addReviewEvidence(db, [articleResponse]);
   for (const key of ['local_image_source_url', 'local_image_content_sha256',
     'local_image_content_type', 'local_image_byte_size', 'local_image_acquisition_method',
     'local_image_stored_at']) delete articleResponse[key];
@@ -927,6 +960,7 @@ async function listArticles(db: D1Database, search: URLSearchParams): Promise<Re
       row.source_image_policy === 'local_copy_permitted' &&
       localSourceUrl === row.og_image_url ? localContentSha256 : row.updated_at };
   });
+  await addReviewEvidence(db, rows);
   const last = rows.at(-1);
   return json({ articles: rows, page: { limit, has_more: hasMore,
     next_cursor: hasMore && last ? encodeCursor(String(last.cursor_value ?? ''), Number(last.id)) : null,
@@ -1511,6 +1545,9 @@ function sourceCanEnable(source: SourceRow,
       if (parsed.data.source_key === 'dsawsp') return configuredDsawspIndex(parsed.data);
       if (parsed.data.source_key === 'ncas') {
         return configuredNcasRouteKeys(parsed.data).length > 0;
+      }
+      if (parsed.data.source_key === GLOBAL_ACTION_PLAN_SOURCE_KEY) {
+        return configuredGlobalActionPlanIndex(parsed.data);
       }
     }
     return false;

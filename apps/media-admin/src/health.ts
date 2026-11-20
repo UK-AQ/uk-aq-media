@@ -3,14 +3,16 @@ import {
   AQN_FEED, configuredPublisherRssRouteKeys, scheduledGuardianRouteKeys,
   configuredCawsIndex, CAWS_INDEX_ROUTE_KEY, configuredDsawspIndex,
   DSAWSP_INDEX_ROUTE_KEY, configuredNcasRouteKeys,
-  CLEAN_AIR_FUND_INDEX_ROUTE_KEY, configuredCleanAirFundIndex, PUBLISHER_RSS_ROUTES,
+  configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY, GLOBAL_ACTION_PLAN_SOURCE_KEY,
+  CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY,
+  configuredCleanAirFundIndex, configuredCleanAirFundResources, PUBLISHER_RSS_ROUTES,
 } from '@uk-aq-media/discovery';
 
 // Mirror the explicit source allow-list in media-discovery's scheduler.
 // This endpoint is read-only and must never enqueue scans or alter publications.
 const DIRECT_SOURCE_KEYS = new Set<string>([
   'air-quality-news', 'the-guardian', 'clean-air-fund',
-  'dsawsp', 'communities-against-woodsmoke', 'ncas',
+  'dsawsp', 'communities-against-woodsmoke', 'ncas', GLOBAL_ACTION_PLAN_SOURCE_KEY,
   // Derive generic RSS publisher coverage from the same allow-list used by discovery.
   // Adding a new RSS publisher can no longer silently omit it from health monitoring.
   ...PUBLISHER_RSS_ROUTES.map(route => route.source_key),
@@ -44,7 +46,10 @@ function configuredRoutes(source: Source, guardianAuto: string[]): string[] {
   }
   if (source.source_key === 'the-guardian') return guardianAuto;
   if (source.source_key === 'clean-air-fund') {
-    return configuredCleanAirFundIndex(source) ? [CLEAN_AIR_FUND_INDEX_ROUTE_KEY] : [];
+    const routes: string[] = [];
+    if (configuredCleanAirFundIndex(source)) routes.push(CLEAN_AIR_FUND_INDEX_ROUTE_KEY);
+    if (configuredCleanAirFundResources(source)) routes.push(CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY);
+    return routes;
   }
   if (source.source_key === 'dsawsp') {
     return configuredDsawspIndex(source) ? [DSAWSP_INDEX_ROUTE_KEY] : [];
@@ -53,6 +58,9 @@ function configuredRoutes(source: Source, guardianAuto: string[]): string[] {
     return configuredCawsIndex(source) ? [CAWS_INDEX_ROUTE_KEY] : [];
   }
   if (source.source_key === 'ncas') return configuredNcasRouteKeys(source);
+  if (source.source_key === GLOBAL_ACTION_PLAN_SOURCE_KEY) {
+    return configuredGlobalActionPlanIndex(source) ? [GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY] : [];
+  }
   return configuredPublisherRssRouteKeys(source);
 }
 
