@@ -625,5 +625,55 @@
     "ai_content_policy": "disabled",
     "image_policy": "remote_preview",
     "search_index_policy": "metadata_only"
+  },
+  {
+    "source_key": "families-for-clean-air",
+    "name": "Families for Clean Air",
+    "canonical_domain": "familiesforcleanair.org",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "sitemap",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "families-for-clean-air-news-index",
+          "url": "https://www.familiesforcleanair.org/news/",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
+  },
+  {
+    "source_key": "breathe-london-communities",
+    "name": "Breathe London Communities",
+    "canonical_domain": "breathelondon-communities.org",
+    "source_type": "publisher",
+    "enabled": true,
+    "publication_policy": "manual",
+    "review_level": "standard",
+    "priority": 50,
+    "discovery_method": "rss",
+    "discovery_config": {
+      "routes": [
+        {
+          "route_key": "breathe-london-communities-news",
+          "url": "https://www.breathelondon-communities.org/news?format=rss",
+          "max_items": 20
+        }
+      ],
+      "retain_excerpt": false
+    },
+    "content_fetch_policy": "discovery_metadata_only",
+    "ai_content_policy": "disabled",
+    "image_policy": "remote_preview",
+    "search_index_policy": "metadata_only"
   }
 ]

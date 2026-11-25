@@ -1,3 +1,11 @@
+Breathe London Communities is an enabled, manual/Standard UK publisher with one bounded
+Squarespace News RSS route (`https://www.breathelondon-communities.org/news?format=rss`, maximum 20 items).
+Its specialist News candidates remain Pending for editorial review. Preview validation allows
+the exact `static1.squarespace.com` site path `/static/67f93e370d213673ed23e496/`
+for this publisher, upgrading its HTTP metadata URLs to HTTPS, and its observed HTTPS
+redirect destination on `images.squarespace-cdn.com` under `/content/67f93e370d213673ed23e496/`.
+Other CDN sites remain excluded. Verify real thumbnail retrieval in TEST before LIVE promotion.
+
 # UK AQ Media
 
 ## DSAWSP publisher source

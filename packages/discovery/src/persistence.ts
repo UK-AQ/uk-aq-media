@@ -57,6 +57,10 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `${UPDATE_DISCOVERY_TIMESTAMPS_SQL},
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id
         AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
+    ) AND NOT EXISTS (
+      SELECT 1 FROM media_article_events edit
+      WHERE edit.article_id = media_articles.id AND edit.event_type = 'edited'
+        AND edit.actor_type = 'admin' AND edit.event_key GLOB 'admin:original-title:*'
     ) THEN excluded.title ELSE media_articles.title END,
     publisher = CASE WHEN EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e

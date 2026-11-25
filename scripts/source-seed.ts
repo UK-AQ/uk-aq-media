@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { SourceSchema, z } from '@uk-aq-media/core';
 
-const sources = z.array(SourceSchema).length(22).parse(
+const sources = z.array(SourceSchema).length(24).parse(
   JSON.parse(readFileSync('config/sources.seed.json', 'utf8')),
 );
 if (new Set(sources.map(s => s.source_key)).size !== sources.length) throw new Error('duplicate_source');
@@ -25,9 +25,9 @@ const historicalDefra = {
 };
 const initialSources = sources.flatMap(source => {
   if (['carbon-brief', 'openaq', 'phys-org', 'university-of-exeter', 'see-the-air',
-    'climate-with-brian', 'healthy-air-coalition', 'dsawsp',
+    'climate-with-brian', 'healthy-air-coalition', 'families-for-clean-air', 'dsawsp',
     'communities-against-woodsmoke', 'mums-for-lungs', 'ncas',
-    'impact-on-urban-health', 'global-action-plan'].includes(source.source_key)) return [];
+    'impact-on-urban-health', 'global-action-plan', 'breathe-london-communities'].includes(source.source_key)) return [];
   const historical = (() => {
   if (source.source_key === 'air-quality-news') {
     return { ...source, content_fetch_policy: 'discovery_metadata_only' as const,

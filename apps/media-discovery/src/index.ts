@@ -4,6 +4,8 @@ import {
   configuredCawsIndex, configuredCleanAirFundIndex, configuredCleanAirFundResources,
   configuredDsawspIndex,
   configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY, GLOBAL_ACTION_PLAN_SOURCE_KEY,
+  configuredFamiliesForCleanAirIndex, FAMILIES_FOR_CLEAN_AIR_INDEX_ROUTE_KEY,
+  FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY,
   configuredNcasRouteKeys, configuredPublisherRssRouteKeys, DSAWSP_INDEX_ROUTE_KEY,
   scheduledGuardianRouteKeys,
   publisherRssCooldowns, publisherRssDeliveryGate, ScanError,
@@ -146,7 +148,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
     // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
     // Request data never participates in this internally selected, bounded work list.
     const [aqn, guardian, bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
-      impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition, mumsForLungs,
+      impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition, familiesForCleanAir, mumsForLungs, breatheLondonCommunities,
       cleanAirFund, dsawsp, caws, ncas, globalActionPlan] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
@@ -161,7 +163,9 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       loadSource(env.MEDIA_DB, 'see-the-air'),
       loadSource(env.MEDIA_DB, 'climate-with-brian'),
       loadSource(env.MEDIA_DB, 'healthy-air-coalition'),
+      loadSource(env.MEDIA_DB, 'families-for-clean-air'),
       loadSource(env.MEDIA_DB, 'mums-for-lungs'),
+      loadSource(env.MEDIA_DB, 'breathe-london-communities'),
       loadSource(env.MEDIA_DB, 'clean-air-fund'),
       loadSource(env.MEDIA_DB, 'dsawsp'),
       loadSource(env.MEDIA_DB, 'communities-against-woodsmoke'),
@@ -180,7 +184,8 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
     // Broad-topic RSS publishers use AQ relevance filtering. Specialist sources
     // apply their existing source-specific inclusion rules; manual ones stay Pending.
     for (const source of [bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
-      impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition, mumsForLungs]) {
+      impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition,
+      mumsForLungs, breatheLondonCommunities]) {
       if (!source?.enabled) continue;
       const notBefore = cooldowns.get(source.source_key);
       if (notBefore) {
@@ -212,6 +217,10 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       for (const routeKey of configuredNcasRouteKeys(ncas)) {
         messages.push({ type: 'source_scan', source_key: 'ncas', route_key: routeKey });
       }
+    }
+    if (familiesForCleanAir && configuredFamiliesForCleanAirIndex(familiesForCleanAir)) {
+      messages.push({ type: 'source_scan', source_key: FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY,
+        route_key: FAMILIES_FOR_CLEAN_AIR_INDEX_ROUTE_KEY });
     }
     if (globalActionPlan && configuredGlobalActionPlanIndex(globalActionPlan)) {
       messages.push({ type: 'source_scan', source_key: GLOBAL_ACTION_PLAN_SOURCE_KEY,

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  configuredPublisherRssRouteKeys, GUARDIAN_ROUTES, mediaDeterministicRelevanceFilter,
+  configuredFamiliesForCleanAirIndex, configuredPublisherRssRouteKeys, GUARDIAN_ROUTES,
+  mediaDeterministicRelevanceFilter,
   parsePublisherRssFeed, publisherRssArticleAllowed, PUBLISHER_RSS_ROUTES,
 } from '@uk-aq-media/discovery';
 import {
@@ -18,10 +19,10 @@ const sources = z.array(SourceSchema).parse(JSON.parse(
 const publisherSources = sources.filter(source =>
   ['bbc-news', 'sky-news', 'the-independent', 'carbon-brief', 'openaq', 'phys-org',
     'university-of-exeter', 'impact-on-urban-health', 'see-the-air',
-    'climate-with-brian', 'healthy-air-coalition', 'mums-for-lungs']
+    'climate-with-brian', 'healthy-air-coalition', 'mums-for-lungs', 'breathe-london-communities']
     .includes(source.source_key));
-assert.equal(PUBLISHER_RSS_ROUTES.length, 22);
-assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 34);
+assert.equal(PUBLISHER_RSS_ROUTES.length, 23);
+assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 35);
 for (const configured of publisherSources) {
   assert.deepEqual(configuredPublisherRssRouteKeys(configured),
     PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
@@ -59,6 +60,16 @@ assert.equal(healthyAirCoalition.publication_policy, 'manual');
 assert.equal(healthyAirCoalition.search_index_policy, 'metadata_only');
 assert.deepEqual(configuredPublisherRssRouteKeys(healthyAirCoalition),
   ['healthy-air-coalition-feed']);
+const familiesForCleanAir = sources.find(
+  source => source.source_key === 'families-for-clean-air')!;
+assert.equal(familiesForCleanAir.canonical_domain, 'familiesforcleanair.org');
+assert.equal(familiesForCleanAir.discovery_method, 'sitemap');
+assert.equal(familiesForCleanAir.publication_policy, 'manual');
+assert.equal(familiesForCleanAir.search_index_policy, 'metadata_only');
+assert.equal(configuredFamiliesForCleanAirIndex(familiesForCleanAir), true);
+assert.deepEqual(initialEditorialState(familiesForCleanAir),
+  { status: 'pending', approval_method: null, approval_author_rule_key: null });
+assert.deepEqual(configuredPublisherRssRouteKeys(familiesForCleanAir), []);
 const seeTheAir = publisherSources.find(source => source.source_key === 'see-the-air')!;
 assert.equal(seeTheAir.canonical_domain, 'seetheair.org');
 assert.equal(seeTheAir.publication_policy, 'manual');

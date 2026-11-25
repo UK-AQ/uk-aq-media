@@ -123,6 +123,20 @@ export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): st
     ...(publisherDomainPreviewImageHostnames[normaliseDomain(source.canonical_domain)] ?? []),
   ];
   const external = exactPreviewImageUrl(raw, additionalHostnames);
+  // Upgrade only this publisher's exact Squarespace image host and site path.
+  if (normaliseDomain(source.canonical_domain) === 'breathelondon-communities.org' &&
+      typeof raw === 'string') {
+    const candidate = exactPreviewImageUrl(raw.replace(/^http:\/\//i, 'https://'),
+      ['static1.squarespace.com']);
+    if (candidate && new URL(candidate).pathname.startsWith('/static/67f93e370d213673ed23e496/')) {
+      return candidate;
+    }
+    // The legacy static host redirects to this exact site-specific CDN path.
+    const redirected = exactPreviewImageUrl(raw, ['images.squarespace-cdn.com']);
+    if (redirected && new URL(redirected).pathname.startsWith('/content/67f93e370d213673ed23e496/')) {
+      return redirected;
+    }
+  }
   if (source.source_key === 'mums-for-lungs') {
     const squarespace = exactPreviewImageUrl(raw, ['images.squarespace-cdn.com']);
     if (!squarespace) return external;

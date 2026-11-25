@@ -19,6 +19,10 @@ import {
 } from './clean-air-fund';
 import { configuredDsawspIndex, discoverDsawsp } from './dsawsp';
 import {
+  configuredFamiliesForCleanAirIndex, discoverFamiliesForCleanAir,
+  FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY, FAMILIES_FOR_CLEAN_AIR_INDEX_ROUTE_KEY,
+} from './families-for-clean-air';
+import {
   configuredGlobalActionPlanIndex, discoverGlobalActionPlan, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY,
   GLOBAL_ACTION_PLAN_SOURCE_KEY, hasGlobalActionPlanAirQualityTag,
 } from './global-action-plan';
@@ -32,6 +36,7 @@ import {
   type GuardianRouteKey,
 } from './guardian';
 import { mediaDeterministicRelevanceFilter } from './relevance';
+import { fetchFamiliesForCleanAirPublishedDate } from './families-for-clean-air-date';
 import { ScanError, type FeedFailureDiagnostics, type ScanRetry } from './rss';
 import { publisherRssRetry } from './publisher-rss-retry';
 import {
@@ -73,6 +78,10 @@ export {
 export {
   configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY, GLOBAL_ACTION_PLAN_SOURCE_KEY,
 } from './global-action-plan';
+export {
+  configuredFamiliesForCleanAirIndex, FAMILIES_FOR_CLEAN_AIR_INDEX_ROUTE_KEY,
+  FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY,
+} from './families-for-clean-air';
 export {
   CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_INDEX_URL,
   CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY, CLEAN_AIR_FUND_RESOURCES_URL,
@@ -159,6 +168,7 @@ export function evaluateGuardianArticle(rules: AuthorRule[], routeKey: GuardianR
 type ExistingPreviewState = {
   canonical_url_hash: string;
   og_image_url: string | null;
+  published_at: string | null;
   image_policy: string;
   preview_metadata_checked_at: string | null;
 };
@@ -296,12 +306,29 @@ async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
   const blockedHashes = new Set<string>();
   if (source.image_policy !== 'remote_preview' || articles.length === 0) return blockedHashes;
   const placeholders = articles.map(() => '?').join(', ');
-  const { results } = await db.prepare(`SELECT canonical_url_hash, og_image_url, image_policy,
-    preview_metadata_checked_at FROM media_articles WHERE canonical_url_hash IN (${placeholders})`)
+  const { results } = await db.prepare(`SELECT canonical_url_hash, og_image_url, published_at,
+    image_policy, preview_metadata_checked_at FROM media_articles
+    WHERE canonical_url_hash IN (${placeholders})`)
     .bind(...articles.map(article => article.canonical_url_hash)).all<ExistingPreviewState>();
   const existing = new Map(results.map(row => [row.canonical_url_hash, row]));
   for (const article of articles) {
     const state = existing.get(article.canonical_url_hash);
+    if (source.source_key === FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY &&
+        !state?.published_at && !article.published_at) {
+      try {
+        const publishedAt = await fetchFamiliesForCleanAirPublishedDate(article, source,
+          async url => { await requirePublisherDomainAllowed(db, url); });
+        if (publishedAt) article.published_at = publishedAt;
+      } catch (error) {
+        if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) {
+          blockedHashes.add(article.canonical_url_hash);
+          continue;
+        }
+        console.warn(JSON.stringify({ event: 'families_for_clean_air_date_lookup_failed',
+          article_hash: article.canonical_url_hash,
+          error_code: error instanceof ScanError ? error.code : 'date_lookup_failed' }));
+      }
+    }
     const hasPreview = article.preview_url !== null || state?.og_image_url !== null &&
       state?.og_image_url !== undefined;
     const articleAllowsPreview = !state || state.image_policy === 'remote_preview';
@@ -486,6 +513,10 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     } else if (sourceKey === 'ncas' && routeKey &&
         configuredNcasRouteKeys(source).includes(routeKey as NcasRouteKey)) {
       result = await discoverNcas(source, routeKey as NcasRouteKey, guardedFetcher);
+    } else if (sourceKey === FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY &&
+        routeKey === FAMILIES_FOR_CLEAN_AIR_INDEX_ROUTE_KEY &&
+        configuredFamiliesForCleanAirIndex(source)) {
+      result = await discoverFamiliesForCleanAir(source, guardedFetcher);
     } else if (sourceKey === GLOBAL_ACTION_PLAN_SOURCE_KEY &&
         routeKey === GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY && configuredGlobalActionPlanIndex(source)) {
       result = await discoverGlobalActionPlan(source, guardedFetcher);
@@ -531,7 +562,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const publisherRelevant = [
         'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp',
         'communities-against-woodsmoke', 'ncas', 'clean-air-fund',
-        'healthy-air-coalition',
+        'healthy-air-coalition', 'breathe-london-communities',
       ].includes(sourceKey) ||
         mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
           canonical_url: article.canonical_url, categories: article.categories }).relevant ||
@@ -583,7 +614,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       );
       if (possibleDuplicateHold) statements.push(possibleDuplicateHold);
       const providerKey = ['dsawsp', 'communities-against-woodsmoke', 'ncas',
-        GLOBAL_ACTION_PLAN_SOURCE_KEY].includes(sourceKey)
+        GLOBAL_ACTION_PLAN_SOURCE_KEY, FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY].includes(sourceKey)
         ? 'publisher_web_index' : 'publisher_rss';
       statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
         article, matchedRules, approvalObservationKey, now));

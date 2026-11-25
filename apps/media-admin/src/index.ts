@@ -1385,7 +1385,9 @@ export default {
       if (researchResponse) return researchResponse;
       const editorialResponse = await handleEditorialDashboard(request, env, url);
       if (editorialResponse) {
-        return !url.pathname.startsWith('/admin/source-domain-blocks') && ['PUT', 'DELETE'].includes(request.method)
+        // An original-title correction must not wake the social publication outbox.
+        return !url.pathname.startsWith('/admin/source-domain-blocks') &&
+          !url.pathname.endsWith('/original-title') && ['PUT', 'DELETE'].includes(request.method)
           ? afterImageMutation(editorialResponse, env) : editorialResponse;
       }
       if (url.pathname === '/admin/articles/bulk/approve') {
@@ -1495,10 +1497,12 @@ export default {
       }
       return httpFailure(error);
     } finally {
-      if (authenticated && request.method === 'POST' && ctx &&
-          !new URL(request.url).pathname.startsWith('/admin/syndication') &&
-          !new URL(request.url).pathname.startsWith('/admin/source-domain-blocks')) {
-        ctx.waitUntil(wakeNewsEmailOutbox(env));
+      if (authenticated && request.method === 'POST' && ctx) {
+        const pathname = new URL(request.url).pathname;
+        if (!pathname.startsWith('/admin/syndication') &&
+            !pathname.startsWith('/admin/source-domain-blocks') && !pathname.endsWith('/original-title')) {
+          ctx.waitUntil(wakeNewsEmailOutbox(env));
+        }
       }
     }
   },

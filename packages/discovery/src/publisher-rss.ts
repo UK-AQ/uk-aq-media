@@ -64,6 +64,8 @@ export const PUBLISHER_RSS_ROUTES = [
   { source_key: 'healthy-air-coalition', route_key: 'healthy-air-coalition-feed',
     url: 'https://www.healthyair.org.uk/feed/', canonical_domain: 'healthyair.org.uk',
     max_items: 20 },
+  { source_key: 'breathe-london-communities', route_key: 'breathe-london-communities-news',
+    url: 'https://www.breathelondon-communities.org/news?format=rss', canonical_domain: 'breathelondon-communities.org', max_items: 20 },
   { source_key: 'mums-for-lungs', route_key: 'mums-for-lungs-news',
     url: 'https://www.mumsforlungs.org/news?format=rss', canonical_domain: 'mumsforlungs.org',
     max_items: 20 },
