@@ -173,7 +173,7 @@ type ExistingPreviewState = {
   preview_metadata_checked_at: string | null;
 };
 
-const CAWS_PREVIEW_RECHECK_SENTINEL = '1970-01-01T00:00:00.000Z';
+const PREVIEW_RECHECK_SENTINEL = '1970-01-01T00:00:00.000Z';
 
 export type DisplayTitleAiRuntime = {
   binding: Ai;
@@ -332,10 +332,11 @@ async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
     const hasPreview = article.preview_url !== null || state?.og_image_url !== null &&
       state?.og_image_url !== undefined;
     const articleAllowsPreview = !state || state.image_policy === 'remote_preview';
-    const cawsRecheck = source.source_key === 'communities-against-woodsmoke' &&
-      state?.preview_metadata_checked_at === CAWS_PREVIEW_RECHECK_SENTINEL;
+    const requestedRecheck = (source.source_key === 'communities-against-woodsmoke' ||
+      source.source_key === FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY) &&
+      state?.preview_metadata_checked_at === PREVIEW_RECHECK_SENTINEL;
     if (hasPreview || !articleAllowsPreview ||
-        state?.preview_metadata_checked_at && !cawsRecheck) continue;
+        state?.preview_metadata_checked_at && !requestedRecheck) continue;
     try {
       Object.assign(article, await discoverArticleHeadPreviewMetadata(article, source, async url => {
         try { await requirePublisherDomainAllowed(db, url); }

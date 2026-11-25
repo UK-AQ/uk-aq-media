@@ -8,6 +8,17 @@ Other CDN sites remain excluded. Verify real thumbnail retrieval in TEST before 
 
 # UK AQ Media
 
+## Families for Clean Air publisher previews
+
+The redesigned FFCA Webflow news index supplies candidate links; images are selected
+from each individual article's bounded presentation metadata rather than adjacent
+index images. The shared remote-preview validator permits the exact HTTPS host
+`cdn.prod.website-files.com` only under `/6a5c2ef397f2467acf4d41b7/` for the FFCA
+publisher domain. Other Webflow tenant paths remain excluded for FFCA. Migration
+0068 gives previously checked, image-less remote-preview articles a one-time
+recheck and normalises legacy domain-only publisher labels without changing
+editorial decisions or article identity.
+
 ## DSAWSP publisher source
 
 Doctors and Scientists Against Wood Smoke Pollution is an enabled, manual-review publisher

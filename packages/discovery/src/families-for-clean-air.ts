@@ -1,5 +1,5 @@
 import {
-  canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl, remotePreviewUrl,
+  canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl,
   type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { decodeHtmlEntities, normaliseMetadataText } from './article-head-metadata';
@@ -80,7 +80,6 @@ async function extractIndex(response: Response, base: string, source: Source): P
   let anchorsSeen = 0;
   let articleUrlsSeen = 0;
   let active: { url: URL; title: string } | null = null;
-  let lastAccepted: Candidate | null = null;
   // Do not assume the publisher's headline link is nested inside h2/h3:
   // the page also presents recent articles in a sidebar. Inspect anchors,
   // but admit only the two known article URL shapes with AQ-relevant titles.
@@ -110,31 +109,14 @@ async function extractIndex(response: Response, base: string, source: Source): P
         const candidate: Candidate = { canonical_url: canonical,
           original_url: item.url.href, title, preview_url: null };
         candidates.set(canonical, candidate);
-        lastAccepted = candidate;
       });
     },
     text(chunk) {
       if (active && active.title.length < 1000) active.title += chunk.text;
     },
-  }).on('img', {
-    element(element) {
-      if (!lastAccepted || lastAccepted.preview_url) return;
-      // The first article photograph following the linked headline is hosted
-      // on the publisher's own WordPress uploads path. Exclude site chrome.
-      for (const name of ['data-lazy-src', 'data-src', 'src']) {
-        const raw = element.getAttribute(name);
-        const url = permittedUrl(raw, base, source);
-        if (!url || !url.pathname.startsWith('/wp-content/uploads/') ||
-            !/\.(?:jpe?g|png|webp|avif)$/i.test(url.pathname) ||
-            /(?:^|[-_])(logo|avatar|icon|quote|social)(?:[-_.]|$)/i.test(url.pathname)) continue;
-        const preview = remotePreviewUrl(url.href, source);
-        if (preview) {
-          lastAccepted.preview_url = preview;
-          return;
-        }
-      }
-    },
   });
+  // Images are resolved from the individual article's metadata after discovery.
+  // Do not guess which headline an adjacent Webflow or legacy index image belongs to.
   const reader = response.body!.getReader();
   let bytes = 0;
   const stream = new ReadableStream<Uint8Array>({

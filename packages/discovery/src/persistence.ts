@@ -98,7 +98,7 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `${UPDATE_DISCOVERY_TIMESTAMPS_SQL},
       WHEN media_articles.display_title IS NULL AND excluded.display_title IS NOT NULL
         THEN excluded.display_title_origin ELSE media_articles.display_title_origin END,
     preview_metadata_checked_at = CASE
-      WHEN media_articles.source_key = 'communities-against-woodsmoke'
+      WHEN media_articles.source_key IN ('communities-against-woodsmoke', 'families-for-clean-air')
         AND media_articles.preview_metadata_checked_at = '1970-01-01T00:00:00.000Z'
         AND excluded.preview_metadata_checked_at IS NOT NULL
       THEN excluded.preview_metadata_checked_at

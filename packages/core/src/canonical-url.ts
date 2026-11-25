@@ -123,6 +123,14 @@ export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): st
     ...(publisherDomainPreviewImageHostnames[normaliseDomain(source.canonical_domain)] ?? []),
   ];
   const external = exactPreviewImageUrl(raw, additionalHostnames);
+  // FFCA's redesigned Webflow site publishes article images under this exact CDN path.
+  // The separate site assets/logo path and unrelated Webflow tenants remain excluded.
+  if (normaliseDomain(source.canonical_domain) === 'familiesforcleanair.org') {
+    const webflow = exactPreviewImageUrl(raw, ['cdn.prod.website-files.com']);
+    if (webflow && new URL(webflow).pathname.startsWith('/6a5c2ef397f2467acf4d41b7/')) {
+      return webflow;
+    }
+  }
   // Upgrade only this publisher's exact Squarespace image host and site path.
   if (normaliseDomain(source.canonical_domain) === 'breathelondon-communities.org' &&
       typeof raw === 'string') {
