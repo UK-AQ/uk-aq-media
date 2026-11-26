@@ -12,7 +12,7 @@ import {
   type DiscoveryMessage, type DisplayTitleAiRuntime,
 } from '@uk-aq-media/discovery';
 import { wakeNewsEmailOutbox, json, loadAuthorRules, loadSource, secretMatches,
-  indexSyndicationHashes, SYNDICATION_INDEX_BATCH } from '@uk-aq-media/core';
+  indexSyndicationHashes, SYNDICATION_INDEX_BATCH, z } from '@uk-aq-media/core';
 import {
   completeGdeltFile, failGdeltRun, finishGdeltRun, ingestGdeltChunk,
   startGdeltFile, startGdeltRun,
@@ -143,6 +143,17 @@ function configuredDisplayTitleAi(env: MediaDiscoveryEnv): DisplayTitleAiRuntime
     maximum_titles_per_request: maximumTitlesPerRequest };
 }
 
+async function loadPublisherRssSource(db: D1Database, sourceKey: string) {
+  try { return await loadSource(db, sourceKey); }
+  catch (error) {
+    const code = error instanceof SyntaxError ? 'invalid_discovery_config_json'
+      : error instanceof z.ZodError ? 'invalid_source_schema' : null;
+    if (!code) throw error;
+    console.warn(JSON.stringify({ event: 'publisher_rss_config_mismatch', source_key: sourceKey, code }));
+    return null;
+  }
+}
+
 async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number> {
   try {
     // This explicit adapter allowlist prevents enabling unfinished publishers through D1 alone.
@@ -152,20 +163,20 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       cleanAirFund, dsawsp, caws, ncas, globalActionPlan] = await Promise.all([
       loadSource(env.MEDIA_DB, 'air-quality-news'),
       loadSource(env.MEDIA_DB, 'the-guardian'),
-      loadSource(env.MEDIA_DB, 'bbc-news'),
-      loadSource(env.MEDIA_DB, 'sky-news'),
-      loadSource(env.MEDIA_DB, 'the-independent'),
-      loadSource(env.MEDIA_DB, 'carbon-brief'),
-      loadSource(env.MEDIA_DB, 'openaq'),
-      loadSource(env.MEDIA_DB, 'phys-org'),
-      loadSource(env.MEDIA_DB, 'university-of-exeter'),
-      loadSource(env.MEDIA_DB, 'impact-on-urban-health'),
-      loadSource(env.MEDIA_DB, 'see-the-air'),
-      loadSource(env.MEDIA_DB, 'climate-with-brian'),
-      loadSource(env.MEDIA_DB, 'healthy-air-coalition'),
+      loadPublisherRssSource(env.MEDIA_DB, 'bbc-news'),
+      loadPublisherRssSource(env.MEDIA_DB, 'sky-news'),
+      loadPublisherRssSource(env.MEDIA_DB, 'the-independent'),
+      loadPublisherRssSource(env.MEDIA_DB, 'carbon-brief'),
+      loadPublisherRssSource(env.MEDIA_DB, 'openaq'),
+      loadPublisherRssSource(env.MEDIA_DB, 'phys-org'),
+      loadPublisherRssSource(env.MEDIA_DB, 'university-of-exeter'),
+      loadPublisherRssSource(env.MEDIA_DB, 'impact-on-urban-health'),
+      loadPublisherRssSource(env.MEDIA_DB, 'see-the-air'),
+      loadPublisherRssSource(env.MEDIA_DB, 'climate-with-brian'),
+      loadPublisherRssSource(env.MEDIA_DB, 'healthy-air-coalition'),
       loadSource(env.MEDIA_DB, 'families-for-clean-air'),
-      loadSource(env.MEDIA_DB, 'mums-for-lungs'),
-      loadSource(env.MEDIA_DB, 'breathe-london-communities'),
+      loadPublisherRssSource(env.MEDIA_DB, 'mums-for-lungs'),
+      loadPublisherRssSource(env.MEDIA_DB, 'breathe-london-communities'),
       loadSource(env.MEDIA_DB, 'clean-air-fund'),
       loadSource(env.MEDIA_DB, 'dsawsp'),
       loadSource(env.MEDIA_DB, 'communities-against-woodsmoke'),
@@ -182,7 +193,7 @@ async function enqueueScheduledDiscovery(env: MediaDiscoveryEnv): Promise<number
       }
     }
     // Broad-topic RSS publishers use AQ relevance filtering. Specialist sources
-    // apply their existing source-specific inclusion rules; manual ones stay Pending.
+    // apply their existing source-specific inclusion rules and configured publication policies.
     for (const source of [bbc, sky, independent, carbonBrief, openaq, physOrg, exeter,
       impactOnUrbanHealth, seeTheAir, climateWithBrian, healthyAirCoalition,
       mumsForLungs, breatheLondonCommunities]) {

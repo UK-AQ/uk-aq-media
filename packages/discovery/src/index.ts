@@ -92,9 +92,9 @@ export {
 export type { NcasRouteKey } from './ncas';
 export {
   configuredPublisherRssRouteKeys, discoverPublisherRss, parsePublisherRssFeed,
-  publisherRssArticleAllowed, PUBLISHER_RSS_ROUTES,
+  publisherRssArticleAllowed, PUBLISHER_RSS_ROUTES, validatePublisherRssConfiguration,
 } from './publisher-rss';
-export type { PublisherRssSourceKey } from './publisher-rss';
+export type { PublisherRssConfigurationDiagnostic, PublisherRssSourceKey } from './publisher-rss';
 export {
   discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
 } from './article-head-metadata';

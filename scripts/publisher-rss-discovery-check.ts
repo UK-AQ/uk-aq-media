@@ -4,6 +4,7 @@ import {
   configuredFamiliesForCleanAirIndex, configuredPublisherRssRouteKeys, GUARDIAN_ROUTES,
   mediaDeterministicRelevanceFilter,
   parsePublisherRssFeed, publisherRssArticleAllowed, PUBLISHER_RSS_ROUTES,
+  validatePublisherRssConfiguration,
 } from '@uk-aq-media/discovery';
 import {
   canonicalizeUrl, initialEditorialState, normaliseArticleAuthorForStorage,
@@ -24,13 +25,17 @@ const publisherSources = sources.filter(source =>
 assert.equal(PUBLISHER_RSS_ROUTES.length, 23);
 assert.equal(1 + GUARDIAN_ROUTES.length + PUBLISHER_RSS_ROUTES.length, 35);
 for (const configured of publisherSources) {
-  assert.deepEqual(configuredPublisherRssRouteKeys(configured),
-    PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
-      .map(route => route.route_key));
-  assert.deepEqual(initialEditorialState(configured), configured.source_key === 'mums-for-lungs'
-    ? { status: 'approved', approval_method: 'trusted_source_auto',
-      approval_author_rule_key: null }
-    : { status: 'pending', approval_method: null, approval_author_rule_key: null });
+  assert.equal(configured.publication_policy, configured.source_key === 'mums-for-lungs'
+    ? 'auto_approve' : 'manual');
+  const routeKeys = PUBLISHER_RSS_ROUTES.filter(route => route.source_key === configured.source_key)
+    .map(route => route.route_key);
+  for (const publication_policy of ['manual', 'auto_approve'] as const) {
+    const source = { ...configured, publication_policy };
+    assert.deepEqual(configuredPublisherRssRouteKeys(source), routeKeys);
+    assert.deepEqual(initialEditorialState(source), publication_policy === 'auto_approve'
+      ? { status: 'approved', approval_method: 'trusted_source_auto', approval_author_rule_key: null }
+      : { status: 'pending', approval_method: null, approval_author_rule_key: null });
+  }
 }
 assert.equal(publisherSources.find(source => source.source_key === 'carbon-brief')?.ai_content_policy,
   'metadata_only');
@@ -94,11 +99,6 @@ assert.equal(PUBLISHER_RSS_ROUTES.find(route => route.source_key === 'openaq' &&
   ?.content_encoded_preview_scan_bytes, MAX_CONTENT_ENCODED_PREVIEW_SCAN_BYTES);
 assert.equal(PUBLISHER_RSS_ROUTES.filter(route =>
   'content_encoded_preview_scan_bytes' in route).length, 2);
-for (const sourceKey of ['carbon-brief', 'openaq', 'phys-org', 'university-of-exeter']) {
-  const configured = publisherSources.find(source => source.source_key === sourceKey)!;
-  assert.deepEqual(configuredPublisherRssRouteKeys({ ...configured,
-    publication_policy: 'auto_approve' }), []);
-}
 assert.equal(sources.some(source => ['research-news-bioengineer', 'research-news-scienmag']
   .includes(source.source_key)), false);
 // PUBLISHER_RSS_ROUTES is a typed allow-list; its source-key union already excludes
@@ -117,9 +117,6 @@ for (const [title, relevant] of [
 }
 
 const mumsForLungs = publisherSources.find(candidate => candidate.source_key === 'mums-for-lungs')!;
-assert.equal(mumsForLungs.publication_policy, 'auto_approve');
-assert.deepEqual(configuredPublisherRssRouteKeys({ ...mumsForLungs,
-  publication_policy: 'manual' }), []);
 const mumsImage = 'https://images.squarespace-cdn.com/content/v1/60fe62a6c0eb074f99a31664/' +
   '1783674678917-example/M4L+diesel.png?format=1500w';
 const mumsParsed = await parsePublisherRssFeed(`<?xml version="1.0"?>
@@ -143,6 +140,18 @@ for (const rejected of [
   'https://images.squarespace-cdn.com:443/content/v1/60fe62a6c0eb074f99a31664/image.png',
 ]) assert.equal(remotePreviewUrl(rejected, mumsForLungs), null);
 const source = publisherSources.find(candidate => candidate.source_key === 'bbc-news')!;
+assert.deepEqual(validatePublisherRssConfiguration({ ...source, publication_policy: 'unsupported' }), {
+  routes: [], diagnostics: [{ code: 'unsupported_publication_policy' }, { code: 'invalid_source_schema' }],
+});
+const [firstRoute, ...otherRoutes] = source.discovery_config.routes!;
+assert.ok(firstRoute);
+assert.deepEqual(validatePublisherRssConfiguration({ ...source,
+  discovery_config: { ...source.discovery_config,
+    routes: [{ ...firstRoute, url: 'https://example.com/feed', max_items: 1 }, ...otherRoutes] },
+}), {
+  routes: [], diagnostics: [{ code: 'feed_url', route_key: firstRoute.route_key },
+    { code: 'max_items', route_key: firstRoute.route_key }],
+});
 const bbcPreview =
   'https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/example/live/article.jpg';
 const parsed = await parsePublisherRssFeed(`<?xml version="1.0"?>

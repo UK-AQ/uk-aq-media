@@ -1,21 +1,21 @@
 import { SourceSchema, loadAuthorRules, type Source } from '@uk-aq-media/core';
 import {
-  AQN_FEED, configuredPublisherRssRouteKeys, scheduledGuardianRouteKeys,
+  AQN_FEED, scheduledGuardianRouteKeys,
   configuredCawsIndex, CAWS_INDEX_ROUTE_KEY, configuredDsawspIndex,
   DSAWSP_INDEX_ROUTE_KEY, configuredNcasRouteKeys,
   configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY, GLOBAL_ACTION_PLAN_SOURCE_KEY,
   CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY,
   configuredCleanAirFundIndex, configuredCleanAirFundResources, PUBLISHER_RSS_ROUTES,
+  validatePublisherRssConfiguration, type PublisherRssConfigurationDiagnostic,
 } from '@uk-aq-media/discovery';
 
+const PUBLISHER_RSS_SOURCE_KEYS = new Set<string>(PUBLISHER_RSS_ROUTES.map(route => route.source_key));
 // Mirror the explicit source allow-list in media-discovery's scheduler.
 // This endpoint is read-only and must never enqueue scans or alter publications.
 const DIRECT_SOURCE_KEYS = new Set<string>([
   'air-quality-news', 'the-guardian', 'clean-air-fund',
   'dsawsp', 'communities-against-woodsmoke', 'ncas', GLOBAL_ACTION_PLAN_SOURCE_KEY,
-  // Derive generic RSS publisher coverage from the same allow-list used by discovery.
-  // Adding a new RSS publisher can no longer silently omit it from health monitoring.
-  ...PUBLISHER_RSS_ROUTES.map(route => route.source_key),
+  ...PUBLISHER_RSS_SOURCE_KEYS,
 ]);
 const STALE_AFTER_MS = 5 * 60 * 60 * 1000;
 const LOG_WINDOW_MS = 45 * 24 * 60 * 60 * 1000;
@@ -61,7 +61,32 @@ function configuredRoutes(source: Source, guardianAuto: string[]): string[] {
   if (source.source_key === GLOBAL_ACTION_PLAN_SOURCE_KEY) {
     return configuredGlobalActionPlanIndex(source) ? [GLOBAL_ACTION_PLAN_INDEX_ROUTE_KEY] : [];
   }
-  return configuredPublisherRssRouteKeys(source);
+  return [];
+}
+
+function sourceConfiguration(raw: SourceRow, guardianRules: Awaited<ReturnType<typeof loadAuthorRules>>): {
+  routeKeys: string[];
+  diagnostics?: PublisherRssConfigurationDiagnostic[];
+} {
+  const { discovery_config_json, enabled, ...fields } = raw;
+  const isPublisherRss = PUBLISHER_RSS_SOURCE_KEYS.has(fields.source_key);
+  let discoveryConfig: unknown;
+  try { discoveryConfig = JSON.parse(discovery_config_json); }
+  catch {
+    return isPublisherRss
+      ? { routeKeys: [], diagnostics: [{ code: 'invalid_discovery_config_json' }] }
+      : { routeKeys: [] };
+  }
+  const input = { ...fields, enabled: enabled === 1, discovery_config: discoveryConfig };
+  if (isPublisherRss) {
+    const { routes, diagnostics } = validatePublisherRssConfiguration(input);
+    return { routeKeys: routes.map(route => route.route_key), diagnostics };
+  }
+  const candidate = SourceSchema.safeParse(input);
+  if (!candidate.success) return { routeKeys: [] };
+  const source = candidate.data;
+  return { routeKeys: configuredRoutes(source, source.source_key === 'the-guardian'
+    ? scheduledGuardianRouteKeys(source, guardianRules) : []) };
 }
 
 function healthForRoute(stat: RunStat | undefined, now: number): HealthRoute {
@@ -119,19 +144,10 @@ export async function readMediaHealth(db: D1Database): Promise<unknown> {
   ]);
   const configuredSources = sourceData.results.filter(raw => DIRECT_SOURCE_KEYS.has(raw.source_key))
     .map(raw => {
-      const { discovery_config_json, enabled, ...fields } = raw;
-      let source: Source | null = null;
-      try {
-        const candidate = SourceSchema.safeParse({ ...fields, enabled: enabled === 1,
-          discovery_config: JSON.parse(discovery_config_json) });
-        if (candidate.success) source = candidate.data;
-      } catch { /* Invalid source configuration is an operational health error. */ }
       const isAuto = raw.publication_policy === 'auto_approve' ||
         raw.source_key === 'the-guardian' &&
           guardianRules.some(rule => rule.publication_policy === 'auto_approve');
-      const routeKeys = source ? configuredRoutes(source, source.source_key === 'the-guardian'
-        ? scheduledGuardianRouteKeys(source, guardianRules) : []) : [];
-      return { raw, isAuto, routeKeys };
+      return { raw, isAuto, ...sourceConfiguration(raw, guardianRules) };
     });
   // Only these routes contribute to the response. Keep invalid configurations
   // below even when there is no valid route to query. One JSON binding avoids
@@ -169,17 +185,20 @@ export async function readMediaHealth(db: D1Database): Promise<unknown> {
   // route; normalise only the output so the existing source/route/time index
   // can serve both the aggregate and deterministic latest-id lookup.
   const stats = new Map(runData?.results.map(r => [r.source_key + ':' + r.route_key, r]));
-  const sources = configuredSources.map(({ raw, isAuto, routeKeys }) => {
+  const sources = configuredSources.map(({ raw, isAuto, routeKeys, diagnostics }) => {
     const routes = routeKeys.map(route_key => {
       const result = healthForRoute(stats.get(raw.source_key + ':' + route_key), now);
       return { ...result, source_key: raw.source_key, route_key };
     });
     const invalidConfig = !routeKeys.length;
     return {
-      source_key: raw.source_key, name: raw.name, publication_policy: raw.publication_policy,
+      source_key: raw.source_key, name: raw.name,
+      publication_policy: raw.publication_policy === 'auto_approve' || raw.publication_policy === 'manual'
+        ? raw.publication_policy : null,
       auto_approval: isAuto, status: invalidConfig || routes.some(r => r.status === 'critical')
         ? 'critical' : routes.some(r => r.status === 'warning') ? 'warning' : 'healthy',
       reason: invalidConfig ? 'not_scheduled_configuration_mismatch' : null,
+      ...(diagnostics?.length ? { configuration_diagnostics: diagnostics } : {}),
       routes,
     };
   });

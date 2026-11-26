@@ -1,5 +1,5 @@
 import {
-  canonicalizeUrl, canonicalUrlHash, remotePreviewUrl,
+  canonicalizeUrl, canonicalUrlHash, remotePreviewUrl, SourceSchema,
   type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import {
@@ -72,6 +72,16 @@ export const PUBLISHER_RSS_ROUTES = [
 ] as const;
 
 export type PublisherRssSourceKey = typeof PUBLISHER_RSS_ROUTES[number]['source_key'];
+type PublisherRssRoute = typeof PUBLISHER_RSS_ROUTES[number];
+
+export type PublisherRssConfigurationDiagnostic = {
+  code: 'unsupported_source' | 'source_disabled' | 'source_type' | 'canonical_domain' |
+    'discovery_method' | 'unsupported_publication_policy' | 'review_level' |
+    'content_fetch_policy' | 'ai_content_policy' | 'image_policy' | 'search_index_policy' |
+    'route_count' | 'missing_route_key' | 'unexpected_route_key' | 'duplicate_route_key' |
+    'feed_url' | 'max_items' | 'invalid_source_schema' | 'invalid_discovery_config_json';
+  route_key?: PublisherRssRoute['route_key'];
+};
 
 function normaliseEditorialText(value: string): string {
   return value.normalize('NFKC').toLocaleLowerCase('en-GB')
@@ -98,64 +108,92 @@ const PUBLISHER_RSS_AUTHOR_POLICIES = new Map<string, 'none'>([
   ['mums-for-lungs', 'none'],
 ]);
 
-function expectedRoute(sourceKey: string, routeKey: string) {
-  return PUBLISHER_RSS_ROUTES.find(route => route.source_key === sourceKey &&
-    route.route_key === routeKey) ?? null;
-}
-
 function expectedAiContentPolicy(sourceKey: string): Source['ai_content_policy'] {
   return sourceKey === 'carbon-brief' || sourceKey === 'openaq'
     ? 'metadata_only' : 'disabled';
 }
 
-function configuredRoute(source: Source, routeKey: string): {
-  route_key: string;
-  url: string;
-  max_items: number;
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+
+export function validatePublisherRssConfiguration(source: { source_key: string; [key: string]: unknown }): {
+  routes: PublisherRssRoute[];
+  diagnostics: PublisherRssConfigurationDiagnostic[];
 } {
-  const expected = expectedRoute(source.source_key, routeKey);
-  const route = source.discovery_config.routes?.find(candidate => candidate.route_key === routeKey);
-  if (!expected || !route || source.source_type !== 'publisher' || !source.enabled ||
-      source.canonical_domain !== expected.canonical_domain || source.discovery_method !== 'rss' ||
-      // Mums for Lungs is the sole auto-approved generic RSS source; every other
-      // configured publisher still requires the contracted manual review policy.
-      source.publication_policy !== (source.source_key === 'mums-for-lungs'
-        ? 'auto_approve' : 'manual') || source.review_level !== 'standard' ||
-      source.content_fetch_policy !== 'discovery_metadata_only' ||
-      source.ai_content_policy !== expectedAiContentPolicy(source.source_key) ||
-      source.image_policy !== 'remote_preview' ||
-      !['metadata_only', 'feed_body_text'].includes(source.search_index_policy) ||
-      route.url !== expected.url || route.max_items !== expected.max_items) {
-    throw new ScanError('publisher_rss_config_mismatch');
+  const expected = PUBLISHER_RSS_ROUTES.filter(route => route.source_key === source.source_key);
+  const [firstRoute] = expected;
+  if (!firstRoute) return { routes: [], diagnostics: [{ code: 'unsupported_source' }] };
+
+  const checks: [PublisherRssConfigurationDiagnostic['code'], boolean][] = [
+    ['source_disabled', source.enabled === true],
+    ['source_type', source.source_type === 'publisher'],
+    ['canonical_domain', source.canonical_domain === firstRoute.canonical_domain],
+    ['discovery_method', source.discovery_method === 'rss'],
+    ['unsupported_publication_policy', source.publication_policy === 'manual' ||
+      source.publication_policy === 'auto_approve'],
+    ['review_level', source.review_level === 'standard'],
+    ['content_fetch_policy', source.content_fetch_policy === 'discovery_metadata_only'],
+    ['ai_content_policy', source.ai_content_policy === expectedAiContentPolicy(source.source_key)],
+    ['image_policy', source.image_policy === 'remote_preview'],
+    ['search_index_policy', source.search_index_policy === 'metadata_only' ||
+      source.search_index_policy === 'feed_body_text'],
+  ];
+  const diagnostics: PublisherRssConfigurationDiagnostic[] = checks
+    .filter(([, matches]) => !matches).map(([code]) => ({ code }));
+  const rawRoutes = asRecord(source.discovery_config)?.routes;
+  const routes: unknown[] = Array.isArray(rawRoutes) ? rawRoutes : [];
+  if (routes.length !== expected.length) diagnostics.push({ code: 'route_count' });
+  // Inspect at most one more entry than the allowlist permits. Oversized lists
+  // already fail on route count and may have missing keys beyond this sample.
+  const configured = routes.slice(0, expected.length + 1).map(asRecord);
+  if (configured.some(route => !expected.some(allowed => allowed.route_key === route?.route_key))) {
+    diagnostics.push({ code: 'unexpected_route_key' });
   }
+  for (const { route_key, url, max_items } of expected) {
+    const matching = configured.filter(route => route?.route_key === route_key);
+    if (!matching.length) {
+      if (configured.length === routes.length) diagnostics.push({ code: 'missing_route_key', route_key });
+      continue;
+    }
+    if (matching.length > 1) diagnostics.push({ code: 'duplicate_route_key', route_key });
+    if (matching.some(route => route?.url !== url)) diagnostics.push({ code: 'feed_url', route_key });
+    if (matching.some(route => route?.max_items !== max_items)) diagnostics.push({ code: 'max_items', route_key });
+  }
+  if (!SourceSchema.safeParse(source).success) diagnostics.push({ code: 'invalid_source_schema' });
+  return { routes: diagnostics.length ? [] : expected, diagnostics };
+}
+
+function configuredRoute(source: Source, routeKey: string): PublisherRssRoute {
+  const route = validatePublisherRssConfiguration(source).routes.find(route => route.route_key === routeKey);
+  if (!route) throw new ScanError('publisher_rss_config_mismatch');
   return route;
 }
 
 export function configuredPublisherRssRouteKeys(source: Source): string[] {
-  const expected = PUBLISHER_RSS_ROUTES.filter(route => route.source_key === source.source_key);
-  if (expected.length === 0 || source.discovery_config.routes?.length !== expected.length) return [];
-  try { return expected.map(route => configuredRoute(source, route.route_key).route_key); }
-  catch { return []; }
+  return validatePublisherRssConfiguration(source).routes.map(route => route.route_key);
 }
 
 export async function discoverPublisherRss(source: Source, routeKey: string, fetcher: typeof fetch = fetch): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   const route = configuredRoute(source, routeKey);
-  const expected = expectedRoute(source.source_key, routeKey)!;
-  const allowedRedirect = 'allowed_manual_redirect_url' in expected
-    ? expected.allowed_manual_redirect_url : undefined;
-  return parsePublisherRssFeed(await readRssFeed(route.url, 'publisher_rss', allowedRedirect, fetcher),
-    source, routeKey);
+  const allowedRedirect = 'allowed_manual_redirect_url' in route
+    ? route.allowed_manual_redirect_url : undefined;
+  return parseConfiguredPublisherRssFeed(
+    await readRssFeed(route.url, 'publisher_rss', allowedRedirect, fetcher), source, route);
 }
 
 export async function parsePublisherRssFeed(xml: string, source: Source, routeKey: string): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
-  const route = configuredRoute(source, routeKey);
-  const expected = expectedRoute(source.source_key, routeKey)!;
-  const contentEncodedPreviewScanBytes = 'content_encoded_preview_scan_bytes' in expected
-    ? expected.content_encoded_preview_scan_bytes : null;
+  return parseConfiguredPublisherRssFeed(xml, source, configuredRoute(source, routeKey));
+}
+
+async function parseConfiguredPublisherRssFeed(xml: string, source: Source, route: PublisherRssRoute) {
+  const contentEncodedPreviewScanBytes = 'content_encoded_preview_scan_bytes' in route
+    ? route.content_encoded_preview_scan_bytes : null;
   const parsed = parseRssItems(xml, route.max_items, {
     review_description: true,
     ...(contentEncodedPreviewScanBytes === null ? {} : { content_encoded_preview: {
