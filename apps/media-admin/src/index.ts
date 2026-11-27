@@ -1500,7 +1500,8 @@ export default {
       if (authenticated && request.method === 'POST' && ctx) {
         const pathname = new URL(request.url).pathname;
         if (!pathname.startsWith('/admin/syndication') &&
-            !pathname.startsWith('/admin/source-domain-blocks') && !pathname.endsWith('/original-title')) {
+            !pathname.startsWith('/admin/source-domain-blocks') && !pathname.endsWith('/original-title') &&
+            !/^\/admin\/articles\/[1-9]\d*\/metadata\/preview$/.test(pathname)) {
           ctx.waitUntil(wakeNewsEmailOutbox(env));
         }
       }

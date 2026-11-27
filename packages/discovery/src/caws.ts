@@ -64,9 +64,10 @@ export function configuredCawsIndex(source: Source): boolean {
     source.discovery_config.retain_excerpt === false;
 }
 
-export type CawsIndexCandidate = { canonical_url: string; title: string; published_at: string };
+export type CawsIndexCandidate = { canonical_url: string; original_url: string; title: string; published_at: string };
 
-export function extractCawsIndexCandidates(html: string, source: Source): CawsIndexCandidate[] {
+export function extractCawsIndexCandidates(html: string, source: Source,
+  indexUrl = CAWS_INDEX_URL): CawsIndexCandidate[] {
   const start = html.toLocaleLowerCase('en-GB').indexOf(LISTING_START.toLowerCase());
   if (start < 0) throw new ScanError('caws_listing_start_missing');
   const end = html.toLocaleLowerCase('en-GB').indexOf(LISTING_END.toLowerCase(), start +
@@ -82,10 +83,13 @@ export function extractCawsIndexCandidates(html: string, source: Source): CawsIn
     const title = text(match[2] ?? '');
     if (!raw || !title) continue;
     let canonical: string;
+    let original: string;
     try {
-      const permitted = publisherHttpsUrl(new URL(raw, CAWS_INDEX_URL).href, source);
-      if (!permitted || new URL(permitted).pathname === '/blog/') continue;
-      canonical = canonicalizeUrl(permitted, source);
+      const permitted = publisherHttpsUrl(new URL(raw, indexUrl).href, source);
+      const identity = new URL(raw, CAWS_INDEX_URL);
+      if (!permitted || identity.pathname === '/blog/') continue;
+      original = permitted;
+      canonical = canonicalizeUrl(identity.href, source);
     } catch { continue; }
     if (seen.has(canonical)) continue;
     const afterLink = (match.index ?? 0) + match[0].length;
@@ -93,13 +97,13 @@ export function extractCawsIndexCandidates(html: string, source: Source): CawsIn
     const publishedAt = publisherDate(region.slice(afterLink, beforeNextLink));
     if (!publishedAt) continue;
     seen.add(canonical);
-    candidates.push({ canonical_url: canonical, title, published_at: publishedAt });
+    candidates.push({ canonical_url: canonical, original_url: original, title, published_at: publishedAt });
   }
   if (candidates.length === 0) throw new ScanError('caws_no_valid_index_candidates');
   return candidates;
 }
 
-async function fetchIndex(source: Source, fetcher: typeof fetch): Promise<string> {
+async function fetchIndex(source: Source, fetcher: typeof fetch): Promise<{ html: string; url: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
@@ -139,7 +143,7 @@ async function fetchIndex(source: Source, fetcher: typeof fetch): Promise<string
     try {
       for (;;) {
         const { value, done } = await reader.read();
-        if (done) return html + decoder.decode();
+        if (done) return { html: html + decoder.decode(), url: requestUrl };
         bytes += value.byteLength;
         if (bytes > INDEX_MAX_BYTES) throw new ScanError('caws_html_too_large');
         html += decoder.decode(value, { stream: true });
@@ -155,11 +159,12 @@ export async function discoverCaws(source: Source, fetcher: typeof fetch = fetch
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   if (!configuredCawsIndex(source)) throw new ScanError('caws_config_mismatch');
-  const candidates = extractCawsIndexCandidates(await fetchIndex(source, fetcher), source);
+  const index = await fetchIndex(source, fetcher);
+  const candidates = extractCawsIndexCandidates(index.html, source, index.url);
   const articles = await Promise.all(candidates.map(async candidate => ({
     canonical_url: candidate.canonical_url,
     canonical_url_hash: await canonicalUrlHash(candidate.canonical_url),
-    original_url: candidate.canonical_url,
+    original_url: candidate.original_url,
     title: candidate.title,
     author: null,
     published_at: candidate.published_at,

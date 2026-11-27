@@ -18,6 +18,8 @@ export interface DiscoveredArticle {
   display_title: string | null;
   display_title_origin: 'publisher' | null;
   preview_metadata_checked_at: string | null;
+  publisher?: string;
+  explicit_publisher_headline?: string | null;
   review_excerpt?: string | null; // Transient RSS description only.
   publisher_resolved_urls?: string[];
   feed_body_html?: string | null;

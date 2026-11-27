@@ -5,7 +5,7 @@ import {
   publisherAdmissionSql, publisherDomainsSql, requirePublisherDomainAllowed,
   BLUESKY_IN_PROGRESS_SQL, blueskyPublicationStatusLabel,
   canonicalizeUrl, canonicalUrlHash, guardianRemotePreviewUrl, json,
-  hasPermittedPresentationImage, loadSource, MAX_LOCAL_IMAGE_BYTES,
+  hasPermittedPresentationImage, indexSyndicationHashes, loadSource, MAX_LOCAL_IMAGE_BYTES,
   normaliseArticleAuthorForStorage, publisherHttpsUrl,
   readBoundedImageResponse, reconcileHomepageLatestSix, reconcileHomepageLatestSixStatement,
   sourcePresentationPlaceholderPath,
@@ -17,7 +17,9 @@ import { directPublishState, facebookEligibility } from './direct-publish-eligib
 import {
   configuredCawsIndex, configuredDsawspIndex, configuredNcasRouteKeys,
   configuredGlobalActionPlanIndex, GLOBAL_ACTION_PLAN_SOURCE_KEY,
-  configuredPublisherRssRouteKeys, discoverPublisherRss, fetchArticleHeadMetadata,
+  configuredPublisherRssRouteKeys, hostnamePublisherLabel, metadataEditProtectedSql,
+  normaliseMetadataText, normalisePublisherHeadline, publisherPublicationDate, publisherRssMetadata, resolvePublisherMetadata,
+  verifiedPublisherName, type PublisherMetadata,
 } from '@uk-aq-media/discovery';
 
 import { mutateSourceDomainBlock, previewInitialDomainCleanup, executeInitialDomainCleanup }
@@ -105,7 +107,7 @@ const ManualArticleBody = z.object({
   title: z.string().min(1).max(1000),
   publisher: z.string().min(1).max(200),
   author: z.string().max(500).nullable().optional(),
-  published_at: z.iso.datetime({ offset: true }).nullable().optional(),
+  published_at: StoredPublishedAt.nullable().optional(),
   preview_image_url: z.url().max(2048).nullable().optional(),
 }).strict();
 export const MetadataApplyBody = z.object({
@@ -114,9 +116,16 @@ export const MetadataApplyBody = z.object({
   replace_existing_image: z.boolean(),
   apply_publisher_display_title: z.boolean().default(true),
   expected_current_published_at: StoredPublishedAt.nullable().optional(),
-  expected_proposed_published_at: z.iso.datetime({ offset: true }).nullable().optional(),
+  expected_proposed_published_at: StoredPublishedAt.nullable().optional(),
+  expected_revision: z.number().int().nonnegative().optional(),
+  exact_headline: z.object({ current: z.string().max(1000), proposed: z.string().max(1000) }).strict().optional(),
+  publication: z.object({ current: z.string().max(200), proposed: z.string().max(200) }).strict().optional(),
+  author: z.object({ current: z.null(), proposed: z.string().min(1).max(500) }).strict().optional(),
   apply_publisher_published_at: z.boolean().default(false),
 }).strict().superRefine((value, context) => {
+  if ((value.exact_headline || value.publication || value.author) && value.expected_revision === undefined) {
+    context.addIssue({ code: 'custom', message: 'metadata_revision_required' });
+  }
   if (value.apply_publisher_published_at &&
       (value.expected_current_published_at !== null ||
        !value.expected_proposed_published_at)) {
@@ -192,12 +201,7 @@ function presentSource(row: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-type HeadMetadata = {
-  publisher: string | null; title: string | null; compact_title: string | null;
-  author: string | null; published_at: string | null; image_url: string | null;
-  image_error: string | null;
-  checked_at: string;
-};
+
 
 export type MetadataProvider = 'article_head' | 'publisher_rss';
 
@@ -318,125 +322,28 @@ function safeHostname(raw: string): string {
   return host;
 }
 
-async function fetchHeadMetadata(canonicalUrl: string, source: Pick<SourceRow,
-  'source_key' | 'canonical_domain' | 'content_fetch_policy' | 'image_policy'>,
-  requireAllowedUrl?: (url: string) => Promise<void>): Promise<HeadMetadata> {
-  let metadata: Awaited<ReturnType<typeof fetchArticleHeadMetadata>>;
-  try {
-    metadata = await fetchArticleHeadMetadata(canonicalUrl, source, requireAllowedUrl);
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
-    throw articleHeadHttpError(error);
-  }
-  const originalTitle = cleanText(metadata.ogTitle ?? metadata.twitterTitle ?? metadata.htmlTitle, 1000);
-  const compact = cleanText(metadata.twitterTitle, 1000);
-  const published = normalisePublisherPublishedAt(metadata.publishedAt);
-  return {
-    publisher: cleanText(metadata.publisher, 200), title: originalTitle,
-    compact_title: compact && originalTitle && compact.length < originalTitle.length ? compact : null,
-    author: cleanText(metadata.author, 500), published_at: published,
-    image_url: metadata.previewUrl, image_error: metadata.previewError,
-    checked_at: metadata.checkedAt,
-  };
-}
-
-function metadataFromPublisherRss(canonicalUrl: string, publisher: string,
-  articles: ReadonlyArray<{
-    canonical_url: string;
-    title: string;
-    author: string | null;
-    published_at: string | null;
-    preview_url: string | null;
-  }>, checkedAt: string): HeadMetadata | null {
-  const article = articles.find(candidate => candidate.canonical_url === canonicalUrl);
-  if (!article) return null;
-  return {
-    publisher: cleanText(publisher, 200), title: cleanText(article.title, 1000),
-    compact_title: null, author: cleanText(article.author, 500),
-    published_at: article.published_at && !Number.isNaN(Date.parse(article.published_at))
-      ? new Date(article.published_at).toISOString() : null,
-    image_url: article.preview_url,
-    image_error: article.preview_url ? null : 'preview_image_metadata_missing',
-    checked_at: checkedAt,
-  };
-}
-
-// Keep the existing OpenAQ API while sharing the bounded RSS metadata extraction.
 export function metadataFromOpenAqRss(canonicalUrl: string, publisher: string,
-  articles: Parameters<typeof metadataFromPublisherRss>[2], checkedAt: string): HeadMetadata | null {
-  return metadataFromPublisherRss(canonicalUrl, publisher, articles, checkedAt);
+  articles: Parameters<typeof publisherRssMetadata>[2], checkedAt: string): PublisherMetadata | null {
+  return publisherRssMetadata(canonicalUrl, publisher, articles, checkedAt);
 }
 
 export function requireOpenAqRssMetadata(canonicalUrl: string, publisher: string,
-  articles: Parameters<typeof metadataFromOpenAqRss>[2], checkedAt: string): HeadMetadata {
+  articles: Parameters<typeof publisherRssMetadata>[2], checkedAt: string): PublisherMetadata {
   const metadata = metadataFromOpenAqRss(canonicalUrl, publisher, articles, checkedAt);
   if (!metadata) throw new HttpError(409, 'metadata_rss_article_not_found');
   return metadata;
 }
 
-async function fetchOpenAqRssMetadata(db: D1Database, canonicalUrl: string,
-  sourceName: string): Promise<HeadMetadata> {
-  const source = await loadSource(db, 'openaq');
-  if (!source) throw new HttpError(409, 'metadata_rss_source_not_available');
-  let observation: Awaited<ReturnType<typeof discoverPublisherRss>>;
+async function fetchMetadata(db: D1Database, articleId: number | null,
+  article: Parameters<typeof resolvePublisherMetadata>[2],
+  source: Pick<SourceRow, 'source_key' | 'name' | 'canonical_domain' | 'image_policy'>,
+  existing?: Parameters<typeof resolvePublisherMetadata>[4],
+  observeAllowedUrl?: (url: string) => void): Promise<PublisherMetadata> {
   try {
-    observation = await discoverPublisherRss(source, 'openaq-medium');
-  } catch {
-    throw new HttpError(502, 'metadata_rss_unavailable');
-  }
-  return requireOpenAqRssMetadata(canonicalUrl, sourceName, observation.articles,
-    new Date().toISOString());
-}
-
-// Sky sometimes returns HTTP 403 to Workers requesting article HTML. Only the
-// publisher's existing, configured RSS routes may be used as a metadata fallback.
-async function fetchSkyRssMetadata(db: D1Database, articleId: number,
-  canonicalUrl: string, sourceName: string): Promise<HeadMetadata | null> {
-  const source = await loadSource(db, 'sky-news');
-  if (!source?.enabled || source.image_policy !== 'remote_preview') return null;
-  const configuredRoutes = configuredPublisherRssRouteKeys(source);
-  if (configuredRoutes.length === 0) return null;
-
-  // Prefer routes that discovered this article, rather than scanning unrelated feeds.
-  const { results } = await db.prepare(`SELECT route_key FROM media_article_discovery_evidence
-    WHERE article_id = ? AND source_key = 'sky-news' AND provider_key = 'publisher_rss'
-    ORDER BY last_seen_at DESC LIMIT 4`).bind(articleId).all<{ route_key: string }>();
-  const observedRoutes = [...new Set(results.map(row => row.route_key)
-    .filter(routeKey => configuredRoutes.includes(routeKey)))];
-  const routeKeys = observedRoutes.length > 0 ? observedRoutes : configuredRoutes;
-
-  let matchedWithoutImage: HeadMetadata | null = null;
-  for (const routeKey of routeKeys) {
-    try {
-      const { articles } = await discoverPublisherRss(source, routeKey);
-      const metadata = metadataFromPublisherRss(canonicalUrl, sourceName, articles,
-        new Date().toISOString());
-      if (metadata?.image_url) return metadata;
-      if (metadata) matchedWithoutImage ??= metadata;
-    } catch {
-      console.warn(JSON.stringify({
-        event: 'sky_rss_metadata_fallback_route_failed', article_id: articleId,
-        route_key: routeKey,
-      }));
-    }
-  }
-  return matchedWithoutImage;
-}
-
-async function fetchMetadata(db: D1Database, articleId: number, canonicalUrl: string,
-  source: Pick<SourceRow, 'source_key' | 'name' | 'canonical_domain' |
-    'content_fetch_policy' | 'image_policy'>): Promise<HeadMetadata> {
-  if (metadataProviderFor(source.source_key) === 'publisher_rss') {
-    return fetchOpenAqRssMetadata(db, canonicalUrl, source.name);
-  }
-  try {
-    return await fetchHeadMetadata(canonicalUrl, source);
+    return await resolvePublisherMetadata(db, articleId, article, source, existing, observeAllowedUrl);
   } catch (error) {
-    if (source.source_key !== 'sky-news' || !(error instanceof HttpError) ||
-        error.message !== 'article_head_http_403') throw error;
-    const fallback = await fetchSkyRssMetadata(db, articleId, canonicalUrl, source.name);
-    if (fallback) return fallback;
-    throw error;
+    if (error instanceof HttpError) throw error;
+    throw articleHeadHttpError(error);
   }
 }
 
@@ -463,8 +370,7 @@ export function metadataImageChange(currentImage: unknown, expectedProposal: str
 }
 
 export function normalisePublisherPublishedAt(value: string | null): string | null {
-  if (!value || Number.isNaN(Date.parse(value))) return null;
-  return new Date(value).toISOString();
+  return publisherPublicationDate(value);
 }
 
 export function metadataPublishedAtProposal(currentPublishedAt: unknown,
@@ -1154,17 +1060,18 @@ async function lookupArticle(request: Request, db: D1Database): Promise<Response
     .bind(identity.hash).first<{ id: number }>();
   if (existing) return articleDetail(db, existing.id);
   await requirePublisherDomainAllowed(db, identity.canonicalUrl);
+  await requirePublisherDomainAllowed(db, parsed.data.url);
   const sourceKey = identity.source?.source_key ?? `manual-${(await canonicalUrlHash(identity.domain)).slice(0, 12)}`;
   const source = identity.source ?? conservativeManualSource(identity.domain, identity.domain, sourceKey);
-  let metadata: HeadMetadata | null = null;
+  let metadata: PublisherMetadata | null = null;
   let metadataError: string | null = null;
-  try { metadata = await fetchHeadMetadata(identity.canonicalUrl, source,
-    rawUrl => requirePublisherDomainAllowed(db, rawUrl)); }
+  const article = { canonical_url: identity.canonicalUrl, original_url: parsed.data.url };
+  try { metadata = await fetchMetadata(db, null, article, source); }
   catch (error) {
     if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) throw error;
     metadataError = error instanceof HttpError ? error.message : 'metadata_unavailable';
   }
-  return json({ existing: false, canonical_url: identity.canonicalUrl,
+  return json({ existing: false, ...article,
     source: { source_key: source.source_key, name: source.name, canonical_domain: source.canonical_domain,
       known: identity.source !== null, will_create_disabled_definition: identity.source === null },
     metadata, metadata_error: metadataError, can_add_approved: true });
@@ -1179,6 +1086,7 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
     .bind(identity.hash).first<{ id: number }>();
   if (existing) return articleDetail(db, existing.id);
   await requirePublisherDomainAllowed(db, identity.canonicalUrl);
+  await requirePublisherDomainAllowed(db, parsed.data.url);
   const sourceKey = identity.source?.source_key ?? `manual-${(await canonicalUrlHash(identity.domain)).slice(0, 12)}`;
   const source = identity.source ?? conservativeManualSource(identity.domain, parsed.data.publisher, sourceKey);
   const preview = parsed.data.preview_image_url
@@ -1217,7 +1125,7 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
     WHERE ${publisherAdmissionSql([identity.canonicalUrl, parsed.data.url])}`)
     .bind(sourceKey, identity.canonicalUrl, identity.hash, parsed.data.url,
       cleanText(parsed.data.title, 1000), publisher, author,
-      parsed.data.published_at ?? null, now, now,
+      normaliseManualPublishedAt(parsed.data.published_at ?? null), now, now,
       parsed.data.initial_status, source.review_level, approved ? 'manual' : null,
       preview, source.image_policy, approved ? now : null, eventKey, now, now));
   try { await db.batch(statements); }
@@ -1237,68 +1145,167 @@ async function createManualArticle(request: Request, db: D1Database): Promise<Re
   return articleDetail(db, created.id);
 }
 
-async function previewMetadata(db: D1Database, id: number): Promise<Response> {
-  const row = await db.prepare(`SELECT a.id, a.canonical_url, a.title, a.display_title,
-      a.display_title_origin, a.og_image_url, a.published_at, a.status, a.revision, s.*
+type MetadataArticle = SourceRow & {
+  id: number; canonical_url: string; canonical_url_hash: string; original_url: string;
+  title: string; publisher: string; author: string | null; display_title: string | null;
+  article_image_policy: SourceRow['image_policy']; og_image_url: string | null;
+  published_at: string | null; status: string; revision: number;
+  protected_title: number; protected_author: number; protected_date: number;
+};
+
+async function articleForMetadata(db: D1Database, id: number): Promise<MetadataArticle> {
+  const row = await db.prepare(`SELECT a.id, a.canonical_url, a.canonical_url_hash, a.original_url,
+      a.title, a.publisher, a.author, a.display_title, a.og_image_url, a.published_at,
+      a.status, a.revision, a.image_policy AS article_image_policy,
+      ${metadataEditProtectedSql('a.id', 'original-title')} AS protected_title,
+      ${metadataEditProtectedSql('a.id', 'author')} AS protected_author,
+      ${metadataEditProtectedSql('a.id', 'published-at')} AS protected_date, s.*
     FROM media_articles a JOIN media_sources s ON s.source_key = a.source_key
-    WHERE a.id = ?`).bind(id).first<Record<string, unknown> & SourceRow>();
+    WHERE a.id = ? AND s.retired_at IS NULL`).bind(id).first<MetadataArticle>();
   if (!row) throw new HttpError(404, 'article_not_found');
-  const metadata = await fetchMetadata(db, id, String(row.canonical_url), row);
+  await requirePublisherDomainAllowed(db, row.canonical_url);
+  await requirePublisherDomainAllowed(db, row.original_url);
+  return row;
+}
+
+function proposal<T>(current: T, proposed: T | null | undefined): { current: T; proposed: T } | null {
+  return proposed !== null && proposed !== undefined && current !== proposed ? { current, proposed } : null;
+}
+
+async function metadataProposals(db: D1Database, row: MetadataArticle, targets: string[]) {
+  let metadata: PublisherMetadata;
+  try {
+    const source = row.article_image_policy === 'remote_preview' ? row
+      : { ...row, image_policy: row.article_image_policy };
+    if (row.image_policy !== 'remote_preview' || row.article_image_policy !== 'remote_preview') {
+      throw new HttpError(409, 'article_head_not_permitted');
+    }
+    metadata = await fetchMetadata(db, row.id, row, source, undefined, url => targets.push(url));
+  } catch (error) {
+    if (!(error instanceof HttpError) || !['article_head_not_permitted',
+      'metadata_rss_article_not_found'].includes(error.message)) throw error;
+    // Known configured publication attribution can support a text-only repair
+    // even when there is no permitted publisher HTML route.
+    metadata = { publisher: verifiedPublisherName(row), title: null, compact_title: null,
+      author: null, published_at: null, image_url: null, image_error: error.message,
+      checked_at: new Date().toISOString() };
+  }
+  const image = proposal(row.og_image_url, metadata.image_url);
+  const headline = normalisePublisherHeadline(row.title, metadata.publisher, metadata.explicit_headline);
   const changes = {
-    image: metadata.image_url && metadata.image_url !== row.og_image_url
-      ? { current: row.og_image_url ?? null, proposed: metadata.image_url,
-          expected_proposed_image_url: metadata.image_url,
-          replacement_required: row.og_image_url !== null } : null,
-    publisher_display_title: metadata.compact_title && row.display_title === null
-      ? { current: null, proposed: metadata.compact_title } : null,
-    published_at: metadataPublishedAtProposal(row.published_at, metadata.published_at),
+    image: image ? { ...image, expected_proposed_image_url: image.proposed,
+      replacement_required: row.og_image_url !== null } : null,
+    publisher_display_title: row.display_title === null ? proposal(null as string | null,
+      metadata.compact_title) : null,
+    published_at: row.protected_date ? null : metadataPublishedAtProposal(row.published_at, metadata.published_at),
+    exact_headline: row.protected_title || headline === normaliseMetadataText(row.title)
+      ? null : proposal(row.title, headline),
+    publication: !row.publisher.trim() || hostnamePublisherLabel(row.publisher)
+      ? proposal(row.publisher, metadata.publisher) : null,
+    author: row.protected_author || row.author !== null ? null
+      : proposal(null as string | null, metadata.author),
   };
-  return json({ article: { id, title: row.title, status: row.status, revision: row.revision },
-    metadata, changes, has_useful_change: Boolean(changes.image || changes.publisher_display_title ||
-      changes.published_at) });
+  return { metadata, changes };
+}
+
+async function previewMetadata(db: D1Database, id: number): Promise<Response> {
+  const row = await articleForMetadata(db, id);
+  const { metadata, changes } = await metadataProposals(db, row, []);
+  return json({ article: { id, title: row.title, publisher: row.publisher,
+    status: row.status, revision: row.revision }, metadata, changes,
+    has_useful_change: Object.values(changes).some(Boolean) });
 }
 
 async function applyMetadata(request: Request, db: D1Database, id: number): Promise<Response> {
-  requireIdempotencyKey(request);
+  const eventKey = `admin:metadata:${requireIdempotencyKey(request)}`;
   const parsed = MetadataApplyBody.safeParse(await readJson(request));
   if (!parsed.success) throw new HttpError(400, 'invalid_metadata_apply_body');
-  const row = await db.prepare(`SELECT a.id, a.canonical_url, a.og_image_url, a.published_at,
-      a.display_title, a.display_title_origin, s.* FROM media_articles a JOIN media_sources s
-      ON s.source_key = a.source_key WHERE a.id = ?`).bind(id)
-    .first<Record<string, unknown> & SourceRow>();
-  if (!row) throw new HttpError(404, 'article_not_found');
-  if (row.og_image_url !== parsed.data.expected_current_image_url) {
+  const body = parsed.data;
+  const input = JSON.stringify(body);
+  const replay = async () => {
+    const event = await db.prepare('SELECT article_id, metadata_json FROM media_article_events WHERE event_key = ?')
+      .bind(eventKey).first<{ article_id: number; metadata_json: string }>();
+    if (!event) return false;
+    if (event.article_id !== id || JSON.parse(event.metadata_json).request !== input) {
+      throw new HttpError(409, 'idempotency_key_reused');
+    }
+    return true;
+  };
+  const row = await articleForMetadata(db, id);
+  const complete = async (syndicationChanged: boolean) => {
+    if (syndicationChanged && !await indexSyndicationHashes(db, [row.canonical_url_hash])) {
+      throw new HttpError(503, 'metadata_syndication_refresh_pending');
+    }
+    return articleDetail(db, id);
+  };
+  if (await replay()) return complete(Boolean(body.exact_headline || body.apply_publisher_published_at));
+  if (body.expected_revision !== undefined && body.expected_revision !== row.revision) {
+    throw new HttpError(409, 'article_revision_changed');
+  }
+  if (row.og_image_url !== body.expected_current_image_url) {
     throw new HttpError(409, 'metadata_current_image_changed');
   }
-  const metadata = await fetchMetadata(db, id, String(row.canonical_url), row);
-  const mayChangeImage = metadataImageChange(row.og_image_url,
-    parsed.data.expected_proposed_image_url, metadata.image_url,
-    parsed.data.replace_existing_image);
-  const maySetTitle = Boolean(parsed.data.apply_publisher_display_title && metadata.compact_title &&
-    row.display_title === null);
-  const maySetPublishedAt = metadataPublishedAtChange(row.published_at,
-    parsed.data.expected_current_published_at, parsed.data.expected_proposed_published_at,
-    metadata.published_at, parsed.data.apply_publisher_published_at);
-  if (!mayChangeImage && !maySetTitle && !maySetPublishedAt) {
+
+  const targets = [row.canonical_url, row.original_url];
+  const { metadata, changes } = await metadataProposals(db, row, targets);
+  const selected = <T>(expected?: { current: T; proposed: T },
+    actual?: { current: T; proposed: T } | null): T | undefined => {
+    if (!expected) return undefined;
+    if (!actual || expected.current !== actual.current || expected.proposed !== actual.proposed) {
+      throw new HttpError(409, 'metadata_proposal_changed');
+    }
+    return actual.proposed;
+  };
+  const title = selected(body.exact_headline, changes.exact_headline) ?? row.title;
+  const publisher = selected(body.publication, changes.publication) ?? row.publisher;
+  const author = selected<string | null>(body.author, changes.author) ?? row.author;
+  const changeImage = metadataImageChange(row.og_image_url, body.expected_proposed_image_url,
+    metadata.image_url, body.replace_existing_image);
+  const changeDate = metadataPublishedAtChange(row.published_at, body.expected_current_published_at,
+    body.expected_proposed_published_at, changes.published_at?.proposed ?? null,
+    body.apply_publisher_published_at);
+  const display = body.apply_publisher_display_title && row.display_title === null
+    ? metadata.compact_title : null;
+  if (title === row.title && publisher === row.publisher && author === row.author &&
+      !changeImage && !changeDate && !display) {
     return json({ changed: false, reason: 'no_useful_change' });
   }
+  const after = { title, publisher, author,
+    image: changeImage ? metadata.image_url : row.og_image_url,
+    published_at: changeDate ? metadata.published_at : row.published_at,
+    display_title: display ?? row.display_title };
   const now = new Date().toISOString();
-  const changed = await db.prepare(`UPDATE media_articles SET
-      og_image_url = CASE WHEN ? THEN ? ELSE og_image_url END,
-      preview_metadata_checked_at = ?,
-      display_title = CASE WHEN ? AND display_title IS NULL THEN ? ELSE display_title END,
-      display_title_origin = CASE WHEN ? AND display_title IS NULL THEN 'publisher' ELSE display_title_origin END,
-      published_at = CASE WHEN ? AND published_at IS NULL THEN ? ELSE published_at END,
-      updated_at = ?
-    WHERE id = ? AND og_image_url IS ? AND (? = 0 OR published_at IS ?)
-    RETURNING id`).bind(Number(mayChangeImage), metadata.image_url, metadata.checked_at,
-      Number(maySetTitle), metadata.compact_title, Number(maySetTitle),
-      Number(maySetPublishedAt), metadata.published_at, now, id,
-      parsed.data.expected_current_image_url, Number(maySetPublishedAt),
-      parsed.data.expected_current_published_at ?? null).first<{ id: number }>();
-  if (!changed) throw new HttpError(409, 'metadata_article_changed');
-  await reconcileHomepageLatestSix(db);
-  return articleDetail(db, id);
+  const audit = JSON.stringify({ field: 'publisher_metadata', request: input,
+    before: { title: row.title, publisher: row.publisher, author: row.author,
+      image: row.og_image_url, published_at: row.published_at, display_title: row.display_title },
+    after });
+  const [changed] = await db.batch([
+    db.prepare(`UPDATE media_articles SET title = ?, publisher = ?, author = ?, og_image_url = ?,
+      preview_metadata_checked_at = CASE WHEN ? THEN ? ELSE preview_metadata_checked_at END,
+      display_title = ?, display_title_origin = CASE WHEN ? IS NOT NULL THEN 'publisher' ELSE display_title_origin END,
+      published_at = ?, revision = revision + 1, mutation_key = ?, updated_at = ?
+      WHERE id = ? AND revision = ? AND source_key = ? AND image_policy = ?
+        AND title IS ? AND publisher IS ? AND author IS ? AND og_image_url IS ?
+        AND display_title IS ? AND published_at IS ?
+        AND EXISTS (SELECT 1 FROM media_sources s WHERE s.source_key = media_articles.source_key
+          AND s.retired_at IS NULL AND s.image_policy = ? AND s.name = ? AND s.canonical_domain = ?)
+        AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)
+        AND ${publisherAdmissionSql(targets)}`)
+      .bind(title, publisher, author, after.image, Number(changeImage), metadata.checked_at,
+        after.display_title, display, after.published_at, eventKey, now, id, row.revision,
+        row.source_key, row.article_image_policy, row.title, row.publisher, row.author,
+        row.og_image_url, row.display_title, row.published_at, row.image_policy, row.name,
+        row.canonical_domain, eventKey),
+    db.prepare(`INSERT INTO media_article_events (article_id, event_key, event_type, actor_type,
+      from_status, to_status, revision, created_at, metadata_json)
+      SELECT id, ?, 'edited', 'admin', status, status, revision, ?, ? FROM media_articles
+      WHERE id = ? AND mutation_key = ? AND revision = ?
+        AND NOT EXISTS (SELECT 1 FROM media_article_events WHERE event_key = ?)`)
+      .bind(eventKey, now, audit, id, eventKey, row.revision + 1, eventKey),
+    reconcileHomepageLatestSixStatement(db),
+  ]);
+  if (!changed?.meta.changes && !await replay()) throw new HttpError(409, 'metadata_article_changed');
+  return complete(title !== row.title || changeDate);
 }
 
 function requiredArticleRevision(request: Request): number {

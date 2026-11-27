@@ -1,4 +1,5 @@
 import { reviewDescription } from './review-text';
+import { publisherPublicationDate } from './publisher-publication-date';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 export const MAX_FEED_BYTES = 1024 * 1024;
@@ -351,7 +352,9 @@ export function parseRssItems(xml: string, maxItems: number,
       (guid['@_isPermaLink'] !== 'false' ? text(item.guid, 2048) : null);
     if (!title || !rawUrl) { invalid++; continue; }
     const date = text(item.pubDate, 100) ?? text(item['dc:date'], 100);
-    const dateMs = date ? Date.parse(date) : NaN;
+    // Preserve the calendar date when an ISO feed timestamp has no timezone.
+    const localDate = date !== null && /^\d{4}-\d{2}-\d{2}T[\d:.]+$/.test(date);
+    const dateMs = date && !localDate ? Date.parse(date) : NaN;
     const creators = list(item['dc:creator'])
       .map(value => text(value, 300)).filter((value): value is string => value !== null);
     const rawPreviewCandidates: Array<readonly [RssPreviewCandidateKind, unknown]> = [
@@ -369,7 +372,8 @@ export function parseRssItems(xml: string, maxItems: number,
       title,
       raw_url: rawUrl,
       author: creators.length ? creators.join(' and ').slice(0, 300) : null,
-      published_at: Number.isFinite(dateMs) ? new Date(dateMs).toISOString() : null,
+      published_at: localDate ? publisherPublicationDate(date)
+        : Number.isFinite(dateMs) ? new Date(dateMs).toISOString() : null,
       categories: list(item.category).map(value => text(value, 100))
         .filter((category): category is string => category !== null).slice(0, 20),
       review_excerpt: options.review_description ? reviewDescription(rawDescription(item.description)) : null,

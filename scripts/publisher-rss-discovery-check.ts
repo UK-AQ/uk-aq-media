@@ -157,12 +157,15 @@ const bbcPreview =
 const parsed = await parsePublisherRssFeed(`<?xml version="1.0"?>
 <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
   <item><title>Air quality improves</title><link>https://www.bbc.co.uk/news/a?utm_source=rss</link>
-  <category>Environment</category><media:thumbnail url="${bbcPreview}" /></item>
+  <category>Environment</category><pubDate>2026-09-17T00:00:00</pubDate>
+  <media:thumbnail url="${bbcPreview}" /></item>
   <item><title>Missing link</title></item>
 </channel></rss>`, source, 'bbc-news-top');
 assert.equal(parsed.items_seen, 2);
 assert.equal(parsed.items_invalid, 1);
 assert.equal(parsed.articles[0]?.canonical_url, 'https://bbc.co.uk/news/a');
+assert.equal(parsed.articles[0]?.original_url, 'https://www.bbc.co.uk/news/a?utm_source=rss');
+assert.equal(parsed.articles[0]?.published_at, '2026-09-17');
 assert.equal(parsed.articles[0]?.preview_url, bbcPreview);
 assert.equal(parsed.articles[0]?.title_context, null);
 assert.equal(remotePreviewUrl(bbcPreview, source), bbcPreview);

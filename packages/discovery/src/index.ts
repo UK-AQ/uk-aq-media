@@ -9,7 +9,11 @@ import {
   WorkersAiDisplayTitleProvider, displayTitleNeuronRates,
   suggestDisplayTitlePermitted,
 } from '@uk-aq-media/enrichment';
-import { discoverArticleHeadPreviewMetadata } from './article-head-metadata';
+import {
+  normalisePublisherHeadline, permitsPublisherHtml, publisherMetadataFailure,
+  resolvePublisherMetadata, verifiedPublisherHeadline, verifiedPublisherName,
+} from './publisher-metadata';
+import { observedMetadataOutcome, seedArticleMetadataWork } from './article-metadata-work';
 import { discoverAqn } from './aqn';
 import { CAWS_INDEX_ROUTE_KEY, configuredCawsIndex, discoverCaws } from './caws';
 import {
@@ -36,7 +40,6 @@ import {
   type GuardianRouteKey,
 } from './guardian';
 import { mediaDeterministicRelevanceFilter } from './relevance';
-import { fetchFamiliesForCleanAirPublishedDate } from './families-for-clean-air-date';
 import { ScanError, type FeedFailureDiagnostics, type ScanRetry } from './rss';
 import { publisherRssRetry } from './publisher-rss-retry';
 import {
@@ -46,6 +49,14 @@ import {
 
 import { recordReviewExcerpts } from './review-evidence';
 export { scheduleReviewEvidence, processReviewEvidence } from './review-evidence';
+export {
+  normalisePublisherHeadline, publisherRssMetadata, resolvePublisherMetadata,
+  hostnamePublisherLabel, verifiedPublisherName, type PublisherMetadata,
+} from './publisher-metadata';
+export {
+  enrichPersistedArticle, metadataEditProtectedSql, scheduleArticleMetadata, seedArticleMetadataWork,
+} from './article-metadata-work';
+
 
 export const DiscoveryMessageSchema = z.discriminatedUnion('type', [
   z.object({
@@ -96,7 +107,8 @@ export {
 } from './publisher-rss';
 export type { PublisherRssConfigurationDiagnostic, PublisherRssSourceKey } from './publisher-rss';
 export {
-  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
+  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata, normaliseMetadataText,
+  publisherPublicationDate,
 } from './article-head-metadata';
 export { extractCawsArticlePreviewImage, fetchCawsArticlePreviewImage } from './caws-preview-image';
 export type { ArticleHeadMetadata } from './article-head-metadata';
@@ -165,15 +177,18 @@ export function evaluateGuardianArticle(rules: AuthorRule[], routeKey: GuardianR
   return { matchedRules, accepted };
 }
 
-type ExistingPreviewState = {
+type ExistingMetadataState = {
   canonical_url_hash: string;
+  title: string;
   og_image_url: string | null;
+  author: string | null;
   published_at: string | null;
   image_policy: string;
   preview_metadata_checked_at: string | null;
 };
 
 const PREVIEW_RECHECK_SENTINEL = '1970-01-01T00:00:00.000Z';
+const INLINE_METADATA_LIMIT = 3;
 
 export type DisplayTitleAiRuntime = {
   binding: Ai;
@@ -301,65 +316,83 @@ async function generateDisplayTitleSuggestions(db: D1Database, source: Source,
   return displayTitleChanged;
 }
 
-async function fillArticleHeadPreviewMetadata(db: D1Database, source: Source,
-  articles: DiscoveredArticle[]): Promise<Set<string>> {
-  const blockedHashes = new Set<string>();
-  if (source.image_policy !== 'remote_preview' || articles.length === 0) return blockedHashes;
-  const placeholders = articles.map(() => '?').join(', ');
-  const { results } = await db.prepare(`SELECT canonical_url_hash, og_image_url, published_at,
-    image_policy, preview_metadata_checked_at FROM media_articles
-    WHERE canonical_url_hash IN (${placeholders})`)
-    .bind(...articles.map(article => article.canonical_url_hash)).all<ExistingPreviewState>();
-  const existing = new Map(results.map(row => [row.canonical_url_hash, row]));
+async function resolveDiscoveryMetadata(db: D1Database, source: Source, articles: DiscoveredArticle[],
+  existing: Map<string, ExistingMetadataState>): Promise<{
+    blocked: Set<string>; seeds: Parameters<typeof seedArticleMetadataWork>[1];
+  }> {
+  const blocked = new Set<string>();
+  const seeds: Parameters<typeof seedArticleMetadataWork>[1] = [];
+  let inline = 0;
   for (const article of articles) {
-    const state = existing.get(article.canonical_url_hash);
-    if (source.source_key === FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY &&
-        !state?.published_at && !article.published_at) {
-      try {
-        const publishedAt = await fetchFamiliesForCleanAirPublishedDate(article, source,
-          async url => { await requirePublisherDomainAllowed(db, url); });
-        if (publishedAt) article.published_at = publishedAt;
-      } catch (error) {
-        if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) {
-          blockedHashes.add(article.canonical_url_hash);
-          continue;
-        }
-        console.warn(JSON.stringify({ event: 'families_for_clean_air_date_lookup_failed',
-          article_hash: article.canonical_url_hash,
-          error_code: error instanceof ScanError ? error.code : 'date_lookup_failed' }));
-      }
+    const hash = article.canonical_url_hash;
+    const stored = existing.get(hash);
+    const publisher = verifiedPublisherName(source);
+    const acquiredTitle = article.title;
+    const cleanTitle = normalisePublisherHeadline(acquiredTitle, publisher, article.explicit_publisher_headline);
+    const preserveHistoricalSuffix = (newTitle: string, publication: string | null): string =>
+      stored && newTitle !== stored.title && newTitle === normalisePublisherHeadline(stored.title, publication)
+        ? stored.title : newTitle;
+    // Keep unverified new publisher-native wording until the bounded article
+    // lookup can confirm whether a trailing publication name is site branding.
+    article.title = acquiredTitle;
+    if (publisher) article.publisher = publisher;
+    const recheck = ['communities-against-woodsmoke', FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY].includes(source.source_key) &&
+      stored?.preview_metadata_checked_at === PREVIEW_RECHECK_SENTINEL;
+    if (!permitsPublisherHtml(source) || stored && stored.image_policy !== 'remote_preview') continue;
+    if (source.source_key === 'dsawsp') {
+      // This index already read each article's bounded metadata prefix.
+      seeds.push({ hash, status: article.author && article.published_at && article.preview_url
+        ? 'complete' : 'partial', force: true });
+      continue;
     }
-    const hasPreview = article.preview_url !== null || state?.og_image_url !== null &&
-      state?.og_image_url !== undefined;
-    const articleAllowsPreview = !state || state.image_policy === 'remote_preview';
-    const requestedRecheck = (source.source_key === 'communities-against-woodsmoke' ||
-      source.source_key === FAMILIES_FOR_CLEAN_AIR_SOURCE_KEY) &&
-      state?.preview_metadata_checked_at === PREVIEW_RECHECK_SENTINEL;
-    if (hasPreview || !articleAllowsPreview ||
-        state?.preview_metadata_checked_at && !requestedRecheck) continue;
+    const image = article.preview_url ?? stored?.og_image_url ?? null;
+    const author = article.author ?? stored?.author ?? null;
+    const date = article.published_at ?? stored?.published_at ?? null;
+    const titleNeedsVerification = cleanTitle !== acquiredTitle;
+    if (image && author && date && !titleNeedsVerification && !recheck) continue;
+
+    if (stored && !recheck || inline >= INLINE_METADATA_LIMIT) {
+      seeds.push({ hash, status: 'pending', fresh: !stored && titleNeedsVerification,
+        force: Boolean(recheck) });
+      continue;
+    }
+    inline++;
+    const urls: string[] = [];
     try {
-      Object.assign(article, await discoverArticleHeadPreviewMetadata(article, source, async url => {
-        try { await requirePublisherDomainAllowed(db, url); }
-        catch (error) {
-          if (error instanceof HttpError) throw error;
-          throw new ScanError('domain_block_state_unavailable');
-        }
-      }));
+      const metadata = await resolvePublisherMetadata(db, null, article, source,
+        { title: acquiredTitle, author, published_at: date, image_url: image,
+          display_title: article.display_title, fresh: !stored && titleNeedsVerification },
+        url => urls.push(url));
+      article.publisher = metadata.publisher ?? article.publisher;
+      const verifiedHeadline = metadata.explicit_headline ?? article.explicit_publisher_headline;
+      const proposedTitle = verifiedPublisherHeadline(acquiredTitle,
+        metadata.publisher ?? publisher, verifiedHeadline);
+      article.title = stored ? preserveHistoricalSuffix(proposedTitle, metadata.publisher ?? publisher)
+        : proposedTitle;
+      article.author ??= metadata.author;
+      article.published_at ??= metadata.published_at;
+      article.preview_url ??= metadata.image_url;
+      if (!article.display_title && metadata.compact_title) {
+        article.display_title = metadata.compact_title;
+        article.display_title_origin = 'publisher';
+      }
+      if (!image) article.preview_metadata_checked_at = metadata.checked_at;
+      seeds.push({ hash, status: observedMetadataOutcome({
+        author: article.author ?? author, published_at: article.published_at ?? date,
+        preview_url: article.preview_url ?? image,
+      }, metadata), force: true, fresh: !stored && titleNeedsVerification });
     } catch (error) {
       if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) {
-        blockedHashes.add(article.canonical_url_hash);
+        blocked.add(hash);
         continue;
       }
-      if (error instanceof ScanError && error.code === 'domain_block_state_unavailable') throw error;
-      console.warn(JSON.stringify({
-        event: 'article_head_metadata_failed',
-        source_key: source.source_key,
-        article_hash: article.canonical_url_hash,
-        error_code: error instanceof ScanError ? error.code : 'article_head_failed',
-      }));
+      seeds.push({ hash, status: publisherMetadataFailure(error), force: true,
+        fresh: !stored && titleNeedsVerification });
+    } finally {
+      article.publisher_resolved_urls = [...new Set([...(article.publisher_resolved_urls ?? []), ...urls])];
     }
   }
-  return blockedHashes;
+  return { blocked, seeds };
 }
 
 function scanFailureCategory(error: unknown): string {
@@ -530,7 +563,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
 
     for (const article of result.articles) {
       const resolved = resolvedTargets.get(article.canonical_url);
-      if (resolved) article.publisher_resolved_urls = [...resolved];
+      if (resolved && !article.publisher_resolved_urls) article.publisher_resolved_urls = [...resolved];
     }
     seen = result.items_seen;
     invalid = result.items_invalid;
@@ -560,12 +593,13 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       const guardianEvaluation = sourceKey === 'the-guardian' && routeKey
         ? evaluateGuardianArticle(rules, routeKey as GuardianRouteKey, article) : null;
       const matchedRules = guardianEvaluation?.matchedRules ?? [];
+      const relevanceTitle = normalisePublisherHeadline(article.title, verifiedPublisherName(source));
       const publisherRelevant = [
         'air-quality-news', 'the-guardian', 'mums-for-lungs', 'dsawsp',
         'communities-against-woodsmoke', 'ncas', 'clean-air-fund',
         'healthy-air-coalition', 'breathe-london-communities',
       ].includes(sourceKey) ||
-        mediaDeterministicRelevanceFilter.evaluate({ title: article.title,
+        mediaDeterministicRelevanceFilter.evaluate({ title: relevanceTitle,
           canonical_url: article.canonical_url, categories: article.categories }).relevant ||
         (sourceKey === GLOBAL_ACTION_PLAN_SOURCE_KEY &&
           hasGlobalActionPlanAirQualityTag(article.categories));
@@ -577,12 +611,15 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       acceptedRules.set(article.canonical_url_hash, matchedRules);
     }
     stage = 'article_metadata';
-    // Global Action Plan preview metadata comes from the index cards.
-    if (sourceKey !== GLOBAL_ACTION_PLAN_SOURCE_KEY) {
-      const metadataBlocked = await fillArticleHeadPreviewMetadata(db, source, acceptedArticles);
-      filtered += metadataBlocked.size;
-      acceptedArticles = acceptedArticles.filter(article => !metadataBlocked.has(article.canonical_url_hash));
-    }
+    const observedHashes = acceptedArticles.map(article => article.canonical_url_hash);
+    const existing = new Map(observedHashes.length === 0 ? [] : (await db.prepare(`
+      SELECT canonical_url_hash, title, og_image_url, author, published_at, image_policy, preview_metadata_checked_at
+      FROM media_articles WHERE canonical_url_hash IN (SELECT value FROM json_each(?))`)
+      .bind(JSON.stringify(observedHashes)).all<ExistingMetadataState>()).results
+      .map(row => [row.canonical_url_hash, row] as const));
+    const metadata = await resolveDiscoveryMetadata(db, source, acceptedArticles, existing);
+    filtered += metadata.blocked.size;
+    acceptedArticles = acceptedArticles.filter(article => !metadata.blocked.has(article.canonical_url_hash));
     const currentBlocked = await blockedPublisherHosts(db,
       acceptedArticles.flatMap(article => [article.canonical_url, article.original_url,
         ...(article.publisher_resolved_urls ?? [])].map(publisherHostname)));
@@ -594,12 +631,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     });
     stage = 'prepare_persistence';
     const acceptedHashes = acceptedArticles.map(article => article.canonical_url_hash);
-    const existingHashes = acceptedHashes.length === 0 ? new Set<string>() : new Set(
-      (await db.prepare(`SELECT canonical_url_hash FROM media_articles
-        WHERE canonical_url_hash IN (${acceptedHashes.map(() => '?').join(', ')})`)
-        .bind(...acceptedHashes).all<{ canonical_url_hash: string }>()).results
-        .map(row => row.canonical_url_hash),
-    );
+    const existingHashes = new Set(existing.keys());
     for (const article of acceptedArticles) {
       const matchedRules = acceptedRules.get(article.canonical_url_hash) ?? [];
       const publicationRule = publicationAuthorRule(matchedRules);
@@ -620,6 +652,9 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
       statements.push(persistDiscoveryEvidence(db, source, providerKey, routeKey ?? sourceKey,
         article, matchedRules, approvalObservationKey, now));
     }
+    const admitted = new Set(acceptedHashes);
+    const metadataSeeds = metadata.seeds.filter(seed => admitted.has(seed.hash));
+    if (metadataSeeds.length) statements.push(seedArticleMetadataWork(db, metadataSeeds, now));
     const eligibleCountSql = (newIdentity: boolean): string => {
       const rows = acceptedArticles.filter(article => existingHashes.has(article.canonical_url_hash) !== newIdentity);
       // Cloudflare D1 limits compound SELECTs to five terms. Build a bounded

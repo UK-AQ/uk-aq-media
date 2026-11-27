@@ -84,7 +84,7 @@ export function configuredCleanAirFundResources(source: Source): boolean {
 }
 
 export type CleanAirFundIndexCandidate = {
-  canonical_url: string; title: string; published_at: string; categories: string[];
+  canonical_url: string; original_url: string; title: string; published_at: string; categories: string[];
 };
 
 // Publisher cards may separate their linked image, heading and date into sibling
@@ -145,7 +145,7 @@ function cardTitle(fragment: string, anchorOpening: string): string | null {
 }
 
 function candidateFromCard(fragment: string, anchorOpening: string,
-  canonical: string, source: Source): CleanAirFundIndexCandidate | null {
+  canonical: string, source: Source): Omit<CleanAirFundIndexCandidate, 'original_url'> | null {
   // Never use dates or titles from a listing section that contains a different
   // news-item URL. Repeated links to the same article are harmless.
   for (const anchor of fragment.matchAll(/<a\b([^>]*)>/gi)) {
@@ -171,7 +171,7 @@ function candidateFromCard(fragment: string, anchorOpening: string,
 }
 
 export function extractCleanAirFundIndexCandidates(html: string,
-  source: Source): CleanAirFundIndexCandidate[] {
+  source: Source, indexUrl = CLEAN_AIR_FUND_INDEX_URL): CleanAirFundIndexCandidate[] {
   if (!configuredCleanAirFundIndex(source)) throw new ScanError('clean_air_fund_config_mismatch');
   // Script and style contents are not publisher cards. Preserve offsets while
   // masking them to keep the element scan confined to real markup.
@@ -187,12 +187,14 @@ export function extractCleanAirFundIndexCandidates(html: string,
     const href = attribute(anchor.opening, 'href');
     if (!href) continue;
     let canonical: string;
+    let original: string;
     try {
-      const permitted = publisherHttpsUrl(new URL(href, CLEAN_AIR_FUND_INDEX_URL).href, source);
+      const permitted = publisherHttpsUrl(new URL(href, indexUrl).href, source);
       if (!permitted) continue;
-      const url = new URL(permitted);
+      const url = new URL(href, CLEAN_AIR_FUND_INDEX_URL);
       if (!/^\/news-item\/[a-z0-9-]+\/$/i.test(url.pathname) || url.search || url.hash) continue;
-      canonical = canonicalizeUrl(permitted, source);
+      original = permitted;
+      canonical = canonicalizeUrl(url.href, source);
     } catch { continue; }
     if (seen.has(canonical)) continue;
     for (let index: number | null = anchorIndex; index !== null;
@@ -203,7 +205,7 @@ export function extractCleanAirFundIndexCandidates(html: string,
         anchor.opening, canonical, source);
       if (!candidate) continue;
       seen.add(canonical);
-      candidates.push(candidate);
+      candidates.push({ ...candidate, original_url: original });
       break;
     }
   }
@@ -233,7 +235,7 @@ function resourcePublicationDate(value: string): {
 }
 
 function resourceFromCard(fragment: string, canonical: string,
-  source: Source): CleanAirFundIndexCandidate | null {
+  source: Source): Omit<CleanAirFundIndexCandidate, 'original_url'> | null {
   for (const anchor of fragment.matchAll(/<a\b([^>]*)>/gi)) {
     const raw = attribute(anchor[1] ?? '', 'href');
     if (!raw) continue;
@@ -272,7 +274,7 @@ function resourceFromCard(fragment: string, canonical: string,
 }
 
 export function extractCleanAirFundResourcesCandidates(html: string,
-  source: Source): CleanAirFundIndexCandidate[] {
+  source: Source, indexUrl = CLEAN_AIR_FUND_RESOURCES_URL): CleanAirFundIndexCandidate[] {
   if (!configuredCleanAirFundResources(source)) {
     throw new ScanError('clean_air_fund_resources_config_mismatch');
   }
@@ -288,12 +290,14 @@ export function extractCleanAirFundResourcesCandidates(html: string,
     const raw = attribute(anchor.opening, 'href');
     if (!raw) continue;
     let canonical: string;
+    let original: string;
     try {
-      const permitted = publisherHttpsUrl(new URL(raw, CLEAN_AIR_FUND_RESOURCES_URL).href, source);
+      const permitted = publisherHttpsUrl(new URL(raw, indexUrl).href, source);
       if (!permitted) continue;
-      const url = new URL(permitted);
+      const url = new URL(raw, CLEAN_AIR_FUND_RESOURCES_URL);
       if (!/^\/resource\/[a-z0-9-]+\/$/i.test(url.pathname) || url.search || url.hash) continue;
-      canonical = canonicalizeUrl(permitted, source);
+      original = permitted;
+      canonical = canonicalizeUrl(url.href, source);
     } catch { continue; }
     if (seen.has(canonical)) continue;
     // A resource card is one list item. Never widen the search to the listing.
@@ -308,7 +312,7 @@ export function extractCleanAirFundResourcesCandidates(html: string,
       const candidate = resourceFromCard(markup.slice(element.start, element.end), canonical, source);
       if (candidate) {
         seen.add(canonical);
-        candidates.push(candidate);
+        candidates.push({ ...candidate, original_url: original });
       }
       break;
     }
@@ -327,7 +331,7 @@ function permittedIndexUrl(raw: string, source: Source,
 }
 
 async function fetchIndex(source: Source, fetcher: typeof fetch,
-  indexUrl = CLEAN_AIR_FUND_INDEX_URL): Promise<string> {
+  indexUrl = CLEAN_AIR_FUND_INDEX_URL): Promise<{ html: string; url: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
@@ -376,7 +380,7 @@ async function fetchIndex(source: Source, fetcher: typeof fetch,
     try {
       for (;;) {
         const { value, done } = await reader.read();
-        if (done) return html + decoder.decode();
+        if (done) return { html: html + decoder.decode(), url: requestUrl };
         bytes += value.byteLength;
         if (bytes > INDEX_MAX_BYTES) throw new ScanError('clean_air_fund_html_too_large');
         html += decoder.decode(value, { stream: true });
@@ -396,11 +400,12 @@ export async function discoverCleanAirFund(source: Source,
   fetcher: typeof fetch = fetch): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
-  const candidates = extractCleanAirFundIndexCandidates(await fetchIndex(source, fetcher), source);
+  const index = await fetchIndex(source, fetcher);
+  const candidates = extractCleanAirFundIndexCandidates(index.html, source, index.url);
   const articles = await Promise.all(candidates.map(async candidate => ({
     canonical_url: candidate.canonical_url,
     canonical_url_hash: await canonicalUrlHash(candidate.canonical_url),
-    original_url: candidate.canonical_url,
+    original_url: candidate.original_url,
     title: candidate.title,
     author: null,
     published_at: candidate.published_at,
@@ -418,12 +423,12 @@ export async function discoverCleanAirFundResources(source: Source,
   fetcher: typeof fetch = fetch): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
-  const candidates = extractCleanAirFundResourcesCandidates(
-    await fetchIndex(source, fetcher, CLEAN_AIR_FUND_RESOURCES_URL), source);
+  const index = await fetchIndex(source, fetcher, CLEAN_AIR_FUND_RESOURCES_URL);
+  const candidates = extractCleanAirFundResourcesCandidates(index.html, source, index.url);
   const articles = await Promise.all(candidates.map(async candidate => ({
     canonical_url: candidate.canonical_url,
     canonical_url_hash: await canonicalUrlHash(candidate.canonical_url),
-    original_url: candidate.canonical_url,
+    original_url: candidate.original_url,
     title: candidate.title,
     author: null,
     published_at: candidate.published_at,

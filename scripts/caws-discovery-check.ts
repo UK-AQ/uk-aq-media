@@ -35,8 +35,10 @@ const html = `<nav><a href="/">Home</a><a href="/contact/">Contact</a></nav>
 <footer><a href="/privacy-policy/">Privacy Policy</a></footer>`;
 assert.deepEqual(extractCawsIndexCandidates(html, source), [
   { canonical_url: 'https://communitiesagainstwoodsmoke.com/blog/first-article/',
+    original_url: 'https://www.communitiesagainstwoodsmoke.com/blog/first-article/',
     title: 'First & valid article', published_at: '2026-05-13' },
   { canonical_url: 'https://communitiesagainstwoodsmoke.com/blog/second-article/',
+    original_url: 'https://www.communitiesagainstwoodsmoke.com/blog/second-article/',
     title: 'Second article', published_at: '2026-03-29' },
 ]);
 assert.throws(() => extractCawsIndexCandidates(html.replace(

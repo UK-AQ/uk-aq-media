@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import {
   discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
+  publisherPublicationDate,
 } from '../packages/discovery/src/article-head-metadata';
 import { ScanError } from '../packages/discovery/src/rss';
+import { normalisePublisherHeadline, resolvePublisherHeadMetadata }
+  from '../packages/discovery/src/publisher-metadata';
 import {
   canonicalizeUrl, publisherHttpsUrl, remotePreviewUrl, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
@@ -97,6 +100,39 @@ try {
   await assert.rejects(fetchArticleHeadMetadata(article.canonical_url, source),
     (error: unknown) => error instanceof ScanError && error.code === 'article_head_incomplete');
 } finally { globalThis.fetch = originalFetch; }
+
+const wrapped = 'Air pollution and asthma | Publisher';
+assert.equal(normalisePublisherHeadline(wrapped, 'Publisher'), 'Air pollution and asthma');
+assert.equal(normalisePublisherHeadline(wrapped, 'Publisher', wrapped), wrapped);
+assert.equal(normalisePublisherHeadline('In conversation with Publisher', 'Publisher'),
+  'In conversation with Publisher');
+assert.equal(normalisePublisherHeadline('Air quality | Publisher | Publisher', 'Publisher'),
+  'Air quality | Publisher');
+
+let metadataRequests = 0;
+globalThis.fetch = async () => {
+  metadataRequests++;
+  return streamedHtml([
+    `<head><title>${wrapped}</title><script type="application/ld+json">
+      {"@graph":[{"@type":"NewsArticle","url":"/recommendation","headline":"Other article","author":"Other Author"},
+      {"@type":"NewsArticle","url":"/article","datePublished":"2026-09-17T00:00:00","dateModified":"2026-09-20"}]}
+    </script></head>`,
+    '<body><article><h1>Air pollution and asthma</h1><p class="byline">By Publisher Author</p></article>',
+  ]);
+};
+try {
+  const resolved = await resolvePublisherHeadMetadata(article.canonical_url, source, async () => {}, {
+    title: wrapped, author: null, published_at: null, fresh: true,
+    image_url: 'https://publisher.example/existing.jpg',
+  });
+  assert.equal(resolved.title, 'Air pollution and asthma');
+  assert.equal(resolved.author, 'Publisher Author');
+  assert.equal(resolved.published_at, '2026-09-17');
+  assert.equal(metadataRequests, 1);
+} finally { globalThis.fetch = originalFetch; }
+assert.equal(publisherPublicationDate('2026-09-17'), '2026-09-17');
+assert.equal(publisherPublicationDate('2026-09-17T00:00:00+01:00'), '2026-09-16T23:00:00.000Z');
+assert.equal(publisherPublicationDate('2026-02-29T00:00:00'), null);
 
 const bbcSource: Source = {
   ...source,
@@ -343,6 +379,46 @@ assert.deepEqual(await checkRedirects(new Map([
 ]), 'https://publisher.example/path/start'), [
   'https://publisher.example/path/start', 'https://publisher.example/article',
 ]);
+
+const canonicalTarget = 'https://publisher.example/article?edition=uk';
+const originalTarget = 'https://www.publisher.example/article?edition=uk';
+const requests: string[] = [];
+const signals = new Set<AbortSignal | null | undefined>();
+let location = 'http://www.publisher.example/article?edition=uk#publisher';
+let alternateRedirect = false;
+globalThis.fetch = async (input, init) => {
+  const url = String(input);
+  requests.push(url);
+  signals.add(init?.signal);
+  assert.equal(init?.redirect, 'manual');
+  if (url === canonicalTarget || alternateRedirect) {
+    return new Response(null, { status: 301, headers: { Location: location } });
+  }
+  assert.match(url, /^https:\/\/www\.publisher\.example\//);
+  return new Response(`<head><meta property="og:url" content="${canonicalTarget}">
+    <meta property="og:image" content="/preview.jpg"></head>`,
+  { headers: { 'Content-Type': 'text/html' } });
+};
+try {
+  const preferred = originalTarget + '&utm_source=feed#original';
+  const direct = await fetchArticleHeadMetadata({ canonical_url: canonicalTarget, original_url: preferred }, source);
+  assert.equal(direct.previewUrl, 'https://www.publisher.example/preview.jpg');
+  assert.deepEqual(requests.splice(0), [preferred.split('#')[0]]);
+  signals.clear();
+  const checked: string[] = [];
+  const recovered = await fetchArticleHeadMetadata(canonicalTarget, source, async url => { checked.push(url); });
+  assert.equal(recovered.previewUrl, 'https://www.publisher.example/preview.jpg');
+  assert.deepEqual(requests.splice(0), [canonicalTarget, originalTarget]);
+  assert.deepEqual(checked, [canonicalTarget, originalTarget]);
+  assert.equal(signals.size, 1);
+
+  alternateRedirect = true;
+  await assert.rejects(fetchArticleHeadMetadata(canonicalTarget, source), /article_head_redirect_not_permitted/);
+  assert.deepEqual(requests.splice(0), [canonicalTarget, originalTarget]);
+  location = 'http://www.publisher.example/article?edition=other';
+  await assert.rejects(fetchArticleHeadMetadata(canonicalTarget, source), /article_head_redirect_not_permitted/);
+  assert.deepEqual(requests, [canonicalTarget]);
+} finally { globalThis.fetch = originalFetch; }
 
 const independentSource: Source = {
   ...source,

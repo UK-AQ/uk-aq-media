@@ -58,8 +58,9 @@ export function extractFamiliesForCleanAirPublishedDate(html: string,
   return calendarDate(Number(written[3]), month, Number(written[2]));
 }
 
-export async function fetchFamiliesForCleanAirPublishedDate(article: DiscoveredArticle,
-  source: Source, requireAllowedUrl?: (url: string) => Promise<void>,
+export async function fetchFamiliesForCleanAirPublishedDate(
+  article: Pick<DiscoveredArticle, 'canonical_url' | 'title'>,
+  source: Pick<Source, 'source_key' | 'canonical_domain'>, requireAllowedUrl?: (url: string) => Promise<void>,
   fetcher: typeof fetch = fetch): Promise<string | null> {
   if (source.source_key !== 'families-for-clean-air' ||
       source.canonical_domain !== 'familiesforcleanair.org') {

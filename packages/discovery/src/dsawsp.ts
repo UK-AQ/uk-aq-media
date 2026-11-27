@@ -2,7 +2,12 @@ import {
   canonicalizeUrl, canonicalUrlHash, publisherHttpsUrl, remotePreviewUrl,
   type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
+import {
+  extractArticleHeadMetadata, extractPublisherArticleMetadata, previewImageFromPublisherMetadata,
+  publisherPublicationDate,
+} from './article-head-metadata';
 import { ScanError } from './rss';
+import { fetchPublisherArticleMetadata } from './article-metadata-fetch';
 
 export const DSAWSP_INDEX_ROUTE_KEY = 'dsawsp-news-extras';
 export const DSAWSP_INDEX_URL = 'https://www.dsawsp.org/resources/blog';
@@ -48,18 +53,26 @@ export function configuredDsawspIndex(source: Source): boolean {
 }
 
 export function extractDsawspIndexUrls(html: string, source: Source): string[] {
-  const urls = new Set<string>();
+  return extractDsawspIndexArticles(html, source, DSAWSP_INDEX_URL).map(article => article.canonical_url);
+}
+
+type DsawspIndexArticle = Pick<DiscoveredArticle, 'canonical_url' | 'original_url'>;
+
+function extractDsawspIndexArticles(html: string, source: Source, indexUrl: string): DsawspIndexArticle[] {
+  const articles = new Map<string, DsawspIndexArticle>();
   for (const match of html.matchAll(/<a\b([^>]*)>/gi)) {
     const raw = attribute(match[1] ?? '', 'href');
     if (!raw) continue;
-    let absolute: string;
-    try { absolute = new URL(raw, DSAWSP_INDEX_URL).href; } catch { continue; }
-    const permitted = publisherHttpsUrl(absolute, source);
-    if (!permitted || !new URL(permitted).pathname.startsWith('/blog/')) continue;
-    try { urls.add(canonicalizeUrl(permitted, source)); } catch { continue; }
-    if (urls.size >= DSAWSP_MAX_ITEMS) break;
+    try {
+      const permitted = publisherHttpsUrl(new URL(raw, indexUrl).href, source);
+      const identity = new URL(raw, DSAWSP_INDEX_URL);
+      if (!permitted || !identity.pathname.startsWith('/blog/')) continue;
+      const canonical = canonicalizeUrl(identity.href, source);
+      if (!articles.has(canonical)) articles.set(canonical, { canonical_url: canonical, original_url: permitted });
+    } catch { continue; }
+    if (articles.size >= DSAWSP_MAX_ITEMS) break;
   }
-  return [...urls];
+  return [...articles.values()];
 }
 
 export function extractDsawspNextIndexUrl(html: string, currentUrl: string,
@@ -102,50 +115,12 @@ function dsawspImageCandidate(raw: string | null | undefined, articleUrl: string
   catch { return null; }
 }
 
-function dsawspStructuredImageCandidates(value: unknown): string[] {
-  if (Array.isArray(value)) return value.flatMap(dsawspStructuredImageCandidates);
-  if (!value || typeof value !== 'object') return [];
-  const record = value as Record<string, unknown>;
-  const types = (Array.isArray(record['@type']) ? record['@type'] : [record['@type']])
-    .filter((candidate): candidate is string => typeof candidate === 'string');
-  const article = types.some(type => /^(?:Article|BlogPosting|NewsArticle)$/i.test(type));
-  const results: string[] = [];
-  if (article) {
-    for (const field of [record.image, record.thumbnailUrl]) {
-      if (typeof field === 'string') results.push(field);
-      else if (Array.isArray(field)) {
-        for (const item of field) {
-          if (typeof item === 'string') results.push(item);
-          else if (item && typeof item === 'object') {
-            const image = item as Record<string, unknown>;
-            for (const key of ['url', 'contentUrl']) {
-              if (typeof image[key] === 'string') results.push(image[key] as string);
-            }
-          }
-        }
-      } else if (field && typeof field === 'object') {
-        const image = field as Record<string, unknown>;
-        for (const key of ['url', 'contentUrl']) {
-          if (typeof image[key] === 'string') results.push(image[key] as string);
-        }
-      }
-    }
-  }
-  return results.concat(Object.values(record).flatMap(dsawspStructuredImageCandidates));
-}
-
 export function extractDsawspArticlePreviewImage(html: string, articleUrl: string,
-  source: DsawspPreviewSource): string | null {
+  source: DsawspPreviewSource, includeStructured = true): string | null {
   if (source.source_key !== 'dsawsp' || source.image_policy !== 'remote_preview') return null;
-  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
-    const attrs = match[1] ?? '';
-    if (attribute(attrs, 'type')?.trim().toLowerCase() !== 'application/ld+json') continue;
-    try {
-      for (const candidate of dsawspStructuredImageCandidates(JSON.parse(match[2] ?? ''))) {
-        const accepted = dsawspImageCandidate(candidate, articleUrl, source);
-        if (accepted) return accepted;
-      }
-    } catch { /* Optional publisher metadata may be malformed. */ }
+  if (includeStructured) {
+    const preview = previewImageFromPublisherMetadata(extractArticleHeadMetadata(html, articleUrl), articleUrl, source);
+    if (preview) return preview;
   }
 
   for (const match of html.matchAll(/<img\b([^>]*)>/gi)) {
@@ -181,39 +156,33 @@ function dsawspDate(value: string): string | null {
 }
 
 export function extractDsawspArticleMetadata(html: string, source: Source,
-  articleUrl: string = DSAWSP_INDEX_URL): {
+  articleUrl: string = DSAWSP_INDEX_URL, canonicalUrl?: string): {
   title: string | null; publishedAt: string | null; category: string | null;
   previewUrl: string | null;
 } {
-  const meta = new Map<string, string>();
-  for (const match of html.matchAll(/<meta\b([^>]*)>/gi)) {
-    const attrs = match[1] ?? '';
-    const key = attribute(attrs, 'property') ?? attribute(attrs, 'name');
-    const value = attribute(attrs, 'content');
-    if (key && value && !meta.has(key.toLowerCase())) meta.set(key.toLowerCase(), text(value));
-  }
-  const title = text(meta.get('og:title') ??
-    /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html)?.[1] ?? '') || null;
+  const head = extractArticleHeadMetadata(html, articleUrl,
+    canonicalUrl ? { canonicalUrl, source } : undefined);
+  const title = head.explicitHeadline ?? head.ogTitle ?? head.twitterTitle ?? head.htmlTitle;
   const date = /<[^>]*\bclass\s*=\s*(?:"[^"]*\bblog-date\b[^"]*"|'[^']*\bblog-date\b[^']*')[^>]*>([\s\S]*?)<\/[^>]+>/i.exec(html)?.[1];
   const category = /<a\b[^>]*\bclass\s*=\s*(?:"[^"]*\bcategory-link\b[^"]*"|'[^']*\bcategory-link\b[^']*')[^>]*>([\s\S]*?)<\/a\s*>/i.exec(html)?.[1];
-  const image = meta.get('og:image') ?? meta.get('twitter:image') ?? null;
-  const previewUrl = image ? remotePreviewUrl(image, source) : null;
-  return { title, publishedAt: date ? dsawspDate(date) : null,
+  const previewUrl = previewImageFromPublisherMetadata(head, articleUrl, source);
+  return { title, publishedAt: (date ? dsawspDate(date) : null) ?? publisherPublicationDate(head.publishedAt),
     category: category ? text(category).slice(0, 100) || null : null,
-    previewUrl: previewUrl ?? extractDsawspArticlePreviewImage(html, articleUrl, source) };
+    previewUrl: previewUrl ?? extractDsawspArticlePreviewImage(html, articleUrl, source, false) };
 }
 
 export async function fetchDsawspArticlePreviewImage(articleUrl: string,
   source: DsawspPreviewSource, fetcher: typeof fetch = fetch): Promise<string | null> {
   if (source.source_key !== 'dsawsp' || source.image_policy !== 'remote_preview') return null;
-  const html = await fetchBoundedHtml(articleUrl, source, ARTICLE_MAX_BYTES,
-    value => Boolean(extractDsawspArticlePreviewImage(value, articleUrl, source)), fetcher);
-  return extractDsawspArticlePreviewImage(html, articleUrl, source);
+  const page = await fetchBoundedHtml(articleUrl, source, ARTICLE_MAX_BYTES,
+    (html, url) => Boolean(extractDsawspArticlePreviewImage(html, url, source)), fetcher);
+  return extractDsawspArticlePreviewImage(page.html, page.url, source);
 }
 
 async function fetchBoundedHtml(url: string,
   source: Pick<Source, 'source_key' | 'canonical_domain'>, maximumBytes: number,
-  enough?: (html: string) => boolean, fetcher: typeof fetch = fetch): Promise<string> {
+  enough?: (html: string, url: string) => boolean, fetcher: typeof fetch = fetch):
+  Promise<{ html: string; url: string }> {
   const permitted = publisherHttpsUrl(url, source);
   if (!permitted) throw new ScanError('dsawsp_url_not_permitted');
   const controller = new AbortController();
@@ -247,65 +216,82 @@ async function fetchBoundedHtml(url: string,
       await response.body.cancel();
       throw new ScanError('dsawsp_not_html');
     }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
-    let bytes = 0;
-    let html = '';
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) return html + decoder.decode();
-        bytes += value.byteLength;
-        if (bytes > maximumBytes) throw new ScanError('dsawsp_html_too_large');
-        html += decoder.decode(value, { stream: true });
-        if (enough?.(html)) return html;
-      }
-    } finally { try { await reader.cancel('bounded DSAWSP metadata obtained'); } catch { /* best effort */ } }
+    return { html: await readDsawspHtml(response, requestUrl, maximumBytes, enough), url: requestUrl };
   } catch (error) {
     if (error instanceof ScanError) throw error;
     throw new ScanError(controller.signal.aborted ? 'dsawsp_timeout' : 'dsawsp_read_failed');
   } finally { clearTimeout(timeout); }
 }
 
+async function readDsawspHtml(response: Response, url: string, maximumBytes: number,
+  enough?: (html: string, url: string) => boolean): Promise<string> {
+  if (!response.body) throw new ScanError('dsawsp_missing_body');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+  let bytes = 0;
+  let html = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return html + decoder.decode();
+      bytes += value.byteLength;
+      if (bytes > maximumBytes) throw new ScanError('dsawsp_html_too_large');
+      html += decoder.decode(value, { stream: true });
+      if (enough?.(html, url)) return html;
+    }
+  } finally { try { await reader.cancel('bounded DSAWSP metadata obtained'); } catch { /* best effort */ } }
+}
+
 export async function discoverDsawsp(source: Source, fetcher: typeof fetch = fetch): Promise<{
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   if (!configuredDsawspIndex(source)) throw new ScanError('dsawsp_config_mismatch');
-  const urls: string[] = [];
-  const seenUrls = new Set<string>();
+  const candidates = new Map<string, DsawspIndexArticle>();
   const fetchedPages = new Set<string>();
   let indexUrl: string | null = DSAWSP_INDEX_URL;
   for (let page = 0; indexUrl && page < DSAWSP_MAX_INDEX_PAGES &&
-      urls.length < DSAWSP_MAX_ITEMS; page++) {
+      candidates.size < DSAWSP_MAX_ITEMS; page++) {
     if (fetchedPages.has(indexUrl)) break;
     fetchedPages.add(indexUrl);
-    const currentUrl = indexUrl;
-    const index = await fetchBoundedHtml(currentUrl, source, INDEX_MAX_BYTES,
-      value => extractDsawspIndexUrls(value, source).length >= DSAWSP_MAX_ITEMS, fetcher);
-    for (const articleUrl of extractDsawspIndexUrls(index, source)) {
-      if (seenUrls.has(articleUrl)) continue;
-      seenUrls.add(articleUrl);
-      urls.push(articleUrl);
-      if (urls.length >= DSAWSP_MAX_ITEMS) break;
+    const index = await fetchBoundedHtml(indexUrl, source, INDEX_MAX_BYTES,
+      (html, url) => extractDsawspIndexArticles(html, source, url).length >= DSAWSP_MAX_ITEMS, fetcher);
+    for (const article of extractDsawspIndexArticles(index.html, source, index.url)) {
+      if (!candidates.has(article.canonical_url)) candidates.set(article.canonical_url, article);
+      if (candidates.size >= DSAWSP_MAX_ITEMS) break;
     }
-    indexUrl = extractDsawspNextIndexUrl(index, currentUrl, source);
+    indexUrl = extractDsawspNextIndexUrl(index.html, indexUrl, source);
   }
   const articles: DiscoveredArticle[] = [];
   let invalid = 0;
-  for (const canonical of urls) {
+  for (const article of candidates.values()) {
     try {
-      const html = await fetchBoundedHtml(canonical, source, ARTICLE_MAX_BYTES, value => {
-        const metadata = extractDsawspArticleMetadata(value, source, canonical);
-        return Boolean(metadata.title && metadata.publishedAt && metadata.category && metadata.previewUrl);
-      }, fetcher);
-      const metadata = extractDsawspArticleMetadata(html, source, canonical);
+      const canonical = article.canonical_url;
+      const resolvedUrls: string[] = [];
+      const { html, url } = await fetchPublisherArticleMetadata(article, source, async (response, url) => ({
+        url,
+        html: await readDsawspHtml(response, url, ARTICLE_MAX_BYTES, (html, url) => {
+          const metadata = extractDsawspArticleMetadata(html, source, url, canonical);
+          return Boolean(metadata.title && metadata.publishedAt && metadata.category && metadata.previewUrl);
+        }),
+      }), {
+        maxRedirects: MAX_REDIRECTS,
+        fetcher: (input, init) => {
+          resolvedUrls.push(String(input));
+          return fetcher(input, init);
+        },
+      });
+      const metadata = extractDsawspArticleMetadata(html, source, url, canonical);
       if (!metadata.title) { invalid++; continue; }
-      articles.push({ canonical_url: canonical, canonical_url_hash: await canonicalUrlHash(canonical),
-        original_url: canonical, title: metadata.title, author: null,
-        published_at: metadata.publishedAt, categories: metadata.category ? [metadata.category] : [],
+      const shared = extractPublisherArticleMetadata(html, url, metadata.title, undefined,
+        { canonicalUrl: canonical, source });
+      articles.push({ ...article, canonical_url_hash: await canonicalUrlHash(canonical),
+        publisher_resolved_urls: resolvedUrls, title: shared.explicitHeadline ?? metadata.title,
+        explicit_publisher_headline: shared.explicitHeadline,
+        author: shared.author, published_at: metadata.publishedAt ?? publisherPublicationDate(shared.publishedAt),
+        categories: metadata.category ? [metadata.category] : [],
         title_context: null, preview_url: metadata.previewUrl, display_title: null,
         display_title_origin: null, preview_metadata_checked_at: new Date().toISOString() });
     } catch { invalid++; }
   }
-  return { articles, items_seen: urls.length, items_invalid: invalid };
+  return { articles, items_seen: candidates.size, items_invalid: invalid };
 }

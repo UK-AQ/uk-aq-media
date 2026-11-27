@@ -4,6 +4,7 @@ import {
   isBlueskyWakeup, readBoundedImageResponse, remotePreviewUrl, renderBlueskyPost,
   reconcileHomepageLatestSix, storeLocalImage, validateLocalImageBytes,
   reconcileBlueskyPublications, scheduleBlueskyWake, claimBlueskyWake, completeBlueskyWake,
+  requirePublisherDomainAllowed,
   type Source,
 } from '@uk-aq-media/core';
 import { fetchArticleHeadMetadata, type ArticleHeadMetadata } from '@uk-aq-media/discovery';
@@ -12,7 +13,7 @@ type Settings = { publishing_enabled: number; activation_event_id: number | null
   cooldown_seconds: number; default_message_template: string; last_successful_post_at: string | null };
 type Publication = { id: number; article_id: number; publication_key: string; status: string;
   publication_reason: string; attempt_count: number; record_key: string | null; created_at: string };
-type Article = { canonical_url: string; title: string;
+type Article = { canonical_url: string; original_url: string; title: string;
   publisher: string; og_image_url: string | null; image_policy: string; source_key: string;
   canonical_domain: string; source_image_policy: Source['image_policy']; social_handle: string | null;
   social_did: string | null; id: number; revision: number;
@@ -49,15 +50,15 @@ export function externalCardText(articleTitle: string,
   };
 }
 
-async function loadExternalCardText(article: Article): Promise<{
+async function loadExternalCardText(db: D1Database, article: Article): Promise<{
   title: string; description: string;
 }> {
   try {
-    const metadata = await fetchArticleHeadMetadata(article.canonical_url, {
+    const metadata = await fetchArticleHeadMetadata(article, {
       source_key: article.source_key,
       canonical_domain: article.canonical_domain,
       image_policy: article.source_image_policy,
-    });
+    }, url => requirePublisherDomainAllowed(db, url));
     return externalCardText(article.title, metadata);
   } catch {
     return externalCardText(article.title);
@@ -209,7 +210,7 @@ async function prepareBlueskyThumbnail(env: MediaDiscoveryEnv,
 }
 
 export async function loadThumbnail(env: MediaDiscoveryEnv,
-  article: Article): Promise<{ bytes: ArrayBuffer; type: string }> {
+  article: Omit<Article, 'original_url'>): Promise<{ bytes: ArrayBuffer; type: string }> {
   if (!article.og_image_url || !remotePreviewUrl(article.og_image_url, article)) {
     throw new PublicationError('thumbnail_missing');
   }
@@ -444,7 +445,7 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
   }
   let wakeSettings = settings;
   try {
-    const article = await env.MEDIA_DB.prepare(`SELECT a.id, a.revision, a.canonical_url, a.title,
+    const article = await env.MEDIA_DB.prepare(`SELECT a.id, a.revision, a.canonical_url, a.original_url, a.title,
       a.publisher, a.og_image_url, a.image_policy, a.source_key, s.canonical_domain,
       s.image_policy AS source_image_policy, social.handle AS social_handle,
       social.account_did AS social_did, li.object_key AS local_image_object_key,
@@ -457,7 +458,7 @@ export async function consumeBluesky(message: Message<unknown>, env: MediaDiscov
       WHERE a.id = ?`).bind(publication.article_id).first<Article>();
     if (!article) throw new PublicationError('publication_state_conflict');
     const thumbnail = await loadThumbnail(env, article);
-    const cardText = await loadExternalCardText(article);
+    const cardText = await loadExternalCardText(env.MEDIA_DB, article);
     const auth = await authenticate(env.UK_AQ_MEDIA_BLUESKY_APP_PSWD);
     const blob = await uploadBlob(auth, thumbnail);
     const rendered = renderBlueskyPost({ title: article.title,

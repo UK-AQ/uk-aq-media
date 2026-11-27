@@ -4,7 +4,8 @@ import {
   reconcileHomepageLatestSix, indexSyndicationHashes, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import {
-  mediaDeterministicRelevanceFilter,
+  mediaDeterministicRelevanceFilter, normalisePublisherHeadline, verifiedPublisherName,
+  seedArticleMetadataWork,
 } from '@uk-aq-media/discovery';
 import {
   persistArticle, persistDiscoveryEvidence, persistPossibleDuplicateHold,
@@ -170,7 +171,7 @@ Promise<PreparedCandidate> {
   return { input, canonical_url, canonical_url_hash: await canonicalUrlHash(canonical_url),
     publisher_host: identity.publisher_host, publisher_domain: identity.publisher_domain,
     publisher_scope, source,
-    relevant: mediaDeterministicRelevanceFilter.evaluate({ title: input.title,
+    relevant: mediaDeterministicRelevanceFilter.evaluate({ title: normalisePublisherHeadline(input.title, source ? verifiedPublisherName(source) : null),
       canonical_url, categories: [] }).relevant };
 }
 
@@ -242,11 +243,13 @@ function persistCandidateFamily(db: D1Database, candidate: PreparedCandidate,
       JSON.stringify(family.matched_phrases), now, now, fileStamp, fileStamp);
 }
 
-function discoveredArticle(candidate: PreparedCandidate): DiscoveredArticle {
+function discoveredArticle(candidate: PreparedCandidate, source: Source): DiscoveredArticle {
+  const publisher = verifiedPublisherName(source);
   return { canonical_url: candidate.canonical_url,
     canonical_url_hash: candidate.canonical_url_hash,
     original_url: candidate.input.url,
-    title: candidate.input.title,
+    title: normalisePublisherHeadline(candidate.input.title, publisher),
+    publisher: publisher ?? source.name,
     author: null,
     published_at: null,
     categories: candidate.input.families.map(family => family.family_key),
@@ -302,6 +305,7 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
   let unknown = 0;
   let promoted = 0;
   const promotionCandidates: PreparedCandidate[] = [];
+  const metadataSeeds: Parameters<typeof seedArticleMetadataWork>[1] = [];
   let relevanceFiltered = 0;
   for (const candidate of prepared) {
     if (candidate.publisher_scope === 'uk') uk++;
@@ -319,9 +323,12 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
     if (isBlocked(candidate) || candidate.publisher_scope !== 'uk') continue;
     if (!candidate.relevant) { relevanceFiltered++; continue; }
     if (!source) throw new Error('gdelt_uk_source_unavailable');
-    const article = discoveredArticle(candidate);
+    const article = discoveredArticle(candidate, source);
     const isNewIdentity = !existingArticleHashes.has(article.canonical_url_hash);
-    statements.push(persistArticle(db, source, article, [], null, timestamp, isNewIdentity));
+    statements.push(persistArticle(db, source, article, [], null, timestamp, isNewIdentity, 'gdelt'));
+    if (source.image_policy === 'remote_preview') {
+      metadataSeeds.push({ hash: article.canonical_url_hash, status: 'pending', fresh: isNewIdentity });
+    }
     const possibleDuplicateHold = persistPossibleDuplicateHold(
       db, source, article, [], timestamp, isNewIdentity,
     );
@@ -339,6 +346,7 @@ export async function ingestGdeltChunk(db: D1Database, input: unknown,
       promoted++; promotionCandidates.push(candidate);
     }
   }
+  if (metadataSeeds.length) statements.push(seedArticleMetadataWork(db, metadataSeeds, timestamp, true));
   const blockedCountSql = prepared.length ? prepared.map(candidate =>
     `SELECT CASE WHEN ${isBlocked(candidate) ? "0" : publisherAdmissionSql([candidate.canonical_url, candidate.input.url])} THEN 0 ELSE 1 END AS blocked`).join(' UNION ALL ')
     : 'SELECT 0 AS blocked';

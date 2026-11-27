@@ -181,9 +181,9 @@ function rawPageImage(html: string, articleUrl: string, source: PreviewSource): 
 }
 
 export function extractArticleVisiblePreviewImage(html: string, articleUrl: string,
-  source: PreviewSource, allowPageFallback = true): string | null {
+  source: PreviewSource, allowPageFallback = true, allowStructured = true): string | null {
   if (source.image_policy !== 'remote_preview') return null;
-  return jsonLdImage(html, articleUrl, source) ??
+  return (allowStructured ? jsonLdImage(html, articleUrl, source) : null) ??
     contentImage(html, articleUrl, source, true) ??
     (allowPageFallback
       ? contentImage(html, articleUrl, source, false) ?? rawPageImage(html, articleUrl, source)
@@ -195,7 +195,8 @@ async function cancel(response: Response): Promise<void> {
 }
 
 export async function fetchArticleVisiblePreviewImage(articleUrl: string,
-  source: PreviewSource, fetcher: typeof fetch = fetch): Promise<string | null> {
+  source: PreviewSource, fetcher: typeof fetch = fetch,
+  requireAllowedUrl?: (url: string) => Promise<void>): Promise<string | null> {
   if (source.image_policy !== 'remote_preview') return null;
   const initial = publisherHttpsUrl(articleUrl, source);
   if (!initial) throw new ScanError('article_visible_image_url_not_permitted');
@@ -207,6 +208,7 @@ export async function fetchArticleVisiblePreviewImage(articleUrl: string,
     let redirects = 0;
     let response: Response;
     for (;;) {
+      if (requireAllowedUrl) await requireAllowedUrl(requestUrl);
       try {
         response = await fetcher(requestUrl, {
           method: 'GET', redirect: 'manual', signal: controller.signal,
@@ -226,7 +228,11 @@ export async function fetchArticleVisiblePreviewImage(articleUrl: string,
         throw new ScanError('article_visible_image_redirect_rejected');
       }
       let destination: string | null = null;
-      try { destination = publisherHttpsUrl(new URL(location, requestUrl).href, source); }
+      try {
+        const next = new URL(location, requestUrl);
+        next.hash = '';
+        destination = publisherHttpsUrl(next.href, source);
+      }
       catch { /* reject */ }
       if (!destination) throw new ScanError('article_visible_image_redirect_rejected');
       requestUrl = destination;
@@ -252,7 +258,7 @@ export async function fetchArticleVisiblePreviewImage(articleUrl: string,
         const { value, done } = await reader.read();
         if (done) {
           html += decoder.decode();
-          return extractArticleVisiblePreviewImage(html, articleUrl, source, true);
+          return extractArticleVisiblePreviewImage(html, requestUrl, source, true);
         }
         const remaining = MAX_BYTES - bytes;
         const exceedsLimit = value.byteLength > remaining;
@@ -262,10 +268,10 @@ export async function fetchArticleVisiblePreviewImage(articleUrl: string,
 
         // Early return only for structured or semantic article images. The looser page-level
         // fallback waits until the bounded document is complete so site chrome cannot win early.
-        const strongCandidate = extractArticleVisiblePreviewImage(html, articleUrl, source, false);
+        const strongCandidate = extractArticleVisiblePreviewImage(html, requestUrl, source, false);
         if (strongCandidate) return strongCandidate;
         if (exceedsLimit || bytes >= MAX_BYTES) {
-          const fallback = extractArticleVisiblePreviewImage(html, articleUrl, source, true);
+          const fallback = extractArticleVisiblePreviewImage(html, requestUrl, source, true);
           if (fallback) return fallback;
           throw new ScanError('article_visible_image_html_too_large');
         }

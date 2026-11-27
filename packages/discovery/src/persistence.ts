@@ -3,6 +3,7 @@ import {
   type AuthorRule, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { GLOBAL_ACTION_PLAN_SOURCE_KEY } from './global-action-plan';
+import { metadataEditProtectedSql } from './article-metadata-work';
 
 export function publicationAuthorRule(rules: AuthorRule[]): AuthorRule | null {
   return rules.find(rule => rule.publication_policy === 'auto_approve') ??
@@ -57,11 +58,8 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `${UPDATE_DISCOVERY_TIMESTAMPS_SQL},
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id
         AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
-    ) AND NOT EXISTS (
-      SELECT 1 FROM media_article_events edit
-      WHERE edit.article_id = media_articles.id AND edit.event_type = 'edited'
-        AND edit.actor_type = 'admin' AND edit.event_key GLOB 'admin:original-title:*'
-    ) THEN excluded.title ELSE media_articles.title END,
+    ) AND NOT ${metadataEditProtectedSql('media_articles.id', 'original-title')}
+      THEN excluded.title ELSE media_articles.title END,
     publisher = CASE WHEN EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
@@ -70,27 +68,16 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `${UPDATE_DISCOVERY_TIMESTAMPS_SQL},
       WHERE e.article_id = media_articles.id
         AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
     ) THEN excluded.publisher ELSE media_articles.publisher END,
-    published_at = coalesce(media_articles.published_at, excluded.published_at),
-    author = coalesce(media_articles.author, excluded.author),
+    published_at = CASE WHEN media_articles.published_at IS NULL AND excluded.published_at IS NOT NULL
+      AND NOT ${metadataEditProtectedSql('media_articles.id', 'published-at')}
+      THEN excluded.published_at ELSE media_articles.published_at END,
+    author = CASE WHEN media_articles.author IS NULL AND excluded.author IS NOT NULL
+      AND NOT ${metadataEditProtectedSql('media_articles.id', 'author')}
+      THEN excluded.author ELSE media_articles.author END,
     og_image_url = CASE
       WHEN media_articles.og_image_url IS NULL AND excluded.image_policy = 'remote_preview'
-        AND (media_articles.image_policy = 'remote_preview' OR (EXISTS (
-          SELECT 1 FROM media_article_discovery_evidence e
-          WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
-        ) AND NOT EXISTS (
-          SELECT 1 FROM media_article_discovery_evidence e
-          WHERE e.article_id = media_articles.id
-            AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
-        )))
+        AND media_articles.image_policy = 'remote_preview'
         THEN excluded.og_image_url ELSE media_articles.og_image_url END,
-    image_policy = CASE WHEN EXISTS (
-      SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
-    ) AND NOT EXISTS (
-      SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id
-        AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
-    ) THEN excluded.image_policy ELSE media_articles.image_policy END,
     topics_json = CASE WHEN media_articles.topics_json = '[]' AND excluded.topics_json != '[]'
       THEN excluded.topics_json ELSE media_articles.topics_json END,
     display_title = coalesce(media_articles.display_title, excluded.display_title),
@@ -149,12 +136,12 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `${UPDATE_DISCOVERY_TIMESTAMPS_SQL},
 
 export function persistArticle(db: D1Database, source: Source, article: DiscoveredArticle,
   matchedRules: AuthorRule[], approvalObservationKey: string | null,
-  now: string, isNewIdentity: boolean): D1PreparedStatement {
+  now: string, isNewIdentity: boolean, provider: 'gdelt' | 'publisher' = 'publisher'): D1PreparedStatement {
   const editorial = initialEditorialState(source, publicationAuthorRule(matchedRules));
-  const storedAuthor = normaliseArticleAuthorForStorage(article.author, source.name);
+  const storedAuthor = normaliseArticleAuthorForStorage(article.author, article.publisher ?? source.name);
   const possibleDuplicateCheck = isNewIdentity && editorial.status === 'approved';
   // Global Action Plan index observations leave previously stored metadata intact.
-  const conflictUpdateSql = source.source_key === GLOBAL_ACTION_PLAN_SOURCE_KEY
+  const conflictUpdateSql = provider === 'gdelt' || source.source_key === GLOBAL_ACTION_PLAN_SOURCE_KEY
     ? UPDATE_DISCOVERY_TIMESTAMPS_SQL : ARTICLE_CONFLICT_UPDATE_SQL;
   // Conflict updates preserve editorial decisions. Only Pending can be promoted by a later,
   // positively identified trusted-author observation; Rejected/Hidden always win.
@@ -182,7 +169,7 @@ export function persistArticle(db: D1Database, source: Source, article: Discover
     RETURNING id, revision`).bind(Number(possibleDuplicateCheck),
       ...possibleDuplicateBindings(source, article, storedAuthor),
       source.source_key, article.canonical_url,
-      article.canonical_url_hash, article.original_url, article.title, source.name, storedAuthor,
+      article.canonical_url_hash, article.original_url, article.title, article.publisher ?? source.name, storedAuthor,
       article.published_at, now, now, JSON.stringify(article.categories), editorial.status,
       source.review_level, editorial.approval_method, editorial.approval_author_rule_key,
       article.preview_url, source.image_policy, article.display_title, article.display_title_origin,
@@ -195,7 +182,7 @@ export function persistPossibleDuplicateHold(db: D1Database, source: Source,
   isNewIdentity: boolean): D1PreparedStatement | null {
   const editorial = initialEditorialState(source, publicationAuthorRule(matchedRules));
   if (!isNewIdentity || editorial.status !== 'approved') return null;
-  const storedAuthor = normaliseArticleAuthorForStorage(article.author, source.name);
+  const storedAuthor = normaliseArticleAuthorForStorage(article.author, article.publisher ?? source.name);
   return db.prepare(`INSERT INTO media_article_possible_duplicates
     (article_id, candidate_article_id, reason_code, hold_created_at)
     SELECT held.id, candidate.id, ?, ?

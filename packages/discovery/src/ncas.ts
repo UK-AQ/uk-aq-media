@@ -144,13 +144,14 @@ function blockAllowedTags(block: string): string[] {
 
 export type NcasIndexCandidate = {
   canonical_url: string;
+  original_url: string;
   title: string;
   published_at: string;
   categories: string[];
 };
 
 export function extractNcasIndexCandidates(html: string, source: Source,
-  routeKey: NcasRouteKey): NcasIndexCandidate[] {
+  routeKey: NcasRouteKey, indexUrl?: string): NcasIndexCandidate[] {
   if (!configuredNcasRouteKeys(source).includes(routeKey)) throw new ScanError('ncas_config_mismatch');
   const route = routeFor(routeKey);
   const dates = dateOccurrences(html);
@@ -165,13 +166,15 @@ export function extractNcasIndexCandidates(html: string, source: Source,
         /^(?:read|find|learn|view|see)\s+(?:more|all)\b/i.test(title)) continue;
 
     let canonical: string;
+    let original: string;
     try {
-      const permitted = publisherHttpsUrl(new URL(raw, route.url).href, source);
+      const permitted = publisherHttpsUrl(new URL(raw, indexUrl ?? route.url).href, source);
       if (!permitted) continue;
-      const articleUrl = new URL(permitted);
+      const articleUrl = new URL(raw, route.url);
       const segments = articleUrl.pathname.split('/').filter(Boolean);
       if (segments.length !== 1 || EXCLUDED_ROOT_SLUGS.has(segments[0]!.toLowerCase())) continue;
-      canonical = canonicalizeUrl(permitted, source);
+      original = permitted;
+      canonical = canonicalizeUrl(articleUrl.href, source);
     } catch { continue; }
     if (seen.has(canonical)) continue;
 
@@ -187,14 +190,14 @@ export function extractNcasIndexCandidates(html: string, source: Source,
     if (!categories.includes(route.label)) continue;
 
     seen.add(canonical);
-    candidates.push({ canonical_url: canonical, title, published_at: date.value, categories });
+    candidates.push({ canonical_url: canonical, original_url: original, title, published_at: date.value, categories });
   }
   if (candidates.length === 0) throw new ScanError('ncas_no_valid_index_candidates');
   return candidates;
 }
 
 async function fetchIndex(source: Source, routeKey: NcasRouteKey,
-  fetcher: typeof fetch): Promise<string> {
+  fetcher: typeof fetch): Promise<{ html: string; url: string }> {
   const route = routeFor(routeKey);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -239,7 +242,7 @@ async function fetchIndex(source: Source, routeKey: NcasRouteKey,
     try {
       for (;;) {
         const { value, done } = await reader.read();
-        if (done) return html + decoder.decode();
+        if (done) return { html: html + decoder.decode(), url: requestUrl };
         bytes += value.byteLength;
         if (bytes > INDEX_MAX_BYTES) throw new ScanError('ncas_html_too_large');
         html += decoder.decode(value, { stream: true });
@@ -258,12 +261,12 @@ export async function discoverNcas(source: Source, routeKey: NcasRouteKey,
   articles: DiscoveredArticle[]; items_seen: number; items_invalid: number;
 }> {
   if (!configuredNcasRouteKeys(source).includes(routeKey)) throw new ScanError('ncas_config_mismatch');
-  const candidates = extractNcasIndexCandidates(await fetchIndex(source, routeKey, fetcher),
-    source, routeKey);
+  const index = await fetchIndex(source, routeKey, fetcher);
+  const candidates = extractNcasIndexCandidates(index.html, source, routeKey, index.url);
   const articles = await Promise.all(candidates.map(async candidate => ({
     canonical_url: candidate.canonical_url,
     canonical_url_hash: await canonicalUrlHash(candidate.canonical_url),
-    original_url: candidate.canonical_url,
+    original_url: candidate.original_url,
     title: candidate.title,
     author: null,
     published_at: candidate.published_at,

@@ -15,7 +15,7 @@ assert.deepEqual(initialEditorialState(source), {
   status: 'pending', approval_method: null, approval_author_rule_key: null,
 });
 
-const articleUrl = 'https://dsawsp.org/blog/wood-stoves-as-home-garbage-incinerators';
+const articleUrl = 'https://www.dsawsp.org/blog/wood-stoves-as-home-garbage-incinerators';
 const canonicalArticleUrl = 'https://dsawsp.org/blog/wood-stoves-as-home-garbage-incinerators';
 const image = 'https://cdn.prod.website-files.com/5ea15130788281225d2c434e/example.jpg';
 assert.deepEqual(extractDsawspIndexUrls(`<a href="/contact">Contact</a>
@@ -61,9 +61,7 @@ const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   if (url === secondIndexUrl) return new Response(`<a href="${articleUrl}">Duplicate</a>`,
     { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-  if (url === canonicalArticleUrl) return new Response(null,
-    { status: 301, headers: { Location: `https://www.dsawsp.org${new URL(url).pathname}` } });
-  if (url === `https://www.dsawsp.org${new URL(articleUrl).pathname}`) {
+  if (url === articleUrl) {
     return new Response(metadataHtml, { headers: { 'Content-Type': 'text/html' } });
   }
   throw new Error(`unexpected request ${url}`);
@@ -71,9 +69,10 @@ const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const discovered = await discoverDsawsp(source, fetcher);
 assert.equal(discovered.items_seen, 1);
 assert.equal(discovered.items_invalid, 0);
+assert.equal(discovered.articles[0]?.canonical_url, canonicalArticleUrl);
+assert.equal(discovered.articles[0]?.original_url, articleUrl);
 assert.equal(discovered.articles[0]?.published_at, '2026-09-09');
 assert.deepEqual(discovered.articles[0]?.categories, ['Commentary']);
 assert.equal(discovered.articles[0]?.preview_url, image);
-assert.deepEqual(requested, [DSAWSP_INDEX_URL, secondIndexUrl, canonicalArticleUrl,
-  `https://www.dsawsp.org${new URL(articleUrl).pathname}`]);
+assert.deepEqual(requested, [DSAWSP_INDEX_URL, secondIndexUrl, articleUrl]);
 console.log('DSAWSP discovery checks passed');

@@ -1,5 +1,5 @@
 import {
-  processReviewEvidence, scheduleReviewEvidence, DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
+  enrichPersistedArticle, scheduleArticleMetadata, processReviewEvidence, scheduleReviewEvidence, DiscoveryMessageSchema, displayTitleNeuronRates, recordQueueFailure, runSourceScan,
   CAWS_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_INDEX_ROUTE_KEY, CLEAN_AIR_FUND_RESOURCES_ROUTE_KEY,
   configuredCawsIndex, configuredCleanAirFundIndex, configuredCleanAirFundResources,
   configuredDsawspIndex,
@@ -25,6 +25,12 @@ import { consumeThreads, reconcileThreadsQueue } from './threads';
 async function scheduleReviews(env: MediaDiscoveryEnv): Promise<void> {
   try { await scheduleReviewEvidence(env.MEDIA_DB, env.MEDIA_DISCOVERY_QUEUE); }
   catch { console.warn(JSON.stringify({ event: 'review_evidence_schedule_failed' })); }
+}
+
+async function scheduleMetadata(env: MediaDiscoveryEnv): Promise<void> {
+  try { await scheduleArticleMetadata(env.MEDIA_DB, env.MEDIA_DISCOVERY_QUEUE,
+    env.MEDIA_METADATA_DISPATCH_LIMIT); }
+  catch { console.warn(JSON.stringify({ event: 'publisher_metadata_schedule_failed' })); }
 }
 
 async function reconcileSocialQueues(env: MediaDiscoveryEnv): Promise<void> {
@@ -278,14 +284,14 @@ export default {
     } catch {
       return json({ error: 'discovery_schedule_failed' }, 503);
     } finally {
-      await scheduleReviews(env);
+      await Promise.all([scheduleReviews(env), scheduleMetadata(env)]);
       // Social recovery must not depend on publisher discovery enqueue succeeding.
       await reconcileSocialQueues(env);
     }
   },
   async scheduled(_controller, env): Promise<void> {
     try { await enqueueScheduledDiscovery(env); }
-    finally { await Promise.all([scheduleReviews(env), reconcileSocialQueues(env)]); }
+    finally { await Promise.all([scheduleReviews(env), scheduleMetadata(env), reconcileSocialQueues(env)]); }
   },
   async queue(batch, env, ctx?: ExecutionContext): Promise<void> {
     if (batch.queue === 'uk-aq-media-threads') {
@@ -311,11 +317,22 @@ export default {
     }
     for (const message of batch.messages) {
       const parsed = DiscoveryMessageSchema.safeParse(message.body);
-      if (!parsed.success || parsed.data.type === 'article_enrich') {
+      if (!parsed.success) {
         // Not operational in this phase: never acknowledge unimplemented work as completed.
         await recordQueueFailure(env.MEDIA_DB, 'unsupported_discovery_message', message.id, message.attempts);
         console.error(JSON.stringify({ event: 'unsupported_discovery_message', message_id: message.id }));
         message.retry({ delaySeconds: 300 });
+        continue;
+      }
+      if (parsed.data.type === 'article_enrich') {
+        try {
+          await enrichPersistedArticle(env.MEDIA_DB, parsed.data.article_id);
+          message.ack();
+        } catch {
+          console.warn(JSON.stringify({ event: 'publisher_metadata_delivery_failed',
+            article_id: parsed.data.article_id, attempt: message.attempts }));
+          message.retry({ delaySeconds: 300 });
+        }
         continue;
       }
       if (parsed.data.type === 'article_review_evidence') {

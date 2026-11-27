@@ -27,7 +27,8 @@ assert.equal(metadataProviderFor('phys-org'), 'article_head');
 const metadata = metadataFromOpenAqRss('https://openaq.medium.com/open-air-quality-data',
   'OpenAQ', parsed.articles, '2026-09-13T10:00:00.000Z');
 assert.deepEqual(metadata, {
-  publisher: 'OpenAQ', title: 'OpenAQ RSS title', compact_title: null,
+  publisher: 'OpenAQ', title: 'OpenAQ RSS title',
+  explicit_headline: 'OpenAQ RSS title', compact_title: null,
   author: 'OpenAQ author', published_at: '2026-09-12T10:00:00.000Z',
   image_url: previewUrl, image_error: null, checked_at: '2026-09-13T10:00:00.000Z',
 });
@@ -66,8 +67,8 @@ assert.equal(MetadataApplyBody.safeParse({
   replace_existing_image: false,
   expected_current_published_at: null,
   expected_proposed_published_at: '2026-09-17',
-  apply_publisher_published_at: false,
-}).success, false);
+  apply_publisher_published_at: true,
+}).success, true);
 assert.deepEqual(metadataPublishedAtProposal(null, publisherPublishedAt), {
   current: null, proposed: '2026-09-13T13:08:11.000Z',
 });
@@ -88,7 +89,8 @@ error => error instanceof HttpError && error.status === 409 &&
   error.message === 'metadata_current_published_at_changed');
 const dashboardSource = readFileSync('apps/media-admin/src/editorial-dashboard.ts', 'utf8');
 assert.match(dashboardSource,
-  /published_at = CASE WHEN \? AND published_at IS NULL THEN \? ELSE published_at END/);
+  /AND display_title IS \? AND published_at IS \?/);
+assert.match(dashboardSource, /row.protected_date \? null : metadataPublishedAtProposal/);
 assert.match(dashboardSource,
   /UPDATE media_articles SET published_at = \?, mutation_key = \?, revision = \?, updated_at = \?/);
 assert.match(dashboardSource,
