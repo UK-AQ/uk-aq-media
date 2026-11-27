@@ -51,15 +51,6 @@ export const ARTICLE_CONFLICT_UPDATE_SQL = `${UPDATE_DISCOVERY_TIMESTAMPS_SQL},
       WHERE e.article_id = media_articles.id
         AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
     ) THEN excluded.original_url ELSE media_articles.original_url END,
-    title = CASE WHEN EXISTS (
-      SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'
-    ) AND NOT EXISTS (
-      SELECT 1 FROM media_article_discovery_evidence e
-      WHERE e.article_id = media_articles.id
-        AND e.provider_key IN ('publisher_rss', 'publisher_web_index')
-    ) AND NOT ${metadataEditProtectedSql('media_articles.id', 'original-title')}
-      THEN excluded.title ELSE media_articles.title END,
     publisher = CASE WHEN EXISTS (
       SELECT 1 FROM media_article_discovery_evidence e
       WHERE e.article_id = media_articles.id AND e.provider_key = 'gdelt'

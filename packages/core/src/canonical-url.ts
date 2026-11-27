@@ -102,6 +102,11 @@ const publisherDomainPreviewImageHostnames: Readonly<Record<string, readonly str
   'cleanairfund.org': ['s40026.pcdn.co'],
 };
 
+const webflowPreviewDirectories: Readonly<Record<string, string>> = {
+  'familiesforcleanair.org': '/6a5c2ef397f2467acf4d41b7/',
+  'uk100.org': '/695fd77a8911373012667194/',
+};
+
 function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): string | null {
   if (typeof raw !== 'string' || raw.length > 2048) return null;
   const authority = /^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i.exec(raw)?.[1];
@@ -118,22 +123,19 @@ function exactPreviewImageUrl(raw: unknown, hostnames: readonly string[]): strin
 export function remotePreviewUrl(raw: unknown, source: PublisherDomainInput): string | null {
   const publisherUrl = publisherHttpsUrl(raw, source);
   if (publisherUrl || typeof source === 'string') return publisherUrl;
+  const domain = normaliseDomain(source.canonical_domain);
   const additionalHostnames = [
     ...(sourcePreviewImageHostnames[source.source_key] ?? []),
-    ...(publisherDomainPreviewImageHostnames[normaliseDomain(source.canonical_domain)] ?? []),
+    ...(publisherDomainPreviewImageHostnames[domain] ?? []),
   ];
   const external = exactPreviewImageUrl(raw, additionalHostnames);
-  // FFCA's redesigned Webflow site publishes article images under this exact CDN path.
-  // The separate site assets/logo path and unrelated Webflow tenants remain excluded.
-  if (normaliseDomain(source.canonical_domain) === 'familiesforcleanair.org') {
+  const webflowDirectory = webflowPreviewDirectories[domain];
+  if (webflowDirectory) {
     const webflow = exactPreviewImageUrl(raw, ['cdn.prod.website-files.com']);
-    if (webflow && new URL(webflow).pathname.startsWith('/6a5c2ef397f2467acf4d41b7/')) {
-      return webflow;
-    }
+    if (webflow && new URL(webflow).pathname.startsWith(webflowDirectory)) return webflow;
   }
   // Upgrade only this publisher's exact Squarespace image host and site path.
-  if (normaliseDomain(source.canonical_domain) === 'breathelondon-communities.org' &&
-      typeof raw === 'string') {
+  if (domain === 'breathelondon-communities.org' && typeof raw === 'string') {
     const candidate = exactPreviewImageUrl(raw.replace(/^http:\/\//i, 'https://'),
       ['static1.squarespace.com']);
     if (candidate && new URL(candidate).pathname.startsWith('/static/67f93e370d213673ed23e496/')) {

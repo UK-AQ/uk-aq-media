@@ -2,13 +2,12 @@ import {
   publisherHttpsUrl, type DiscoveredArticle, type Source,
 } from '@uk-aq-media/core';
 import { extractArticleHeadMetadata, normaliseMetadataText } from './article-head-metadata';
+import { writtenPublisherPublicationDate } from './publisher-publication-date';
 import { ScanError } from './rss';
 
 const MAX_HTML_BYTES = 512 * 1024;
 const TIMEOUT_MS = 10_000;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
-const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
-  'august', 'september', 'october', 'november', 'december'];
 const WRITTEN_DATE = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(20\d{2})\b/i;
 const ARTICLE_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -43,6 +42,7 @@ export function extractFamiliesForCleanAirPublishedDate(html: string,
   const headings = [...html.matchAll(/<h1\b[^>]*>([\s\S]{1,700}?)<\/h1\s*>/gi)];
   const matched = headings.find(match => normalisedTitle(match[1] ?? '') === expected);
   if (!matched && normalisedTitle(metadataTitle) !== expected) return null;
+  if (headMetadata.publishedAtConflict) return null;
   const fromHead = structuredDate(headMetadata.publishedAt);
   if (fromHead) return fromHead;
   if (!matched) return null;
@@ -53,9 +53,7 @@ export function extractFamiliesForCleanAirPublishedDate(html: string,
     (matched.index ?? 0) + matched[0].length + 1200);
   const nearby = normaliseMetadataText(afterHeading.replace(/<[^>]*>/g, ' ')).slice(0, 180);
   const written = WRITTEN_DATE.exec(nearby);
-  if (!written) return null;
-  const month = MONTHS.indexOf(written[1]!.toLowerCase()) + 1;
-  return calendarDate(Number(written[3]), month, Number(written[2]));
+  return written && Number(written[3]) >= 2008 ? writtenPublisherPublicationDate(written[0]) : null;
 }
 
 export async function fetchFamiliesForCleanAirPublishedDate(

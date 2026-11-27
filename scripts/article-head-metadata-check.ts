@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, fetchArticleHeadMetadata,
+  discoverArticleHeadPreviewMetadata, extractArticleHeadMetadata, extractPublisherArticleMetadata, fetchArticleHeadMetadata,
   publisherPublicationDate,
 } from '../packages/discovery/src/article-head-metadata';
 import { ScanError } from '../packages/discovery/src/rss';
@@ -133,6 +133,55 @@ try {
 assert.equal(publisherPublicationDate('2026-09-17'), '2026-09-17');
 assert.equal(publisherPublicationDate('2026-09-17T00:00:00+01:00'), '2026-09-16T23:00:00.000Z');
 assert.equal(publisherPublicationDate('2026-02-29T00:00:00'), null);
+assert.equal(publisherPublicationDate('November 18 2026'), '2026-11-18');
+assert.equal(publisherPublicationDate('November 31, 2026'), null);
+assert.equal(publisherPublicationDate('1 January 9999'), null);
+
+// Regression using the reported UK100 headline, publication label and image markup.
+const uk100Source = { ...source, source_key: 'manual-54fe264e4b18', name: 'uk100.org', canonical_domain: 'uk100.org' };
+const uk100Url = 'https://uk100.org/press-releases/councils-join-the-call-not-to-slam-on-the-brakes-on-clean-cars';
+const uk100Headline = 'Councils join the call not to slam on the brakes on clean cars';
+const uk100Wrapper = 'Councils join the call not to slam the brakes on clean cars | UK100';
+const uk100Image = 'https://cdn.prod.website-files.com/695fd77a8911373012667194/6afb3c034c7cb1dc48c6283d_uk100-news-ccc-zev-letter-18-nov-2026.png';
+globalThis.fetch = async () => streamedHtml([
+  `<html data-wf-page="page" data-wf-site="site"><head><title>${uk100Wrapper}</title>
+  <meta property="og:image" content="${uk100Image}"></head>`,
+  `<body><main><div>
+    <h1 class="heading-style-h3">${uk100Headline}</h1>
+    <div class="spacer-large"></div>
+    <div class="date_wrapper">
+      <div class="date">Published on</div>
+      <div class="date">18 November 2026</div>
+    </div>
+  </div></main></body></html>`,
+]);
+try {
+  const resolved = await resolvePublisherHeadMetadata(uk100Url, uk100Source, async () => {}, {
+    title: uk100Wrapper, author: null, published_at: null, image_url: null, fresh: true,
+  });
+  assert.equal(resolved.title, uk100Headline);
+  assert.equal(resolved.verified_headline, uk100Headline);
+  assert.equal(resolved.publisher, 'UK100');
+  assert.equal(resolved.published_at, '2026-11-18');
+  assert.equal(resolved.image_url, uk100Image);
+  assert.equal(resolved.author, null);
+} finally { globalThis.fetch = originalFetch; }
+
+const layoutSpacer = '<span class="layout-gap" role="presentation"> </span>';
+const labelledDate = '<div>Publication date: 18 November 2026</div>';
+for (const [following, expected] of [
+  [`${layoutSpacer}<div class="article_spacing"></div>${labelledDate}`, '2026-11-18'],
+  [`${layoutSpacer.repeat(3)}${labelledDate}`, null],
+  [`<div class="spacer-large">Article prose</div>${labelledDate}`, null],
+  [`<div class="spacer-large related-items"></div>${labelledDate}`, null],
+  [`${labelledDate}${layoutSpacer}<div>Published: 17 November 2026</div>`, null],
+] as const) {
+  const result = extractPublisherArticleMetadata(`<html><head>
+    <meta name="generator" content="Webflow"><meta property="og:type" content="article">
+    </head><body><main><div><h1>Clean air news</h1>${following}</div></main></body></html>`,
+  article.canonical_url);
+  assert.equal(result.publishedAt, expected, following);
+}
 
 const bbcSource: Source = {
   ...source,

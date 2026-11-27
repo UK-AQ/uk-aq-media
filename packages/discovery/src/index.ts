@@ -179,7 +179,6 @@ export function evaluateGuardianArticle(rules: AuthorRule[], routeKey: GuardianR
 
 type ExistingMetadataState = {
   canonical_url_hash: string;
-  title: string;
   og_image_url: string | null;
   author: string | null;
   published_at: string | null;
@@ -329,9 +328,6 @@ async function resolveDiscoveryMetadata(db: D1Database, source: Source, articles
     const publisher = verifiedPublisherName(source);
     const acquiredTitle = article.title;
     const cleanTitle = normalisePublisherHeadline(acquiredTitle, publisher, article.explicit_publisher_headline);
-    const preserveHistoricalSuffix = (newTitle: string, publication: string | null): string =>
-      stored && newTitle !== stored.title && newTitle === normalisePublisherHeadline(stored.title, publication)
-        ? stored.title : newTitle;
     // Keep unverified new publisher-native wording until the bounded article
     // lookup can confirm whether a trailing publication name is site branding.
     article.title = acquiredTitle;
@@ -352,7 +348,7 @@ async function resolveDiscoveryMetadata(db: D1Database, source: Source, articles
     if (image && author && date && !titleNeedsVerification && !recheck) continue;
 
     if (stored && !recheck || inline >= INLINE_METADATA_LIMIT) {
-      seeds.push({ hash, status: 'pending', fresh: !stored && titleNeedsVerification,
+      seeds.push({ hash, status: 'pending', fresh: !stored,
         force: Boolean(recheck) });
       continue;
     }
@@ -361,14 +357,14 @@ async function resolveDiscoveryMetadata(db: D1Database, source: Source, articles
     try {
       const metadata = await resolvePublisherMetadata(db, null, article, source,
         { title: acquiredTitle, author, published_at: date, image_url: image,
-          display_title: article.display_title, fresh: !stored && titleNeedsVerification },
+          display_title: article.display_title, fresh: !stored },
         url => urls.push(url));
       article.publisher = metadata.publisher ?? article.publisher;
-      const verifiedHeadline = metadata.explicit_headline ?? article.explicit_publisher_headline;
-      const proposedTitle = verifiedPublisherHeadline(acquiredTitle,
-        metadata.publisher ?? publisher, verifiedHeadline);
-      article.title = stored ? preserveHistoricalSuffix(proposedTitle, metadata.publisher ?? publisher)
-        : proposedTitle;
+      if (!stored) {
+        const explicitHeadline = metadata.explicit_headline ?? article.explicit_publisher_headline;
+        article.title = verifiedPublisherHeadline(acquiredTitle,
+          metadata.publisher ?? publisher, explicitHeadline, metadata.verified_headline);
+      }
       article.author ??= metadata.author;
       article.published_at ??= metadata.published_at;
       article.preview_url ??= metadata.image_url;
@@ -380,14 +376,13 @@ async function resolveDiscoveryMetadata(db: D1Database, source: Source, articles
       seeds.push({ hash, status: observedMetadataOutcome({
         author: article.author ?? author, published_at: article.published_at ?? date,
         preview_url: article.preview_url ?? image,
-      }, metadata), force: true, fresh: !stored && titleNeedsVerification });
+      }, metadata), force: true, fresh: !stored });
     } catch (error) {
       if (error instanceof HttpError && error.message.startsWith('publisher_domain_blocked:')) {
         blocked.add(hash);
         continue;
       }
-      seeds.push({ hash, status: publisherMetadataFailure(error), force: true,
-        fresh: !stored && titleNeedsVerification });
+      seeds.push({ hash, status: publisherMetadataFailure(error), force: true, fresh: !stored });
     } finally {
       article.publisher_resolved_urls = [...new Set([...(article.publisher_resolved_urls ?? []), ...urls])];
     }
@@ -613,7 +608,7 @@ export async function runSourceScan(db: D1Database, sourceKey: string, routeKey:
     stage = 'article_metadata';
     const observedHashes = acceptedArticles.map(article => article.canonical_url_hash);
     const existing = new Map(observedHashes.length === 0 ? [] : (await db.prepare(`
-      SELECT canonical_url_hash, title, og_image_url, author, published_at, image_policy, preview_metadata_checked_at
+      SELECT canonical_url_hash, og_image_url, author, published_at, image_policy, preview_metadata_checked_at
       FROM media_articles WHERE canonical_url_hash IN (SELECT value FROM json_each(?))`)
       .bind(JSON.stringify(observedHashes)).all<ExistingMetadataState>()).results
       .map(row => [row.canonical_url_hash, row] as const));

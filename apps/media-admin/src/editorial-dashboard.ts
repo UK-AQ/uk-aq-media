@@ -110,6 +110,9 @@ const ManualArticleBody = z.object({
   published_at: StoredPublishedAt.nullable().optional(),
   preview_image_url: z.url().max(2048).nullable().optional(),
 }).strict();
+const HeadlineProposal = z.object({
+  current: z.string().max(1000), proposed: z.string().min(1).max(1000),
+}).strict();
 export const MetadataApplyBody = z.object({
   expected_current_image_url: z.string().max(2048).nullable(),
   expected_proposed_image_url: z.url().max(2048).nullable(),
@@ -118,13 +121,18 @@ export const MetadataApplyBody = z.object({
   expected_current_published_at: StoredPublishedAt.nullable().optional(),
   expected_proposed_published_at: StoredPublishedAt.nullable().optional(),
   expected_revision: z.number().int().nonnegative().optional(),
-  exact_headline: z.object({ current: z.string().max(1000), proposed: z.string().max(1000) }).strict().optional(),
+  exact_headline: HeadlineProposal.optional(),
+  verified_headline: HeadlineProposal.optional(),
   publication: z.object({ current: z.string().max(200), proposed: z.string().max(200) }).strict().optional(),
   author: z.object({ current: z.null(), proposed: z.string().min(1).max(500) }).strict().optional(),
   apply_publisher_published_at: z.boolean().default(false),
 }).strict().superRefine((value, context) => {
-  if ((value.exact_headline || value.publication || value.author) && value.expected_revision === undefined) {
+  if ((value.exact_headline || value.verified_headline || value.publication || value.author) &&
+      value.expected_revision === undefined) {
     context.addIssue({ code: 'custom', message: 'metadata_revision_required' });
+  }
+  if (value.exact_headline && value.verified_headline) {
+    context.addIssue({ code: 'custom', message: 'multiple_headline_proposals' });
   }
   if (value.apply_publisher_published_at &&
       (value.expected_current_published_at !== null ||
@@ -1191,15 +1199,26 @@ async function metadataProposals(db: D1Database, row: MetadataArticle, targets: 
       checked_at: new Date().toISOString() };
   }
   const image = proposal(row.og_image_url, metadata.image_url);
-  const headline = normalisePublisherHeadline(row.title, metadata.publisher, metadata.explicit_headline);
+  const currentHeadline = normaliseMetadataText(row.title);
+  const verifiedHeadline = metadata.verified_headline;
+  const exactHeadline = normalisePublisherHeadline(row.title, metadata.publisher,
+    verifiedHeadline ?? metadata.explicit_headline);
+  const observedHeadline = metadata.provider_headlines?.find(value => value === currentHeadline ||
+    normalisePublisherHeadline(value, metadata.publisher) === currentHeadline);
+  const possibleBranding = /(?:\|| [–—-] |: )\s*\S/.test(observedHeadline ?? '');
+  const verifiedCorrection = !row.protected_title && verifiedHeadline && verifiedHeadline !== currentHeadline &&
+    verifiedHeadline !== exactHeadline && observedHeadline &&
+    (metadata.verified_headline_publisher || !possibleBranding)
+    ? proposal(row.title, verifiedHeadline) : null;
   const changes = {
     image: image ? { ...image, expected_proposed_image_url: image.proposed,
       replacement_required: row.og_image_url !== null } : null,
     publisher_display_title: row.display_title === null ? proposal(null as string | null,
       metadata.compact_title) : null,
     published_at: row.protected_date ? null : metadataPublishedAtProposal(row.published_at, metadata.published_at),
-    exact_headline: row.protected_title || headline === normaliseMetadataText(row.title)
-      ? null : proposal(row.title, headline),
+    exact_headline: row.protected_title || exactHeadline === currentHeadline ||
+      verifiedHeadline && verifiedHeadline !== exactHeadline ? null : proposal(row.title, exactHeadline),
+    verified_headline: verifiedCorrection,
     publication: !row.publisher.trim() || hostnamePublisherLabel(row.publisher)
       ? proposal(row.publisher, metadata.publisher) : null,
     author: row.protected_author || row.author !== null ? null
@@ -1238,7 +1257,7 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
     }
     return articleDetail(db, id);
   };
-  if (await replay()) return complete(Boolean(body.exact_headline || body.apply_publisher_published_at));
+  if (await replay()) return complete(Boolean(body.exact_headline || body.verified_headline || body.apply_publisher_published_at));
   if (body.expected_revision !== undefined && body.expected_revision !== row.revision) {
     throw new HttpError(409, 'article_revision_changed');
   }
@@ -1256,7 +1275,8 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
     }
     return actual.proposed;
   };
-  const title = selected(body.exact_headline, changes.exact_headline) ?? row.title;
+  const title = selected(body.verified_headline, changes.verified_headline) ??
+    selected(body.exact_headline, changes.exact_headline) ?? row.title;
   const publisher = selected(body.publication, changes.publication) ?? row.publisher;
   const author = selected<string | null>(body.author, changes.author) ?? row.author;
   const changeImage = metadataImageChange(row.og_image_url, body.expected_proposed_image_url,
@@ -1276,6 +1296,7 @@ async function applyMetadata(request: Request, db: D1Database, id: number): Prom
     display_title: display ?? row.display_title };
   const now = new Date().toISOString();
   const audit = JSON.stringify({ field: 'publisher_metadata', request: input,
+    ...(body.verified_headline ? { verified_publisher: metadata.verified_headline_publisher } : {}),
     before: { title: row.title, publisher: row.publisher, author: row.author,
       image: row.og_image_url, published_at: row.published_at, display_title: row.display_title },
     after });

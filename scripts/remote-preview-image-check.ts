@@ -61,6 +61,13 @@ assert.equal(remotePreviewUrl(
   'https://s40026.pcdn.co/wp-content/uploads/article-1200x875.jpeg.webp', cleanAirFund),
 'https://s40026.pcdn.co/wp-content/uploads/article-1200x875.jpeg.webp');
 assert.equal(remotePreviewUrl(cambridgeImageUrl, unrelatedDynamicSource), null);
+const uk100Image = 'https://cdn.prod.website-files.com/695fd77a8911373012667194/article.png';
+for (const source_key of ['uk100', 'manual-54fe264e4b18', 'discovered-publisher-uk100']) {
+  const uk100 = { source_key, canonical_domain: 'uk100.org' };
+  assert.equal(remotePreviewUrl(uk100Image, uk100), uk100Image);
+  assert.equal(remotePreviewUrl(uk100Image.replace('695fd77a8911373012667194', 'other-tenant'), uk100), null);
+}
+assert.equal(remotePreviewUrl(uk100Image, unrelatedDynamicSource), null);
 for (const rejected of [
   'http://i2-prod.liverpoolecho.co.uk/article/example.jpg',
   'https://user:pass@i2-prod.liverpoolecho.co.uk/article/example.jpg',

@@ -8,6 +8,9 @@ import { fetchFamiliesForCleanAirPublishedDate } from './families-for-clean-air-
 
 type Publisher = Pick<Source, 'source_key' | 'canonical_domain' | 'name'>;
 
+// Verified publisher attribution is independent of whether the discovery route is configured.
+const verifiedPublisherNamesByDomain = new Map([['uk100.org', 'UK100']]);
+
 export function hostnamePublisherLabel(label: string): boolean {
   return /^(?:[a-z\d](?:[a-z\d-]*[a-z\d])?\.)+[a-z]{2,}$/i.test(label.trim());
 }
@@ -15,7 +18,10 @@ export function hostnamePublisherLabel(label: string): boolean {
 export function verifiedPublisherName(source: Publisher, nativeName?: string | null): string | null {
   const configured = normaliseMetadataText(source.name).slice(0, 200);
   const dynamic = /^(?:discovered-publisher-|manual-)/.test(source.source_key);
-  if (configured && (!dynamic || !hostnamePublisherLabel(configured))) return configured;
+  if (configured && !dynamic) return configured;
+  const known = verifiedPublisherNamesByDomain.get(source.canonical_domain.toLowerCase());
+  if (known) return known;
+  if (configured && !hostnamePublisherLabel(configured)) return configured;
   const native = nativeName && normaliseMetadataText(nativeName).slice(0, 200);
   return native && !hostnamePublisherLabel(native) ? native : null;
 }
@@ -32,7 +38,8 @@ export function normalisePublisherHeadline(title: string, publisher: string | nu
 }
 
 export function verifiedPublisherHeadline(title: string, publisher: string | null,
-  explicitHeadline?: string | null): string {
+  explicitHeadline?: string | null, canonicalHeadline?: string | null): string {
+  if (canonicalHeadline) return canonicalHeadline;
   const headline = normaliseMetadataText(title);
   const explicit = explicitHeadline && normaliseMetadataText(explicitHeadline);
   if (!explicit) return headline;
@@ -56,10 +63,13 @@ export async function resolvePublisherHeadMetadata(article: string | PublisherAr
     expectedTitle: existing?.title,
   });
   const publisher = verifiedPublisherName(source, metadata.publisher);
+  const headlinePublisher = /^(?:discovered-publisher-|manual-)/.test(source.source_key)
+    ? verifiedPublisherName({ ...source, name: '' }, metadata.publisher) : publisher;
   const explicitHeadline = metadata.explicitHeadline;
   const acquired = existing?.title || explicitHeadline || metadata.ogTitle ||
     metadata.twitterTitle || metadata.htmlTitle;
-  const headline = acquired && verifiedPublisherHeadline(acquired, publisher, explicitHeadline);
+  const headline = acquired && verifiedPublisherHeadline(acquired, publisher, explicitHeadline,
+    !existing || existing.fresh ? metadata.verifiedHeadline : null);
   const compact = existing?.display_title ? null : [metadata.ogTitle, metadata.twitterTitle]
     .find(candidate => candidate && headline && candidate.length >= 5 &&
       candidate.length < headline.length && normalisePublisherHeadline(candidate, publisher) === candidate &&
@@ -69,12 +79,15 @@ export async function resolvePublisherHeadMetadata(article: string | PublisherAr
     author?.toLowerCase() === 'hacadmin';
   return {
     publisher, title: headline, explicit_headline: explicitHeadline,
+    verified_headline: metadata.verifiedHeadline, verified_headline_publisher: headlinePublisher,
+    provider_headlines: [metadata.ogTitle, metadata.twitterTitle, metadata.htmlTitle]
+      .filter((value): value is string => Boolean(value)),
     compact_title: compact,
     author: technicalByline ? null : normaliseArticleAuthorForStorage(author, publisher ?? source.name),
     published_at: publisherPublicationDate(metadata.publishedAt),
     image_url: metadata.previewUrl, image_error: metadata.previewError,
     checked_at: metadata.checkedAt, partial_failure: metadata.partialFailure,
-    recovered: metadata.recovered,
+    recovered: metadata.recovered, published_at_conflict: metadata.publishedAtConflict,
   };
 }
 
@@ -97,6 +110,9 @@ export type PublisherMetadata = {
   image_error: string | null;
   checked_at: string;
   explicit_headline?: string | null;
+  verified_headline?: string | null;
+  verified_headline_publisher?: string | null;
+  provider_headlines?: string[];
   partial_failure?: boolean;
 };
 
@@ -167,9 +183,9 @@ export async function resolvePublisherMetadata(db: D1Database, articleId: number
   }
   if (!permitsPublisherHtml(source)) throw new ScanError('article_head_not_permitted');
   try {
-    const { recovered, ...metadata } = await resolvePublisherHeadMetadata(article, source, allow, existing);
+    const { recovered, published_at_conflict, ...metadata } = await resolvePublisherHeadMetadata(article, source, allow, existing);
     if (!recovered && source.source_key === 'families-for-clean-air' && !metadata.published_at &&
-        !existing?.published_at && (existing?.title || metadata.title) &&
+        !published_at_conflict && !existing?.published_at && (existing?.title || metadata.title) &&
         !new URL(canonicalUrl).pathname.startsWith('/news/')) {
       // Legacy root permalinks have a separate verified publisher date route.
       // Current /news articles use that same narrow extractor on the first response.

@@ -467,6 +467,8 @@ const directArticle: DiscoveredArticle = {
   title_context: null, preview_url: null, display_title: null, display_title_origin: null,
   preview_metadata_checked_at: null,
 };
+const storedAqnTitle = sqlite.prepare(`SELECT title FROM media_articles
+  WHERE canonical_url_hash = ?`).get(directArticle.canonical_url_hash)!.title;
 await db.batch([
   persistArticle(db, aqnSource, directArticle, [], null, '2026-09-13T12:20:00.000Z', false),
   persistDiscoveryEvidence(db, aqnSource, 'publisher_rss', 'air-quality-news-feed', directArticle,
@@ -479,7 +481,7 @@ assert.equal(sqlite.prepare(`SELECT published_at FROM media_articles
   directArticle.published_at, 'publisher-native publication time must fill the unknown value');
 assert.equal(sqlite.prepare(`SELECT title FROM media_articles
   WHERE canonical_url_hash = ?`).get(directArticle.canonical_url_hash)!.title,
-  directArticle.title, 'the first publisher-native observation must replace the GDELT title');
+  storedAqnTitle, 'direct overlap must preserve the stored headline for explicit editorial repair');
 assert.deepEqual(sqlite.prepare(`SELECT provider_key FROM media_article_discovery_evidence
   WHERE article_id = (SELECT id FROM media_articles WHERE canonical_url_hash = ?)
   ORDER BY provider_key`).all(directArticle.canonical_url_hash).map(row => row.provider_key),

@@ -76,9 +76,11 @@ function jsonLdAuthor(value: unknown): string | null {
 
 type NativeMetadata = {
   explicitHeadline?: string | null;
+  verifiedHeadline?: string | null;
   publisher?: string | null;
   author?: string | null;
   publishedAt?: string | null;
+  publishedAtConflict?: boolean;
   structuredImages?: string[];
 };
 
@@ -89,6 +91,21 @@ function text(value: unknown): string | null {
 function uniqueValue(values: (string | null | undefined)[]): string | null {
   const distinct = [...new Set(values.filter(Boolean))];
   return distinct.length === 1 ? distinct[0] ?? null : null;
+}
+
+function publicationEvidence(values: (string | null | undefined)[]): NativeMetadata {
+  const dates = new Map<string, string>();
+  for (const value of values) {
+    const date = publisherPublicationDate(value ?? null);
+    if (date && value && !dates.has(date)) dates.set(date, value);
+  }
+  const [first, ...others] = dates.keys();
+  // Calendar-only and timed values can agree on the day while retaining their
+  // original precision. Two distinct timestamps or days are conflicting evidence.
+  const compatible = (candidate: string) => first?.slice(0, 10) === candidate.slice(0, 10);
+  const oneInstant = [...dates.keys()].filter(date => date.length > 10).length <= 1;
+  return oneInstant && others.every(compatible) ? { publishedAt: first ? dates.get(first)! : null }
+    : { publishedAtConflict: true };
 }
 
 function asArray(value: unknown): unknown[] {
@@ -148,9 +165,10 @@ function structuredArticleMetadata(htmlHead: string, requestUrl: string | undefi
   });
   return {
     explicitHeadline: uniqueValue(records.map(record => text(record.headline))),
+    verifiedHeadline: uniqueValue(matched.map(record => text(record.headline))),
     publisher: uniqueValue(publishers),
     author: uniqueValue(records.map(record => jsonLdAuthor(record.author))),
-    publishedAt: uniqueValue(records.map(record => text(record.datePublished))),
+    ...publicationEvidence(records.map(record => text(record.datePublished))),
     structuredImages: [...new Set(records.flatMap(record =>
       [...asArray(record.image), ...asArray(record.thumbnailUrl)].flatMap(value => {
         if (typeof value === 'string') return [value];
@@ -163,13 +181,13 @@ function structuredArticleMetadata(htmlHead: string, requestUrl: string | undefi
 type MarkedElement = DefaultTreeAdapterTypes.Element;
 const metadataExcluded = /(?:^|[\s_-])(?:related|recommend(?:ed|ations)?|sidebar|promo|teaser|breadcrumb|site-nav)(?:$|[\s_-])/i;
 
-function markedArticleMetadata(html: string, url: string, expectedTitles: string[],
-  identity?: ArticleIdentity): NativeMetadata {
+function markedArticleMetadata(document: DefaultTreeAdapterTypes.Document, url: string,
+  expectedTitles: string[], headings: MarkedElement[], identity?: ArticleIdentity): NativeMetadata {
   const articleType = /(?:^|[/#])(?:[a-z]*Article|BlogPosting)(?:\s|$)/i;
   const scopes: Array<{ matchesUrl: boolean; containsArticle: boolean; fields: Record<'explicitHeadline' | 'author' | 'publishedAt', string[]>;
     images: string[] }> = [];
   type Scope = typeof scopes[number];
-  const stack = parse(html).childNodes.map(node => ({ node, scope: null as Scope | null }));
+  const stack = document.childNodes.map(node => ({ node, scope: null as Scope | null }));
   while (stack.length) {
     const entry = stack.pop()!;
     const { node } = entry;
@@ -179,6 +197,7 @@ function markedArticleMetadata(html: string, url: string, expectedTitles: string
     if (['aside', 'footer', 'nav', 'template', 'script', 'style'].includes(tag) ||
         attrs.has('hidden') || attrs.get('aria-hidden') === 'true' ||
         metadataExcluded.test([attrs.get('class'), attrs.get('id')].join(' '))) continue;
+    if (tag === 'h1') headings.push(node);
 
     let scope = entry.scope;
     if (articleType.test(attrs.get('itemtype') ?? '') || tag === 'article') {
@@ -226,10 +245,12 @@ function markedArticleMetadata(html: string, url: string, expectedTitles: string
   const ranked = matchedByUrl.length ? matchedByUrl : matchedByTitle.length ? matchedByTitle : scopes;
   const scope = ranked.length === 1 ? ranked[0] : null;
   if (!scope) return {};
+  const explicitHeadline = uniqueValue(scope.fields.explicitHeadline);
   return {
-    explicitHeadline: uniqueValue(scope.fields.explicitHeadline),
+    explicitHeadline,
+    verifiedHeadline: scope.matchesUrl || matchedByTitle.includes(scope) ? explicitHeadline : null,
     author: uniqueValue(scope.fields.author),
-    publishedAt: uniqueValue(scope.fields.publishedAt.filter(value => publisherPublicationDate(value))),
+    ...publicationEvidence(scope.fields.publishedAt),
     structuredImages: scope.images,
   };
 }
@@ -253,6 +274,166 @@ function markedText(element: MarkedElement, preferMarkedName = false): string {
   return value;
 }
 
+const PUBLICATION_LABEL = /^(?:published on|publication date|date published|published)\s*(?::\s*|\s+|$)/i;
+const EXACT_PUBLICATION_LABEL = /^(?:published on|publication date|date published|published)\s*:?$/i;
+const HEADER_CONTAINER = /(?:^|[\s_-])(?:article|post|news|press[-_]release|blog)[-_ ](?:header|hero|heading|title)(?:$|[\s_-])/i;
+const HEADER_TEXT_TAGS = new Set(['div', 'span', 'p', 'time', 'small', 'strong', 'b', 'em']);
+const HEADER_SPACING_CLASS = /(?:^|[\s_-])(?:spacer|spacing|space|gap)(?:$|[\s_-])/i;
+const MAX_HEADER_FIELD_LENGTH = 600;
+const MAX_HEADER_DATE_FIELDS = 3;
+const MAX_HEADER_SPACERS = 2;
+
+function attribute(element: MarkedElement, name: string): string | undefined {
+  return element.attrs.find(attr => attr.name === name)?.value;
+}
+
+function elementChildren(parent: MarkedElement): MarkedElement[] {
+  return parent.childNodes.filter((node): node is MarkedElement => 'tagName' in node);
+}
+
+function emptyHeaderSpacer(element: MarkedElement): boolean {
+  const location = element.sourceCodeLocation;
+  const classes = attribute(element, 'class') ?? '';
+  return (element.tagName === 'div' || element.tagName === 'span') &&
+    Boolean(location?.endTag && location.endOffset - location.startOffset <= MAX_HEADER_FIELD_LENGTH) &&
+    HEADER_SPACING_CLASS.test(classes) && !metadataExcluded.test(classes) && !/(?:^|\s)w-dyn-/i.test(classes) &&
+    element.attrs.every(({ name, value }) => name === 'class' ||
+      name === 'aria-hidden' && value === 'true' || name === 'role' && ['none', 'presentation'].includes(value)) &&
+    element.childNodes.every(node => node.nodeName === '#comment' ||
+      node.nodeName === '#text' && 'value' in node && node.value.trim() === '');
+}
+
+function followingHeaderFields(parent: MarkedElement, heading: MarkedElement): MarkedElement[] {
+  const fields: MarkedElement[] = [];
+  let spacers = 0;
+  // Allow one extra field for a standalone label's adjoining value.
+  for (let index = parent.childNodes.indexOf(heading) + 1; fields.length <= MAX_HEADER_DATE_FIELDS; index++) {
+    const node = parent.childNodes[index];
+    if (!node) break;
+    if (!('tagName' in node)) {
+      if (node.nodeName === '#text' && 'value' in node && node.value.trim()) break;
+      continue;
+    }
+    if (!emptyHeaderSpacer(node)) fields.push(node);
+    else if (++spacers > MAX_HEADER_SPACERS) break;
+  }
+  return fields;
+}
+
+function webflowMarkers(htmlHead: string): boolean {
+  const html = /<html\b[^>]*>/i.exec(htmlHead)?.[0];
+  if (html) {
+    const attrs = metaAttributes(html);
+    if (attrs.get('data-wf-page') && attrs.get('data-wf-site')) return true;
+  }
+  return (htmlHead.match(/<meta\b[^>]*>/gi) ?? []).some(tag => {
+    const attrs = metaAttributes(tag);
+    return attrs.get('name')?.toLowerCase() === 'generator' && /^webflow$/i.test(attrs.get('content') ?? '');
+  });
+}
+
+// Restrict text inspection to short, explicitly closed header fields. Larger
+// containers, rich text, links, and embedded or hidden components cannot be dates.
+function headerFieldText(element: MarkedElement): string | null {
+  const location = element.sourceCodeLocation;
+  if (!location?.endTag || location.endOffset - location.startOffset > MAX_HEADER_FIELD_LENGTH ||
+      !HEADER_TEXT_TAGS.has(element.tagName) || attribute(element, 'hidden') !== undefined ||
+      attribute(element, 'aria-hidden') === 'true' ||
+      metadataExcluded.test(attribute(element, 'class') ?? '') ||
+      elementChildren(element).some(child => headerFieldText(child) === null)) return null;
+  return normaliseMetadataText(markedText(element));
+}
+
+function labelledHeaderDate(element: MarkedElement, next: MarkedElement | undefined):
+  { value: string; consumesNext: boolean } | null {
+  const content = headerFieldText(element);
+  if (content === null) return null;
+  const fields = elementChildren(element);
+  const [labelField, dateField] = fields;
+  if (fields.length === 2 && labelField && dateField &&
+      EXACT_PUBLICATION_LABEL.test(headerFieldText(labelField) ?? '')) {
+    return { value: (dateField.tagName === 'time' ? attribute(dateField, 'datetime') : null) ??
+      headerFieldText(dateField) ?? '', consumesNext: false };
+  }
+  const time = fields.length === 1 && labelField?.tagName === 'time' ? labelField : null;
+  const directText = time ? element.childNodes.flatMap(node => 'value' in node ? [node.value] : []).join(' ') : '';
+  if (time && EXACT_PUBLICATION_LABEL.test(normaliseMetadataText(directText))) {
+    return { value: attribute(time, 'datetime') ?? headerFieldText(time) ?? '', consumesNext: false };
+  }
+  const label = PUBLICATION_LABEL.exec(content);
+  if (!label) return null;
+  const inline = content.slice(label[0].length);
+  if (inline) return publisherPublicationDate(inline) ? { value: inline, consumesNext: false } : null;
+  if (!next) return null;
+  const nextText = headerFieldText(next);
+  if (nextText === null) return null;
+  return { value: (next.tagName === 'time' ? attribute(next, 'datetime') : null) ?? nextText, consumesNext: true };
+}
+
+function webflowArticleHeader(document: DefaultTreeAdapterTypes.Document, heading: MarkedElement | undefined,
+  url: string, head: ArticleHeadMetadata, identity?: ArticleIdentity): NativeMetadata {
+  if (!heading?.sourceCodeLocation?.endTag || !sameArticle(url, url, identity)) return {};
+  const html = document.childNodes.find((node): node is MarkedElement => 'tagName' in node && node.tagName === 'html');
+  const pageHead = html && elementChildren(html).find(node => node.tagName === 'head');
+  const declarations = pageHead ? elementChildren(pageHead) : [];
+  const markers = html && attribute(html, 'data-wf-page') && attribute(html, 'data-wf-site');
+  const generator = declarations.some(node => node.tagName === 'meta' &&
+    attribute(node, 'name')?.toLowerCase() === 'generator' && /^webflow$/i.test(attribute(node, 'content') ?? ''));
+  if (!markers && !generator) return {};
+  const matchingUrls = declarations.flatMap(node => {
+    if (node.tagName === 'link' && attribute(node, 'rel')?.toLowerCase().split(/\s+/).includes('canonical')) {
+      return [attribute(node, 'href')];
+    }
+    if (node.tagName === 'meta' && attribute(node, 'property')?.toLowerCase() === 'og:url') {
+      return [attribute(node, 'content')];
+    }
+    return [];
+  });
+  if (matchingUrls.some(value => !sameArticle(value, url, identity))) return {};
+  const articleType = declarations.some(node => node.tagName === 'meta' &&
+    attribute(node, 'property')?.toLowerCase() === 'og:type' &&
+    attribute(node, 'content')?.toLowerCase().trim() === 'article');
+  const page = new URL(url);
+  // The contract verifies this collection permalink even when OG type is missing.
+  const knownPermalink = ['uk100.org', 'www.uk100.org'].includes(page.hostname) &&
+    /^\/press-releases\/[a-z0-9]+(?:-[a-z0-9]+)*\/?$/.test(page.pathname);
+
+  let headerContext = false;
+  let current = heading;
+  const labelledDates: string[] = [];
+  for (let depth = 0; depth < 4; depth++) {
+    const parent = current.parentNode;
+    if (!parent || !('tagName' in parent) || parent.tagName === 'body' && current !== heading) break;
+    const classes = attribute(parent, 'class') ?? '';
+    if (/(?:^|\s)w-dyn-item(?:\s|$)/i.test(classes)) return {};
+    headerContext ||= parent.tagName === 'header' || HEADER_CONTAINER.test(classes);
+    const position = elementChildren(parent).indexOf(current);
+    // Only contiguous metadata beside the heading or its leading wrapper belongs to this header.
+    if (position === 0 || current === heading) {
+      const fields = followingHeaderFields(parent, current);
+      for (let index = 0; index < MAX_HEADER_DATE_FIELDS && fields[index]; index++) {
+        const date = labelledHeaderDate(fields[index]!, fields[index + 1]);
+        if (!date) break;
+        labelledDates.push(date.value);
+        if (date.consumesNext) index++;
+      }
+    }
+    if (position !== 0 && current !== heading) break;
+    current = parent;
+  }
+  const today = new Date().toISOString();
+  const dates = labelledDates.map(value => publisherPublicationDate(value));
+  const distinct = new Set(dates);
+  const value = dates[0];
+  const publishedAt = value && distinct.size === 1 && value <= today.slice(0, value.length) ? value : null;
+  const primary = Boolean(headerContext || labelledDates.length);
+  const article = articleType || head.verifiedHeadline || matchingUrls.length && publishedAt ||
+    knownPermalink && (matchingUrls.length || labelledDates.length);
+  if (!primary || !article) return {};
+  const explicitHeadline = text(markedText(heading));
+  return { explicitHeadline, verifiedHeadline: explicitHeadline, publishedAt };
+}
+
 export type ArticleHeadMetadata = {
   ogImage: string | null;
   twitterImage: string | null;
@@ -266,6 +447,8 @@ export type ArticleHeadMetadata = {
   author: string | null;
   publishedAt: string | null;
   explicitHeadline?: string | null;
+  verifiedHeadline?: string | null;
+  publishedAtConflict?: boolean;
   structuredImages?: string[];
 };
 
@@ -298,9 +481,17 @@ export function extractArticleHeadMetadata(htmlHead: string, requestUrl?: string
   const byline = [structured.author, title('author'), title('article:author'),
     title('og:article:author'), title('dc.creator'), title('dcterms.creator')]
     .find(value => value && !/^(?:https?:|mailto:|\/\/)/i.test(value));
+  const dateProperties = ['article:published_time', 'og:article:published_time',
+    'dcterms.issued', 'dc.date.issued', 'dc.date.published', 'datepublished'];
+  const publication = structured.publishedAt || structured.publishedAtConflict ? structured
+    : dateProperties.some(name => metadata.has(name) && metadata.get(name) === null)
+      ? { publishedAtConflict: true } : publicationEvidence(dateProperties.map(title));
   return {
     ...(structured.explicitHeadline ? { explicitHeadline: structured.explicitHeadline } : {}),
+    ...(structured.verifiedHeadline && requestUrl && sameArticle(requestUrl, requestUrl, identity)
+      ? { verifiedHeadline: structured.verifiedHeadline } : {}),
     ...(structured.structuredImages?.length ? { structuredImages: structured.structuredImages } : {}),
+    ...(publication.publishedAtConflict ? { publishedAtConflict: true } : {}),
     ogImage: metadata.get('og:image') ?? null,
     twitterImage: metadata.get('twitter:image') ?? null,
     ogTitle: title('og:title'),
@@ -311,9 +502,7 @@ export function extractArticleHeadMetadata(htmlHead: string, requestUrl?: string
     htmlDescription: title('description'),
     publisher: title('og:site_name') ?? structured.publisher ?? null,
     author: byline ?? null,
-    publishedAt: [structured.publishedAt, title('article:published_time'),
-      title('og:article:published_time'), title('dcterms.issued'), title('dc.date.issued'),
-      title('dc.date.published'), title('datepublished')].find(value => publisherPublicationDate(value ?? null)) ?? null,
+    publishedAt: publication.publishedAt ?? null,
   };
 }
 
@@ -344,12 +533,21 @@ export function extractPublisherArticleMetadata(html: string, url: string,
   head ??= extractArticleHeadMetadata(html, url, identity);
   const titles = [head.explicitHeadline, head.ogTitle, head.htmlTitle, expectedTitle]
     .filter((title): title is string => Boolean(title));
-  const marked = markedArticleMetadata(html, url, titles, identity);
+  const webflow = webflowMarkers(html.split(/<\/head\s*>/i, 1)[0] ?? '');
+  const document = parse(html, { sourceCodeLocationInfo: webflow });
+  const headings: MarkedElement[] = [];
+  const marked = markedArticleMetadata(document, url, titles, headings, identity);
+  const visible = webflow && headings.length === 1
+    ? webflowArticleHeader(document, headings[0], url, head, identity) : {};
+  const markedVerified = sameArticle(url, url, identity) ? marked.verifiedHeadline : null;
+  const dateConflict = head.publishedAtConflict || !head.publishedAt && marked.publishedAtConflict;
   return {
     ...head,
-    explicitHeadline: marked.explicitHeadline ?? head.explicitHeadline,
+    explicitHeadline: visible.explicitHeadline ?? marked.explicitHeadline ?? head.explicitHeadline,
+    verifiedHeadline: visible.verifiedHeadline ?? markedVerified ?? head.verifiedHeadline,
     author: head.author ?? marked.author ?? null,
-    publishedAt: head.publishedAt ?? marked.publishedAt ?? null,
+    ...(dateConflict ? { publishedAtConflict: true } : {}),
+    publishedAt: dateConflict ? null : head.publishedAt ?? marked.publishedAt ?? visible.publishedAt ?? null,
     structuredImages: [...(head.structuredImages ?? []), ...(marked.structuredImages ?? [])],
   };
 }
@@ -383,12 +581,13 @@ async function readHtmlHead(response: Response, signal: AbortSignal, url: string
   let bytes = 0;
   let html = '';
   let head: ArticleHeadMetadata | undefined;
+  let webflow = false;
   let earlyPrefixAt = 32 * 1024;
   const identity = { canonicalUrl, source };
   const finish = (head: ArticleHeadMetadata, prefix = '', partialFailure = false) => {
     const metadata = prefix ? extractPublisherArticleMetadata(prefix, url, options?.expectedTitle, head, identity) : head;
     if (prefix && source.source_key === 'families-for-clean-air' &&
-        options?.needDate && options.expectedTitle && !metadata.publishedAt) {
+        options?.needDate && options.expectedTitle && !metadata.publishedAt && !metadata.publishedAtConflict) {
       metadata.publishedAt = extractFamiliesForCleanAirPublishedDate(prefix, options.expectedTitle);
     }
     let visibleImage: string | null = null;
@@ -422,22 +621,28 @@ async function readHtmlHead(response: Response, signal: AbortSignal, url: string
         const body = /<body\b/i.exec(html);
         const headOnly = body ? html.slice(0, body.index) : html;
         if (closingHead && (!body || closingHead.index < body.index)) {
-          head = extractArticleHeadMetadata(html.slice(0, closingHead.index), url, identity);
+          const htmlHead = html.slice(0, closingHead.index);
+          head = extractArticleHeadMetadata(htmlHead, url, identity);
+          webflow = Boolean(options && webflowMarkers(htmlHead));
           if (!options || (!options.needAuthor || head.author) && (!options.needDate || head.publishedAt) &&
-              (!options.needHeadline || head.explicitHeadline) &&
+              (!options.needHeadline || !webflow && head.explicitHeadline) &&
               (!options.needImage || previewImageFromPublisherMetadata(head, url, source))) return finish(head);
         } else {
           const metadata = extractArticleHeadMetadata(headOnly, url, identity);
-          if (hasSufficientEarlyMetadata(metadata) &&
+          webflow = Boolean(options && webflowMarkers(headOnly));
+          if (body && webflow) {
+            // HTML may omit the explicit head end tag before opening the body.
+            head = metadata;
+          } else if (!(webflow && options?.needHeadline) && hasSufficientEarlyMetadata(metadata) &&
               (!options || body || (!options.needAuthor || metadata.author) &&
                 (!options.needHeadline || metadata.explicitHeadline))) return finish(metadata);
-          if (body) {
+          if (body && !head) {
             if (options && hasPartial(metadata)) return finish(metadata);
             throw new ScanError('article_head_incomplete');
           }
         }
       }
-      if (head && options && bytes >= earlyPrefixAt && bytes < MAX_HEAD_BYTES) {
+      if (head && options && !(webflow && options.needHeadline) && bytes >= earlyPrefixAt && bytes < MAX_HEAD_BYTES) {
         earlyPrefixAt = bytes + 64 * 1024;
         const result = finish(head, html);
         if ((!options.needAuthor || result.metadata.author) && (!options.needDate || result.metadata.publishedAt) &&

@@ -173,11 +173,11 @@ export async function enrichPersistedArticle(db: D1Database, articleId: number):
   const rawTitle = row.gdelt_title;
   const matchesPromotion = rawTitle && (normaliseMetadataText(rawTitle) === row.title ||
     normalisePublisherHeadline(rawTitle, metadata.publisher) === row.title);
-  // Configured attribution can clean the TOC title at promotion. Restore the
-  // exact raw headline only if explicit first-party markup proves it genuine.
+  // This flag is set only when the article was first inserted. Use its bounded
+  // enrichment to finish acquisition of a verified first-party headline.
   const title = allowNewTitle
     ? verifiedPublisherHeadline(matchesPromotion ? rawTitle : row.title,
-      metadata.publisher, metadata.explicit_headline) : row.title;
+      metadata.publisher, metadata.explicit_headline, metadata.verified_headline) : row.title;
   const publisher = needsPublisher && metadata.publisher ? metadata.publisher : row.publisher;
   const author = row.author ?? (row.protection_author ? null : metadata.author);
   const publishedAt = row.published_at ?? (row.protection_date ? null : metadata.published_at);

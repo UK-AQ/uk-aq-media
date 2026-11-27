@@ -72,6 +72,12 @@ assert.equal(MetadataApplyBody.safeParse({
 assert.deepEqual(metadataPublishedAtProposal(null, publisherPublishedAt), {
   current: null, proposed: '2026-09-13T13:08:11.000Z',
 });
+const verifiedHeadlineApply = {
+  expected_current_image_url: null, expected_proposed_image_url: null, replace_existing_image: false,
+  verified_headline: { current: 'Current wrapper', proposed: 'Verified original headline' },
+};
+assert.equal(MetadataApplyBody.safeParse(verifiedHeadlineApply).success, false);
+assert.equal(MetadataApplyBody.safeParse({ ...verifiedHeadlineApply, expected_revision: 2 }).success, true);
 assert.equal(metadataPublishedAtProposal('2026-09-12T10:00:00.000Z', publisherPublishedAt), null);
 assert.equal(metadataPublishedAtChange(null, null, publisherPublishedAt,
   publisherPublishedAt, true), true);
